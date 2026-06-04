@@ -1,0 +1,7 @@
+# Blendet den "Sponsor"-Button ein, sobald das Repo auf GitHub liegt.
+# Buy Me a Coffee ist bereits aktiv und funktioniert unabhaengig:
+buy_me_a_coffee: charthorizon
+
+# Nach der GitHub-Sponsors-Freischaltung die naechste Zeile einkommentieren
+# und <username> durch deinen GitHub-Namen ersetzen:
+# github: <username>

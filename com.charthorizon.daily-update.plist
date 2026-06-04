@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  VORLAGE - nicht direkt verwenden.
+  Die tatsaechlich genutzte Datei wird von AUTO_UPDATE_AKTIVIEREN.command
+  automatisch mit dem richtigen Pfad erzeugt und nach
+  ~/Library/LaunchAgents/ gelegt. __CHARTHORIZON_DIR__ steht fuer den Ordner,
+  in dem ChartHorizon liegt.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.charthorizon.daily-update</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__CHARTHORIZON_DIR__/AUTO_UPDATE_CHARTHORIZON.command</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__CHARTHORIZON_DIR__</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__CHARTHORIZON_DIR__/logs/auto_update.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__CHARTHORIZON_DIR__/logs/auto_update_error.log</string>
+</dict>
+</plist>

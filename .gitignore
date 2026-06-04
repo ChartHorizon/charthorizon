@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Generierte/gecachte Marktdaten + lokales SQLite-Archiv (taeglich neu)
+app/ff_data/
+
+# Laufzeit-Logs (Auto-Update-Job)
+logs/
