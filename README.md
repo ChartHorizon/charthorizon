@@ -1,9 +1,30 @@
-# ChartHorizon lokal starten
+<p align="center">
+  <img src="brand/charthorizon_logo.png" alt="ChartHorizon" width="420">
+</p>
+
+<p align="center">
+  <b>Local-first commodity futures dashboard</b> — COT (commercials/hedgers), seasonals, screener &amp; FX strength.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
+</p>
+
+---
+
+## Was ist ChartHorizon?
+
+ChartHorizon ist ein **local-first** Dashboard fuer Rohstoff-Futures: Es zieht Marktdaten
+ueber freie APIs, speichert sie lokal und rendert sie im Browser — ohne Cloud, Login oder
+Tracking. Mit dabei: Futures-Charts, COT-Positionierung (Commercials/Hedger),
+Saisonalitaet, ein Signal-Screener und eine FX-Staerke-Heatmap.
+
+> ⚠️ Nur zu Informationszwecken — **keine Anlageberatung.**
+
+## Starten
 
 Du brauchst keine Coding-Erfahrung. Fuer den normalen Start klickst du nur eine
 Datei doppelt an.
-
-## Starten
 
 ### Mac
 
@@ -137,6 +158,7 @@ Chart Horizon/
   AUTO_UPDATE_CHARTHORIZON.command <- Mac: wird vom Auto-Update aufgerufen
   com.charthorizon.daily-update.plist <- Vorlage fuer macOS LaunchAgent
   README.md                        <- diese Anleitung
+  LICENSE                          <- GNU AGPL-3.0
   logs/                            <- automatische Update-Logs
   app/                             <- technische Dateien
     start.py
@@ -163,3 +185,16 @@ Auf dem Mac ist Python oft schon vorhanden. Falls nicht, installiere Python von:
 https://www.python.org/downloads/
 
 Danach wieder `START_CHARTHORIZON.command` doppelklicken.
+
+## Datenquellen & Rechtliches
+
+- **Preisdaten, Charts und Saisonalitaet** kommen ueber [yfinance](https://github.com/ranaroussi/yfinance) (Yahoo Finance) und sind fuer die **persoenliche Nutzung** gedacht. ChartHorizon ist *local-first*: Jede Installation laedt die Daten selbst auf den eigenen Rechner — es werden **keine** Preisdaten weiterverbreitet.
+- **COT und Open Interest** stammen von der **CFTC** (US-Behoerde) und sind gemeinfrei (public domain).
+- Die Forex-Ansicht bettet zum Anschauen das **TradingView**-Widget ein.
+- Alle Inhalte dienen **nur zu Informationszwecken** und sind **keine Anlageberatung**.
+
+### Lizenz
+
+ChartHorizon steht unter der **GNU AGPL-3.0** (siehe [`LICENSE`](LICENSE)): nutzen,
+studieren, anpassen und weitergeben ist erlaubt; wer es als Netzwerk-Dienst betreibt,
+muss seine Aenderungen offenlegen.
