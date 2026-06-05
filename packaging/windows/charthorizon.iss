@@ -6,14 +6,14 @@ AppVersion=1.0.0
 DefaultDirName={localappdata}\ChartHorizon
 DefaultGroupName=ChartHorizon
 PrivilegesRequired=lowest
-OutputDir=dist
+OutputDir=..\..\dist
 OutputBaseFilename=ChartHorizon-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
 DisableProgramGroupPage=yes
 
 [Files]
-Source: "dist\ChartHorizon\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+Source: "..\..\dist\ChartHorizon\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\ChartHorizon"; Filename: "{app}\ChartHorizon.exe"
