@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  VORLAGE - nicht direkt verwenden.
-  Die tatsaechlich genutzte Datei wird von AUTO_UPDATE_AKTIVIEREN.command
-  automatisch mit dem richtigen Pfad erzeugt und nach
-  ~/Library/LaunchAgents/ gelegt. __CHARTHORIZON_DIR__ steht fuer den Ordner,
-  in dem ChartHorizon liegt.
+  TEMPLATE - do not use directly.
+  The file that is actually used is generated automatically by
+  AUTO_UPDATE_ENABLE.command with the correct path and placed in
+  ~/Library/LaunchAgents/. __CHARTHORIZON_DIR__ stands for the folder
+  where ChartHorizon lives.
 -->
 <plist version="1.0">
 <dict>

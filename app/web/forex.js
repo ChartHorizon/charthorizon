@@ -889,6 +889,10 @@ async function openFxPairChart(baseKey, quoteKey, baseCur, quoteCur, interval = 
       style: '1',
       locale: 'en',
       toolbar_bg: CHART_THEME.bg,
+      // Hintergrund auf die Futures-Chart-Farbe ziehen (sonst nutzt das Dark-Theme-Widget
+      // TradingViews Fast-Schwarz #131722 statt unserem --chart-bg #131c27). Grid bleibt
+      // bewusst der TradingView-Default (siehe fxTradingViewOverrides).
+      backgroundColor: CHART_THEME.bg,
       enable_publishing: false,
       hide_side_toolbar: false,
       allow_symbol_change: false,

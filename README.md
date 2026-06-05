@@ -12,155 +12,146 @@
 
 ---
 
-## Was ist ChartHorizon?
+## What is ChartHorizon?
 
-ChartHorizon ist ein **local-first** Dashboard fuer Rohstoff-Futures: Es zieht Marktdaten
-ueber freie APIs, speichert sie lokal und rendert sie im Browser — ohne Cloud, Login oder
-Tracking. Mit dabei: Futures-Charts, COT-Positionierung (Commercials/Hedger),
-Saisonalitaet, ein Signal-Screener und eine FX-Staerke-Heatmap.
+ChartHorizon is a **local-first** dashboard for commodity futures: it pulls market data
+from free APIs, stores it locally, and renders it in your browser — no cloud, no login, no
+tracking. It includes futures charts, COT positioning (commercials/hedgers), seasonality,
+a signal screener, and an FX strength heatmap.
 
-> ⚠️ Nur zu Informationszwecken — **keine Anlageberatung.**
+> ⚠️ For informational purposes only — **not financial advice.**
 
-## Starten
+## Getting started
 
-Du brauchst keine Coding-Erfahrung. Fuer den normalen Start klickst du nur eine
-Datei doppelt an.
+You don't need any coding experience. For a normal launch you just double-click one file.
 
 ### Mac
 
-Doppelklick auf:
+Double-click:
 
 `START_CHARTHORIZON.command`
 
-Falls macOS beim ersten Mal blockiert:
+If macOS blocks it the first time:
 
-1. Rechtsklick auf `START_CHARTHORIZON.command`
-2. `Oeffnen` waehlen
-3. Nochmal `Oeffnen` bestaetigen
+1. Right-click `START_CHARTHORIZON.command`
+2. Choose `Open`
+3. Confirm `Open` again
 
 ### Windows
 
-Doppelklick auf:
+Double-click:
 
 `START_CHARTHORIZON_WINDOWS.bat`
 
-## Daten aktualisieren
+## Updating data
 
-Wenn du neue Marktdaten laden moechtest:
+When you want to load fresh market data:
 
 Mac:
 
-`DATEN_AKTUALISIEREN.command`
+`UPDATE_DATA.command`
 
 Windows:
 
-`DATEN_AKTUALISIEREN_WINDOWS.bat`
+`UPDATE_DATA_WINDOWS.bat`
 
-Die Aktualisierung prueft zuerst, ob die erwarteten yfinance-EOD-Daten bereits
-lokal gespeichert sind. ChartHorizon erwartet neue yfinance-Tagesdaten ab ca.
-`17:30 ET` (wegen Verzoegerung nach US-Futures-Boersenschluss). Wenn der lokale
-Stand schon aktuell ist, wird kein neuer API-Download gestartet.
+The update first checks whether the expected yfinance EOD data is already stored
+locally. ChartHorizon expects new yfinance daily data from roughly `17:30 ET`
+(because of the delay after the US futures close). If your local data is already
+current, no new API download is started.
 
-CFTC fuer Open Interest/COT wird nur im passenden Wochenfenster nach der
-offiziellen COT-Veroeffentlichung neu abgefragt.
+CFTC Open Interest/COT is only re-fetched in the matching weekly window after the
+official COT release.
 
-## Automatische Aktualisierung (nur Mac)
+## Automatic updates (Mac only)
 
-ChartHorizon kann die EOD-Daten automatisch einmal taeglich im Hintergrund
-aktualisieren.
+ChartHorizon can update the EOD data automatically once a day in the background.
 
-Einschalten:
+Enable:
 
-`AUTO_UPDATE_AKTIVIEREN.command`
+`AUTO_UPDATE_ENABLE.command`
 
-Danach laeuft die Aktualisierung jeden Tag um:
+After that the update runs every day at:
 
-`23:30 Uhr` (Ortszeit dieses Macs)
+`23:30` (this Mac's local time)
 
-Das ist fuer normale yfinance-EOD-Daten gedacht und entspricht ungefaehr
-`17:30 ET`. Pro EOD-Zieltag laedt ChartHorizon maximal einmal neu; danach werden
-die lokal gespeicherten JSON-/SQLite-Daten verwendet. CFTC-COT/Open-Interest-
-Daten werden intern trotzdem nur einmal pro Woche aktualisiert: nach dem
-CFTC-Release um 15:30 ET, mit einem kleinen Sicherheitsfenster. Wenn ein
-US-Feiertag die CFTC-Veroeffentlichung verschiebt, wartet ChartHorizon auf den
-naechsten bekannten Release-Termin.
+This targets normal yfinance EOD data and lines up roughly with `17:30 ET`. Per EOD
+target day ChartHorizon downloads at most once; after that it uses the locally
+stored JSON/SQLite data. CFTC COT/Open Interest data is still only refreshed once a
+week internally: after the CFTC release at 15:30 ET, with a small safety window. If
+a US holiday delays the CFTC release, ChartHorizon waits for the next known release
+date.
 
-Das Aktivieren-Skript merkt sich automatisch, wo der ChartHorizon-Ordner liegt.
-Wenn du den Ordner spaeter verschiebst, einfach `AUTO_UPDATE_AKTIVIEREN.command`
-noch einmal doppelklicken.
+The enable script automatically remembers where the ChartHorizon folder is. If you
+move the folder later, just double-click `AUTO_UPDATE_ENABLE.command` again.
 
-Der automatische Job erzeugt nur neue Daten und startet keinen Browser.
-Die Seite nutzt danach beim naechsten Neuladen die aktualisierten Daten. Wenn
-der Mac um 23:30 ausgeschaltet ist, holt macOS den Lauf beim naechsten
-Einschalten nach.
+The automatic job only generates new data and does not open a browser. The page then
+uses the updated data the next time it reloads. If the Mac is switched off at 23:30,
+macOS catches the run up the next time it is switched on.
 
-Logs findest du hier:
+You can find the logs here:
 
 `logs/auto_update.log`
 
-Wieder ausschalten:
+To disable again:
 
-`AUTO_UPDATE_DEAKTIVIEREN.command`
+`AUTO_UPDATE_DISABLE.command`
 
-Hinweis fuer Windows: Hier gibt es noch keine automatische Aktualisierung.
-Unter Windows die Daten bei Bedarf manuell ueber
-`DATEN_AKTUALISIEREN_WINDOWS.bat` neu laden.
+Note for Windows: there is no automatic update here yet. On Windows, reload the data
+manually via `UPDATE_DATA_WINDOWS.bat` when needed.
 
-## Im Dashboard
+## In the dashboard
 
-Der Hauptchart startet immer als Continuous Contract.
+The main chart always starts as a continuous contract.
 
-Wenn du in der Terminkurve eine Kontrakt-Zeile anklickst, wechselt der
-Hauptchart auf genau diesen Einzelkontrakt. Oben im Chart erscheint dann neben
-`Continuous` ein Button mit dem Kontraktsymbol, zum Beispiel `CLN26`.
+When you click a contract row in the term structure, the main chart switches to that
+exact single contract. A button with the contract symbol — for example `CLN26` —
+then appears next to `Continuous` at the top of the chart.
 
-Mit `Continuous` wechselst du wieder zurueck zum Continuous Contract.
+Use `Continuous` to switch back to the continuous contract.
 
-## Was passiert beim Start?
+## What happens on launch?
 
-Das normale Startfenster startet schnell mit den vorhandenen Dashboard-Dateien.
-Wenn noch keine Dateien vorhanden sind, werden sie automatisch erzeugt.
+The normal launch window starts quickly with the existing dashboard files. If no
+files exist yet, they are generated automatically.
 
-Die Aktualisieren-Datei erledigt automatisch alles:
+The update file handles everything automatically:
 
-1. Es prueft, ob die benoetigten Python-Pakete vorhanden sind.
-2. Es installiert fehlende Pakete wie `yfinance`, `pypdf` und `curl_cffi`
-   automatisch.
-3. Es laedt aktuelle Futures-, COT- und Open-Interest-Daten.
-4. Es erzeugt das Dashboard neu.
-5. Es startet einen lokalen Webserver.
-6. Es oeffnet die Seite im Browser.
+1. It checks whether the required Python packages are present.
+2. It automatically installs missing packages such as `yfinance`, `pypdf` and
+   `curl_cffi`.
+3. It loads current futures, COT and Open Interest data.
+4. It regenerates the dashboard.
+5. It starts a local web server.
+6. It opens the page in your browser.
 
-Wenn die erwarteten yfinance-EOD-Daten bereits lokal vorhanden sind, werden die
-Schritte 3 und 4 uebersprungen, damit der Start schneller bleibt.
+If the expected yfinance EOD data is already present locally, steps 3 and 4 are
+skipped to keep the launch fast.
 
-Der erste Start kann ein paar Minuten dauern, weil viele Marktdaten geladen
-werden.
+The first launch can take a few minutes because a lot of market data is loaded.
 
-## Beenden
+## Quitting
 
-Das Terminal-/Konsolenfenster offen lassen, solange du das Dashboard nutzen
-moechtest.
+Leave the terminal/console window open for as long as you want to use the dashboard.
 
-Zum Beenden im Fenster `Ctrl + C` druecken. Auf deutschen Tastaturen ist das
-meist `Strg + C`.
+To quit, press `Ctrl + C` in the window.
 
-## Ordnerstruktur
+## Folder structure
 
 ```text
 Chart Horizon/
-  START_CHARTHORIZON.command       <- Mac: hier doppelklicken
-  START_CHARTHORIZON_WINDOWS.bat   <- Windows: hier doppelklicken
-  DATEN_AKTUALISIEREN.command      <- Mac: Daten neu laden
-  DATEN_AKTUALISIEREN_WINDOWS.bat
-  AUTO_UPDATE_AKTIVIEREN.command   <- Mac: taegliches Update einschalten
-  AUTO_UPDATE_DEAKTIVIEREN.command <- Mac: taegliches Update ausschalten
-  AUTO_UPDATE_CHARTHORIZON.command <- Mac: wird vom Auto-Update aufgerufen
-  com.charthorizon.daily-update.plist <- Vorlage fuer macOS LaunchAgent
-  README.md                        <- diese Anleitung
+  START_CHARTHORIZON.command       <- Mac: double-click this
+  START_CHARTHORIZON_WINDOWS.bat   <- Windows: double-click this
+  UPDATE_DATA.command              <- Mac: reload data
+  UPDATE_DATA_WINDOWS.bat
+  AUTO_UPDATE_ENABLE.command       <- Mac: turn on the daily update
+  AUTO_UPDATE_DISABLE.command      <- Mac: turn off the daily update
+  AUTO_UPDATE_CHARTHORIZON.command <- Mac: called by the auto-update
+  com.charthorizon.daily-update.plist <- template for the macOS LaunchAgent
+  README.md                        <- this guide
   LICENSE                          <- GNU AGPL-3.0
-  logs/                            <- automatische Update-Logs
-  app/                             <- technische Dateien
+  logs/                            <- automatic update logs
+  app/                             <- technical files
     start.py
     commodity_dashboard.py
     index.html
@@ -168,33 +159,33 @@ Chart Horizon/
     ff_data/
 ```
 
-Den Ordner `app` musst du normalerweise nicht anfassen.
+You normally don't need to touch the `app` folder.
 
-## Wichtig
+## Important
 
-Bitte nicht nur `index.html` per Doppelklick oeffnen. Die Seite
-braucht den lokalen Webserver, weil die Daten aus `ff_data/` nachgeladen werden.
-Darum immer ueber die Startdatei starten.
+Please don't just open `index.html` by double-clicking it. The page needs the local
+web server because the data is loaded from `ff_data/`. So always start it via the
+launch file.
 
-## Voraussetzung
+## Requirement
 
-Es muss Python 3 installiert sein.
+Python 3 must be installed.
 
-Auf dem Mac ist Python oft schon vorhanden. Falls nicht, installiere Python von:
+On Mac, Python is often already present. If not, install Python from:
 
 https://www.python.org/downloads/
 
-Danach wieder `START_CHARTHORIZON.command` doppelklicken.
+Then double-click `START_CHARTHORIZON.command` again.
 
-## Datenquellen & Rechtliches
+## Data sources & legal
 
-- **Preisdaten, Charts und Saisonalitaet** kommen ueber [yfinance](https://github.com/ranaroussi/yfinance) (Yahoo Finance) und sind fuer die **persoenliche Nutzung** gedacht. ChartHorizon ist *local-first*: Jede Installation laedt die Daten selbst auf den eigenen Rechner — es werden **keine** Preisdaten weiterverbreitet.
-- **COT und Open Interest** stammen von der **CFTC** (US-Behoerde) und sind gemeinfrei (public domain).
-- Die Forex-Ansicht bettet zum Anschauen das **TradingView**-Widget ein.
-- Alle Inhalte dienen **nur zu Informationszwecken** und sind **keine Anlageberatung**.
+- **Price data, charts and seasonality** come via [yfinance](https://github.com/ranaroussi/yfinance) (Yahoo Finance) and are intended for **personal use**. ChartHorizon is *local-first*: every installation loads the data itself onto its own machine — **no** price data is redistributed.
+- **COT and Open Interest** come from the **CFTC** (US agency) and are public domain.
+- The Forex view embeds the **TradingView** widget for viewing.
+- All content is **for informational purposes only** and is **not financial advice**.
 
-### Lizenz
+### License
 
-ChartHorizon steht unter der **GNU AGPL-3.0** (siehe [`LICENSE`](LICENSE)): nutzen,
-studieren, anpassen und weitergeben ist erlaubt; wer es als Netzwerk-Dienst betreibt,
-muss seine Aenderungen offenlegen.
+ChartHorizon is licensed under the **GNU AGPL-3.0** (see [`LICENSE`](LICENSE)): you may
+use, study, adapt and redistribute it; anyone who runs it as a network service must
+disclose their changes.

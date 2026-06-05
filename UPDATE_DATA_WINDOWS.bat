@@ -2,8 +2,8 @@
 cd /d "%~dp0app"
 cls
 
-echo ChartHorizon Daten werden aktualisiert...
-echo Das kann ein paar Minuten dauern.
+echo ChartHorizon is updating its data...
+echo This may take a few minutes.
 echo.
 
 where py >nul 2>nul
@@ -14,5 +14,5 @@ if %errorlevel%==0 (
 )
 
 echo.
-echo Dieses Fenster kann jetzt geschlossen werden.
+echo You can close this window now.
 pause

@@ -1,8 +1,8 @@
 #!/bin/zsh
 
-# Aktiviert die taegliche automatische EOD-Aktualisierung (macOS LaunchAgent).
-# Der Pfad wird automatisch aus dem aktuellen Ordner ermittelt – egal, wohin
-# du den ChartHorizon-Ordner verschiebst.
+# Enables the daily automatic EOD update (macOS LaunchAgent).
+# The path is detected automatically from the current folder — no matter
+# where you move the ChartHorizon folder.
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LABEL="com.charthorizon.daily-update"
@@ -13,10 +13,10 @@ mkdir -p "$HOME/Library/LaunchAgents"
 chmod +x "$ROOT_DIR/AUTO_UPDATE_CHARTHORIZON.command" 2>/dev/null
 
 echo "============================================================"
-echo "ChartHorizon Auto Update wird aktiviert"
+echo "Enabling ChartHorizon Auto Update"
 echo "============================================================"
-echo "Ordner: $ROOT_DIR"
-echo "Zeit:   taeglich 23:30 Uhr (Ortszeit dieses Macs)"
+echo "Folder: $ROOT_DIR"
+echo "Time:   daily at 23:30 (this Mac's local time)"
 echo
 
 cat > "$PLIST_DST" <<PLIST
@@ -54,22 +54,22 @@ cat > "$PLIST_DST" <<PLIST
 </plist>
 PLIST
 
-# Falls schon geladen: erst entladen, dann frisch laden.
+# If already loaded: unload first, then load fresh.
 launchctl unload "$PLIST_DST" 2>/dev/null
 launchctl load -w "$PLIST_DST"
 
 echo
 if launchctl list | grep -q "$LABEL"; then
-  echo "Aktiviert. Die Aktualisierung laeuft jetzt taeglich um 23:30 Uhr."
-  echo "Wenn der Mac um 23:30 aus ist, holt macOS den Lauf beim naechsten"
-  echo "Einschalten nach."
+  echo "Enabled. The update now runs daily at 23:30."
+  echo "If the Mac is off at 23:30, macOS catches the run up the next"
+  echo "time it is switched on."
 else
-  echo "Konnte den Status nicht sicher bestaetigen."
-  echo "Pruefe ggf. unter Systemeinstellungen > Allgemein > Anmeldeobjekte."
+  echo "Could not reliably confirm the status."
+  echo "Check System Settings > General > Login Items if needed."
 fi
 echo
 echo "Logs:    $ROOT_DIR/logs/auto_update.log"
-echo "Beenden: AUTO_UPDATE_DEAKTIVIEREN.command"
+echo "Disable: AUTO_UPDATE_DISABLE.command"
 echo
-echo "Dieses Fenster kann jetzt geschlossen werden."
-read -r "?Enter druecken zum Schliessen..."
+echo "You can close this window now."
+read -r "?Press Enter to close..."

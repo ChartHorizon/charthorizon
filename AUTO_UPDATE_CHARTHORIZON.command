@@ -17,9 +17,9 @@ status=$?
 
 echo
 if [ $status -eq 0 ]; then
-  echo "Fertig: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "Done: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 else
-  echo "Fehler: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "Error: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 fi
 
 

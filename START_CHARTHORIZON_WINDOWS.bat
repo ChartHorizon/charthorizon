@@ -2,7 +2,7 @@
 cd /d "%~dp0app"
 cls
 
-echo ChartHorizon wird gestartet...
+echo Starting ChartHorizon...
 echo.
 
 where py >nul 2>nul
@@ -13,5 +13,5 @@ if %errorlevel%==0 (
 )
 
 echo.
-echo Dieses Fenster kann jetzt geschlossen werden.
+echo You can close this window now.
 pause

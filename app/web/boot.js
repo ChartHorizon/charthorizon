@@ -20,14 +20,23 @@ if (_cardKey === 'fx') {
   openFxPairCard(_p[1], _p[2]);
 } else if (_cardKey && INDEX[_cardKey]) {
   document.body.classList.add('card-mode');
-  chartState.cotHedging = true;
+  const _q = new URLSearchParams(location.search);
+  // hedge=0 -> COT-Pane OHNE Hedging-Program-Overlay; band=0 -> KEIN 4/4-Band/Marker/
+  // Runway-Footer (z.B. COT-Extrem-Posts: nur Chart + rohes COT-Net + Risk-Disclaimer).
+  // Ohne Flags bleibt beides AN (4/4-Posts, unveraendert).
+  chartState.cotHedging = _q.get('hedge') !== '0';
   chartState.showSpread = true;
-  // 4/4-Log laden (vom Bot erzeugt), DANN den Chart rendern, damit die Marker da sind.
-  fetch(`${DATA_DIR}/four_four_log.json?v=${DATA_VERSION}`, { cache: 'no-store' })
-    .then(r => (r.ok ? r.json() : {}))
-    .then(log => { window.__fourFourLog = log; })
-    .catch(() => {})
-    .finally(() => switchCommodity(_cardKey));
+  if (_q.get('band') === '0') {
+    window.__fourFourLog = {};                 // Log gar nicht laden -> kein Band/Marker/Runway
+    switchCommodity(_cardKey);
+  } else {
+    // 4/4-Log laden (vom Bot erzeugt), DANN den Chart rendern, damit die Marker da sind.
+    fetch(`${DATA_DIR}/four_four_log.json?v=${DATA_VERSION}`, { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : {}))
+      .then(log => { window.__fourFourLog = log; })
+      .catch(() => {})
+      .finally(() => switchCommodity(_cardKey));
+  }
 } else {
   switchCommodity(currentKey);
   // Reopen whichever top tab was active before the last reload.

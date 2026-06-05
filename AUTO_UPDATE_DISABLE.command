@@ -3,12 +3,12 @@
 PLIST_SRC="$(cd "$(dirname "$0")" && pwd)/com.charthorizon.daily-update.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.charthorizon.daily-update.plist"
 
-echo "ChartHorizon Auto Update wird deaktiviert..."
+echo "Disabling ChartHorizon Auto Update..."
 
 launchctl unload "$PLIST_DST" 2>/dev/null
 rm -f "$PLIST_DST"
 
 echo
-echo "Deaktiviert."
-echo "Dieses Fenster kann jetzt geschlossen werden."
-read -r "?Enter druecken zum Schliessen..."
+echo "Disabled."
+echo "You can close this window now."
+read -r "?Press Enter to close..."
