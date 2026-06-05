@@ -21,6 +21,20 @@ a signal screener, and an FX strength heatmap.
 
 > ⚠️ For informational purposes only — **not financial advice.**
 
+## Installation
+
+Download for your OS from the [latest release](https://github.com/ChartHorizon/charthorizon/releases/latest):
+**macOS** (`.dmg`), **Windows** (`.exe`), **Linux** (`.AppImage`). No Python needed — it's bundled.
+
+> **First launch (unsigned build):** the apps are not code-signed yet, so your OS shows a one-time warning.
+> - **macOS:** right-click the app → **Open** → **Open** (or System Settings → Privacy & Security → **Open Anyway**).
+> - **Windows:** "Windows protected your PC" → **More info** → **Run anyway**.
+> - **Linux:** `chmod +x ChartHorizon-x86_64.AppImage` then run it.
+>
+> The first launch fetches market data (1–2 minutes) before the dashboard appears.
+>
+> *Auto-update (daily refresh) currently applies to the source install only; the bundled app refreshes on launch. Bundled-app auto-update is out of scope for v1.*
+
 ## Getting started
 
 You don't need any coding experience. For a normal launch you just double-click one file.

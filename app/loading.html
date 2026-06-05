@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChartHorizon — preparing…</title>
+<style>
+  body{margin:0;height:100vh;display:grid;place-items:center;background:#0e1822;color:#f5f7fa;
+       font-family:Georgia,serif;text-align:center}
+  .s{font-size:30px;letter-spacing:-.02em} .p{margin-top:14px;color:#95a3b5;font-family:system-ui,sans-serif;font-size:14px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f97316;margin:0 3px;animation:b 1.2s infinite}
+  .dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
+  @keyframes b{0%,80%,100%{opacity:.25}40%{opacity:1}}
+</style>
+</head>
+<body>
+  <div>
+    <div class="s">Preparing your first dashboard…</div>
+    <div class="p">Fetching market data — this takes 1–2 minutes on first launch.<br>
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+  </div>
+  <script>
+    setInterval(function(){
+      fetch('ff_data/config.js', {cache:'no-store'}).then(function(r){ if(r.ok) location.href='index.html'; }).catch(function(){});
+    }, 4000);
+  </script>
+</body>
+</html>

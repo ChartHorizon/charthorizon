@@ -44,6 +44,32 @@ REQUIRED = ["yfinance", "python-dateutil", "pypdf", "curl_cffi"]
 REFRESH_STATE_FILE = os.path.join("ff_data", "refresh_state.json")
 YFINANCE_EOD_READY_ET = time(17, 30)
 
+FROZEN = getattr(sys, "frozen", False)
+
+def app_dir():
+    """Folder holding the static frontend (index.html, web/) + bundled Python modules.
+    Frozen (PyInstaller): the unpacked bundle. Dev: this script's directory."""
+    if FROZEN:
+        return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+    return os.path.dirname(os.path.abspath(__file__))
+
+def data_root():
+    """Writable root that holds ff_data/. Frozen: per-user OS data dir. Dev: app_dir()."""
+    if not FROZEN:
+        return app_dir()
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support", "ChartHorizon")
+    elif sys.platform.startswith("win"):
+        base = os.path.join(os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local")), "ChartHorizon")
+    else:
+        base = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share")), "charthorizon")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+APP_DIR = app_dir()
+DATA_ROOT = data_root()
+
 
 def info(msg):  print(f"  {msg}")
 def step(msg):  print(f"\n▶ {msg}")
@@ -61,6 +87,9 @@ def check_python():
 def ensure_packages():
     """Installiert fehlende Pakete automatisch via pip."""
     step("Prüfe benötigte Pakete…")
+    if FROZEN:
+        ok("Pakete im Bundle enthalten")
+        return
     import importlib.util
 
     # Importname kann vom Paketnamen abweichen
@@ -207,18 +236,20 @@ def write_refresh_state(status):
 
 
 def generate_dashboard():
-    """Ruft den Generator auf, um HTML + ff_data/ zu erzeugen."""
+    """Erzeugt ff_data/ neu. Dev: ruft commodity_dashboard.py als Subprozess.
+    Frozen: re-exec't das gebündelte Binary mit --run-generator (gleiche Prozess-Isolation,
+    aber ohne System-Python)."""
     step("Generiere Dashboard (Daten werden geladen – das kann 1–2 Min dauern)…")
-    if not os.path.exists(GENERATOR):
+    cmd = [sys.executable, "--run-generator"] if FROZEN else [sys.executable, GENERATOR]
+    if not FROZEN and not os.path.exists(GENERATOR):
         print(f"\n✗ {GENERATOR} nicht gefunden!")
-        print("  Lege start.py in denselben Ordner wie commodity_dashboard.py.")
         sys.exit(1)
     try:
-        subprocess.check_call([sys.executable, GENERATOR])
+        subprocess.check_call(cmd, cwd=DATA_ROOT)
     except subprocess.CalledProcessError:
         print("\n✗ Fehler beim Generieren des Dashboards.")
         sys.exit(1)
-    if not os.path.exists(os.path.join("ff_data", "config.js")):
+    if not os.path.exists(os.path.join(DATA_ROOT, "ff_data", "config.js")):
         print("\n✗ ff_data/config.js wurde nicht erstellt.")
         sys.exit(1)
     ok("Dashboard erstellt")
@@ -332,6 +363,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         return
 
+    def translate_path(self, path):
+        # Default roots the path at cwd (== DATA_ROOT). In dev APP_DIR == DATA_ROOT, so
+        # this is a no-op. Frozen: keep ff_data/* in the writable DATA_ROOT, but serve the
+        # static frontend (index.html, web/, loading.html) from the read-only bundle.
+        full = super().translate_path(path)
+        if APP_DIR == DATA_ROOT:
+            return full
+        rel = os.path.relpath(full, DATA_ROOT)
+        top = rel.split(os.sep, 1)[0]
+        if top == "ff_data":
+            return full
+        return os.path.join(APP_DIR, rel)
+
     def end_headers(self):
         # Local dev server: force revalidation of static assets (HTML/JS/CSS) so an
         # edited frontend file shows up on a normal reload instead of being served
@@ -405,23 +449,44 @@ def serve(open_browser=True):
         httpd.shutdown()
 
 
+def _first_run_generate():
+    """Generate ff_data/ in the background on first launch (frozen), then the splash's
+    poll loop redirects to the dashboard."""
+    try:
+        generate_dashboard()
+        write_refresh_state("refreshed")
+    except SystemExit:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--no-serve", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--run-generator", action="store_true")
     args = parser.parse_args()
 
     print("═" * 60)
     print("  CHARTHORIZON – LOKALER START")
     print("═" * 60)
-    # ins Skriptverzeichnis wechseln, damit relative Pfade stimmen
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    # Dev: cwd = script dir (ff_data lives beside the code, unchanged).
+    # Frozen: cwd = writable data root, so the generator + server read/write ff_data
+    # there instead of inside the read-only bundle.
+    os.chdir(DATA_ROOT)
+
+    if args.run_generator:
+        # Re-exec entry point for the frozen build: behaves like running
+        # commodity_dashboard.py as __main__ (cwd is already DATA_ROOT).
+        import commodity_dashboard as cd
+        data = cd.gather_commodity_data(count=6)
+        cd.generate_html(data)
+        return
 
     check_python()
     ensure_packages()
-    if args.refresh or not dashboard_exists():
+    if (args.refresh or not dashboard_exists()) and not (FROZEN and not dashboard_exists() and not args.refresh):
         if args.refresh and dashboard_exists() and not args.force_refresh:
             status = eod_refresh_status()
             if status["is_current"]:
@@ -453,6 +518,14 @@ def main():
         step("Datenmodus abgeschlossen")
         ok("Webserver wurde nicht gestartet")
         return
+
+    # Frozen first launch with no data yet: open the splash and fetch in the background,
+    # so a double-clicked app shows progress instead of a dead window. (Dev keeps the
+    # original blocking behaviour — data already generated above.)
+    if FROZEN and not dashboard_exists():
+        global HTML_FILE
+        HTML_FILE = "loading.html"
+        threading.Thread(target=_first_run_generate, daemon=True).start()
     serve(open_browser=not args.no_browser)
 
 

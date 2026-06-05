@@ -1,0 +1,88 @@
+name: Build installers
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install yfinance python-dateutil pypdf curl_cffi
+      - name: Build app
+        run: python -m PyInstaller packaging/charthorizon.spec --noconfirm
+      - name: Make dmg
+        run: bash packaging/macos/make_dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartHorizon-macOS
+          path: dist/ChartHorizon-macOS.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install yfinance python-dateutil pypdf curl_cffi
+      - name: Build app
+        run: python -m PyInstaller packaging/charthorizon.spec --noconfirm
+      - name: Build installer (Inno Setup)
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\charthorizon.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartHorizon-Windows
+          path: dist/ChartHorizon-Windows-Setup.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install deps + appimagetool
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install yfinance python-dateutil pypdf curl_cffi
+          sudo wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage -O /usr/local/bin/appimagetool
+          sudo chmod +x /usr/local/bin/appimagetool
+      - name: Build app
+        run: python -m PyInstaller packaging/charthorizon.spec --noconfirm
+      - name: Build AppImage
+        run: bash packaging/linux/build_appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartHorizon-Linux
+          path: dist/ChartHorizon-x86_64.AppImage
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Show assets
+        run: find artifacts -type f
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/ChartHorizon-macOS/ChartHorizon-macOS.dmg
+            artifacts/ChartHorizon-Windows/ChartHorizon-Windows-Setup.exe
+            artifacts/ChartHorizon-Linux/ChartHorizon-x86_64.AppImage
+          fail_on_unmatched_files: true
