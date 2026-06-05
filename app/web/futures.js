@@ -47,6 +47,10 @@ async function selectCurveContract(index, fallbackToContinuous = false) {
   chartState.chartMode = 'contract';
   chartState.contractSymbol = contract.yf_symbol;
   chartState.contractLabel = contract.contract_symbol || contract.delivery_month_label || contract.label || contract.yf_symbol;
+  // 5Y is a continuous-only range (a single contract spans only months); if it's
+  // active when a contract is selected, drop to 12M so the header doesn't claim
+  // "5 Years" over a few months of bars.
+  if (chartState.range === '5y') chartState.range = '12m';
   renderTable(cfg);
 
   if (!(contract.chart_history || []).length) {
@@ -175,5 +179,71 @@ async function switchCommodity(key) {
     loadChart(cfg);
     renderTable(cfg);
   }
+}
+
+// ── Futures Strength heatmap (bottom of the Futures tab) ────────────────────
+// Mirrors the FX strength board (forex.js) but for the futures universe, and shows
+// ONLY strong setups: markets where at least 3 of the 4 signals (Seasonals · COT ·
+// COT-Hedging · Term Structure) align in one direction — the same 3/4 / 4/4 "setup"
+// definition the Screener's Weekly Outlook and the content bot use (screenerSetup,
+// from screener.js). Drawn as two bias columns, reusing the FX board's .fx-* styling
+// verbatim. Reads the shared screenerData; pure on-screen view, never invoked in
+// card-mode (so content-bot PNGs are unchanged). Chip color uses fxCurrencyHeat()
+// with max pinned to 4, fed the signed setup count, so 4/4 is full green/red and
+// 3/4 a step lighter.
+const FUTURES_HEAT_MAX = 4;
+// FX currencies have their own heatmap on the Forex tab — exclude them here so
+// the two boards don't overlap.
+const FUTURES_HEAT_EXCLUDE_CATEGORY = 'Currencies';
+
+function futuresHeatTitle(r, setup) {
+  const sig = SIG_KEYS.map(k => `${SIG_LABEL[k]} ${k === 'structure' ? (r.structure || 'neutral') : (r[k] || 'neutral')}`).join(' · ');
+  return `${r.display_name}: ${setup.count}/4 ${setup.dir} — ${sig}`;
+}
+
+function futuresHeatChip(item) {
+  const { row: r, setup } = item;
+  const signed = setup.dir === 'bullish' ? setup.count : -setup.count;   // +3/+4 or -3/-4
+  return `<button type="button" class="fx-chip" style="${fxCurrencyHeat(signed, FUTURES_HEAT_MAX)}" onclick="openScreenerMarket('${r.key}')" title="${esc(futuresHeatTitle(r, setup))}">${esc(r.display_name)} <b>${setup.count}/4</b></button>`;
+}
+
+function futuresHeatColumn(kind, title, items) {
+  const tone = kind === 'long' ? 'bull' : 'bear';
+  return `<div class="fx-bias-col ${tone}">
+    <div class="fx-bias-head">
+      <div class="fx-bias-title ${kind}">${title}</div>
+      <div class="fx-bias-count">${items.length || 0}</div>
+    </div>
+    <div class="fx-bias-list">
+      ${items.length ? items.map(futuresHeatChip).join('') : '<span class="fx-bias-empty">No 3/4+ setup today</span>'}
+    </div>
+  </div>`;
+}
+
+function renderFuturesHeat() {
+  const el = document.getElementById('futuresHeatSection');
+  if (!el) return;
+  if (!Array.isArray(screenerData) || !screenerData.length) { el.hidden = true; el.innerHTML = ''; return; }
+
+  // Only markets with a >=3/4 aligned setup (3/4 or 4/4); everything weaker is dropped.
+  const setups = screenerData
+    .filter(r => r && r.category !== FUTURES_HEAT_EXCLUDE_CATEGORY)
+    .map(r => ({ row: r, setup: screenerSetup(r) }))
+    .filter(item => item.setup);
+
+  const byStrength = (a, b) => b.setup.count - a.setup.count || a.row.display_name.localeCompare(b.row.display_name);
+  const bullish = setups.filter(s => s.setup.dir === 'bullish').sort(byStrength);
+  const bearish = setups.filter(s => s.setup.dir === 'bearish').sort(byStrength);
+
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="fx-head">
+      <div class="fx-title">Futures Strength</div>
+      <div class="fx-note">Only 3/4 &amp; 4/4 setups · Seasonals + COT + COT-Hedging + Term Structure · click a market to load its chart</div>
+    </div>
+    <div class="fx-bias-board">
+      ${futuresHeatColumn('long', 'Bullish / Long Bias', bullish)}
+      ${futuresHeatColumn('short', 'Bearish / Short Bias', bearish)}
+    </div>`;
 }
 

@@ -39,6 +39,11 @@ if (_cardKey === 'fx') {
   }
 } else {
   switchCommodity(currentKey);
+  // Futures Strength heatmap at the bottom of the Futures tab — normal dashboard
+  // only (the card-mode branches above never reach here, so bot PNGs are unchanged).
+  if (typeof ensureScreenerData === 'function') {
+    ensureScreenerData().then(() => { try { renderFuturesHeat(); } catch (e) {} });
+  }
   // Reopen whichever top tab was active before the last reload.
   try {
     const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);

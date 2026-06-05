@@ -1569,7 +1569,18 @@ function bindChartControls(cfg) {
   document.querySelectorAll('.ctrl-btn[data-rg]').forEach(b => {
     b.onclick = () => {
       chartState.range = b.dataset.rg;
-      if (chartState.range === '5y') chartState.cotHedging = false;
+      if (chartState.range === '5y') {
+        chartState.cotHedging = false;
+        // A single contract spans only months, so its 5Y view is identical to 12M
+        // (e.g. a front bond contract has ~6 months of bars). The real 5-year history
+        // lives on the native continuous series — switch to it so 5Y actually shows
+        // ~5 years. contractSymbol is kept so the single-contract button stays visible
+        // to switch back.
+        if (chartState.chartMode === 'contract') {
+          chartState.chartMode = 'continuous';
+          renderTable(cfg);
+        }
+      }
       loadChart(cfg);
     };
   });

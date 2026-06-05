@@ -74,6 +74,7 @@ function rerenderThemedCharts() {
       const cat = meta && catCache[meta.slug];
       if (cat && cat[chartState.key] && typeof loadChart === 'function') loadChart(cat[chartState.key]);
     }
+    if (!document.getElementById('overviewPage')?.hidden && typeof renderFuturesHeat === 'function') renderFuturesHeat();
     if (!document.getElementById('seasonalsPage')?.hidden && typeof renderSeasonalsPage === 'function') renderSeasonalsPage();
     if (!document.getElementById('smtPage')?.hidden && typeof renderSmtCharts === 'function') renderSmtCharts();
     if (!document.getElementById('screenerWeekly')?.hidden && typeof renderWeeklyOutlook === 'function') renderWeeklyOutlook();

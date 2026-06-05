@@ -337,8 +337,7 @@ function rgb(c) {
 
 function _fxDark() { return typeof currentTheme === 'function' && currentTheme() === 'dark'; }
 
-function fxCurrencyHeat(score) {
-  const maxScore = fxMaxScore();
+function fxCurrencyHeat(score, maxScore = fxMaxScore()) {
   const t = clamp01((score + maxScore) / (maxScore * 2));
   if (_fxDark()) {
     // Dark: subtle navy-tinted chips toward green/red, light text.
