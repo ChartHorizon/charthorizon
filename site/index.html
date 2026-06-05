@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChartHorizon — See where the big money is positioned</title>
+<meta name="description" content="ChartHorizon — a local-first futures dashboard: commercial COT positioning, seasonality, term structure and FX strength. Free, open source, runs offline. macOS, Windows, Linux.">
+<meta name="theme-color" content="#0e1822">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<meta property="og:title" content="ChartHorizon — see where the big money is positioned">
+<meta property="og:description" content="Local-first futures dashboard: COT, seasonals, term structure, FX strength. Free & open source.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://chart-horizon.com/">
+<meta property="og:image" content="https://chart-horizon.com/assets/dashboard.png">
+<meta name="twitter:card" content="summary_large_image">
+<!-- Privacy-friendly, cookieless analytics (Cloudflare Web Analytics) — no cookie banner needed.
+     To activate: Cloudflare dashboard > Analytics & Logs > Web Analytics > add this site,
+     copy the beacon token, paste it below in place of REPLACE_WITH_TOKEN, then uncomment. -->
+<!--
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js"
+        data-cf-beacon='{"token": "REPLACE_WITH_TOKEN"}'></script>
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0e1822; --bg-2:#0b131c;
+    --ink:#f5f7fa; --muted:#95a3b5; --muted-2:#748292;
+    --hair:rgba(154,167,184,.28);
+    --gold:#fde08a; --amber:#fcd34d; --orange:#f97316;
+    --panel:#121e2a; --panel-2:#0f1925; --panel-line:rgba(154,167,184,.16);
+    --serif:'Instrument Serif',Georgia,serif;
+    --sans:'Sora',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg-2); color:var(--ink); font-family:var(--sans); font-weight:300; -webkit-font-smoothing:antialiased; line-height:1.5}
+  .wrap{max-width:1120px; margin:0 auto; padding:0 clamp(24px,5vw,40px)}
+  .eyebrow{font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--orange); font-weight:600}
+  .sec-title{font-family:var(--serif); font-size:clamp(30px,4vw,46px); line-height:1.06; letter-spacing:-.02em; margin:14px 0 0}
+  .sec-sub{color:var(--muted); max-width:620px; margin:16px 0 0; font-size:16px; line-height:1.6}
+
+  /* header — flush to the very top */
+  header{position:absolute; top:0; left:0; right:0; z-index:40; display:flex; align-items:center; justify-content:space-between; padding:22px clamp(24px,5vw,64px); flex-wrap:wrap; row-gap:10px;}
+  .brand{display:flex; align-items:center; gap:11px}
+  .brand .word{font-family:var(--serif); font-size:21px; letter-spacing:-.02em; color:var(--ink)}
+  nav{display:flex; align-items:center; gap:22px}
+  nav .lnk{font-size:13.5px; color:var(--muted); text-decoration:none; transition:.15s}
+  nav .lnk:hover{color:var(--ink)}
+  .dl{display:inline-flex; align-items:center; gap:9px; font-size:13.5px; font-weight:600; padding:10px 18px; border-radius:11px; text-decoration:none; background:linear-gradient(135deg,var(--amber),var(--orange)); color:#1a1205; box-shadow:0 8px 28px -10px rgba(249,115,22,.55); transition:.18s}
+  .dl:hover{transform:translateY(-1px); box-shadow:0 12px 34px -10px rgba(249,115,22,.7)}
+  .dl svg{width:15px; height:15px}
+  .sup{display:inline-flex; align-items:center; gap:7px; font-size:13.5px; font-weight:500; padding:9px 15px; border-radius:11px; text-decoration:none; color:var(--ink); border:1px solid var(--panel-line); background:rgba(154,167,184,.06); transition:.18s}
+  .sup:hover{border-color:rgba(252,211,77,.4); background:rgba(249,115,22,.08)}
+  .sup svg{width:15px; height:15px; color:var(--orange); fill:currentColor}
+
+  /* hero — content pulled up (less empty band under the header) */
+  .hero{position:relative; min-height:82vh; display:grid; place-items:center; text-align:center; overflow:hidden; padding:104px 0 40px;
+        background:radial-gradient(ellipse 120% 80% at 50% -10%, #14222f 0%, var(--bg) 42%, var(--bg-2) 100%)}
+  .glow{position:absolute; left:0; right:0; bottom:0; height:70%; pointer-events:none;
+        background:radial-gradient(ellipse 72% 100% at 50% 100%, rgba(249,115,22,.30) 0%, rgba(252,211,77,.12) 34%, rgba(252,211,77,0) 68%)}
+  .hair{position:absolute; left:0; right:0; top:64%; height:1px; pointer-events:none; background:linear-gradient(90deg, rgba(154,167,184,0) 0%, var(--hair) 22%, var(--hair) 78%, rgba(154,167,184,0) 100%)}
+  .hero .inner{position:relative; z-index:10; max-width:780px; padding:0 28px}
+  .hero .eyebrow{color:var(--muted); font-weight:400}
+  h1{font-family:var(--serif); font-size:clamp(40px,6.4vw,68px); line-height:1.03; letter-spacing:-.02em; margin:26px 0 22px}
+  h1 em{font-style:italic; background:linear-gradient(120deg,var(--gold),var(--orange)); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .lede{font-size:clamp(16px,1.7vw,18.5px); color:var(--muted); line-height:1.6; max-width:580px; margin:0 auto 38px}
+  .platforms{display:inline-flex; align-items:center; gap:12px; font-size:13px; color:var(--muted-2)}
+  .platforms .os{display:inline-flex; align-items:center; gap:7px; color:var(--muted)}
+  .platforms .os svg{width:14px; height:14px; opacity:.85}
+  .platforms .sep{color:rgba(154,167,184,.3)}
+  .free{margin-top:14px; font-size:12px; color:var(--muted-2); letter-spacing:.06em}
+  .free b{color:var(--muted); font-weight:500}
+
+  /* preview — real dashboard screenshot in a browser window */
+  .preview{padding:0 0 96px; margin-top:-7vh; position:relative; z-index:20}
+  .window{max-width:720px; margin:0 auto; border-radius:14px; border:1px solid var(--panel-line); background:var(--panel-2); box-shadow:0 50px 110px -40px rgba(0,0,0,.85); overflow:hidden}
+  .win-bar{display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--panel-line); background:rgba(154,167,184,.03)}
+  .win-bar .dots{display:flex; gap:7px}
+  .win-bar .dots i{width:11px; height:11px; border-radius:50%; display:block}
+  .win-bar .dots i:nth-child(1){background:#ff5f57} .win-bar .dots i:nth-child(2){background:#febc2e} .win-bar .dots i:nth-child(3){background:#28c840}
+  .win-bar .addr{margin:0 auto; font-size:12px; color:var(--muted-2); letter-spacing:.02em}
+  .shot-img{display:block; width:100%; height:auto}
+  .preview .cap{text-align:center; margin-top:18px; font-size:13px; color:var(--muted-2); letter-spacing:.02em}
+
+  /* section shell */
+  section.block{padding:84px 0; border-top:1px solid var(--panel-line)}
+  section.block.alt{background:var(--bg)}
+
+  /* features bento */
+  .feat-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:42px}
+  .feat{border:1px solid var(--panel-line); border-radius:14px; padding:24px; background:linear-gradient(180deg,rgba(18,30,42,.6),rgba(15,25,37,.4)); transition:.18s}
+  .feat:hover{border-color:rgba(252,211,77,.3)}
+  .feat.span2{grid-column:span 2; background:linear-gradient(120deg,rgba(20,34,47,.8),rgba(15,25,37,.4))}
+  .feat .ic{width:38px; height:38px; border-radius:10px; display:grid; place-items:center; background:rgba(249,115,22,.12); border:1px solid rgba(252,211,77,.25); margin-bottom:16px}
+  .feat .ic svg{width:20px; height:20px; stroke:var(--amber); fill:none}
+  .feat h3{font-family:var(--serif); font-size:23px; letter-spacing:-.01em; margin-bottom:8px; color:var(--ink); font-weight:400}
+  .feat p{font-size:14px; color:var(--muted); line-height:1.55}
+  .feat.span2 h3{font-size:28px}
+
+  /* stat strip */
+  .stats{display:flex; flex-wrap:wrap; gap:14px; margin-top:30px}
+  .stat{flex:1; min-width:150px; border:1px solid var(--panel-line); border-radius:12px; padding:18px 20px; background:rgba(11,19,28,.35)}
+  .stat .n{font-family:var(--serif); font-size:34px; color:var(--ink); line-height:1}
+  .stat .l{font-size:12.5px; color:var(--muted); margin-top:8px; letter-spacing:.02em}
+
+  /* data & legal */
+  .legal-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:40px}
+  .src{border:1px solid var(--panel-line); border-radius:14px; padding:22px; background:rgba(11,19,28,.3)}
+  .src .badge{display:inline-flex; align-items:center; gap:7px; font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:600; padding:4px 10px; border-radius:999px; margin-bottom:14px}
+  .src .badge.ok{color:#7fe0a3; background:rgba(127,224,163,.08); border:1px solid rgba(127,224,163,.25)}
+  .src .badge.warn{color:var(--amber); background:rgba(252,211,77,.08); border:1px solid rgba(252,211,77,.25)}
+  .src h4{font-size:15px; color:var(--ink); font-weight:600; margin-bottom:7px}
+  .src p{font-size:13.5px; color:var(--muted); line-height:1.55}
+
+  /* closing CTA */
+  .cta{position:relative; text-align:center; padding:96px 0 104px; overflow:hidden; border-top:1px solid var(--panel-line)}
+  .cta .glow{height:100%; opacity:.8}
+  .cta h2{position:relative; z-index:5; font-family:var(--serif); font-size:clamp(32px,5vw,52px); letter-spacing:-.02em; margin-bottom:14px}
+  .cta p{position:relative; z-index:5; color:var(--muted); margin-bottom:30px}
+  .cta .dl{position:relative; z-index:5; font-size:15px; padding:14px 24px}
+  .cta .cta-all{position:relative; z-index:5; margin-top:20px; font-size:13px; color:var(--muted-2); letter-spacing:.02em}
+  .cta .cta-all a{color:var(--muted); text-decoration:none; border-bottom:1px solid rgba(154,167,184,.25); padding-bottom:1px; transition:.15s}
+  .cta .cta-all a:hover{color:var(--ink); border-bottom-color:var(--amber)}
+  .cta .cta-all .sep{color:rgba(154,167,184,.3); margin:0 8px}
+
+  /* footer */
+  footer{border-top:1px solid var(--panel-line); padding:46px 0 56px; background:var(--bg-2)}
+  .foot-top{display:flex; flex-wrap:wrap; justify-content:space-between; gap:24px; align-items:flex-start}
+  .foot-links{display:flex; gap:30px; flex-wrap:wrap}
+  .foot-col h6{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted-2); margin-bottom:12px; font-weight:600}
+  .foot-col a{display:block; font-size:13.5px; color:var(--muted); text-decoration:none; margin-bottom:8px; transition:.15s}
+  .foot-col a:hover{color:var(--ink)}
+  .foot-col .soon{display:block;font-size:13.5px;color:var(--muted-2);margin-bottom:8px;opacity:.7;cursor:default}
+  .disclaimer{margin-top:34px; padding-top:22px; border-top:1px solid var(--panel-line); font-size:12px; color:var(--muted-2); line-height:1.6}
+  .copy{margin-top:14px; font-size:12px; color:var(--muted-2); display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px}
+  .copy a{color:var(--muted-2); text-decoration:none; border-bottom:1px solid rgba(154,167,184,.2)}
+  .copy a:hover{color:var(--muted)}
+  /* support / sponsor section */
+  .support{position:relative; text-align:center; overflow:hidden}
+  .support .glow{height:100%; opacity:.5}
+  .support .wrap{position:relative; z-index:5}
+  .support-btns{display:flex; gap:14px; justify-content:center; margin-top:34px; flex-wrap:wrap}
+  .support-note{margin-top:24px; font-size:13px; color:var(--muted-2)}
+  .support-note a{color:var(--muted); text-decoration:none; border-bottom:1px solid rgba(154,167,184,.25)}
+  .support-note a:hover{color:var(--ink); border-bottom-color:var(--amber)}
+
+  @media(max-width:880px){ .feat-grid,.legal-grid{grid-template-columns:1fr} .feat.span2{grid-column:span 1} nav .lnk.gh{display:none} }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="sun" x1="50" y1="29" x2="50" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fde08a"/><stop offset=".5" stop-color="#fcd34d"/><stop offset="1" stop-color="#f97316"/></linearGradient>
+    <radialGradient id="bloom" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#f97316" stop-opacity=".34"/><stop offset=".45" stop-color="#fcd34d" stop-opacity=".12"/><stop offset="1" stop-color="#fcd34d" stop-opacity="0"/></radialGradient>
+    <linearGradient id="hz" x1="14" y1="0" x2="86" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#8896a8" stop-opacity="0"/><stop offset=".2" stop-color="#aab6c6" stop-opacity=".9"/><stop offset=".5" stop-color="#c6cfdb"/><stop offset=".8" stop-color="#aab6c6" stop-opacity=".9"/><stop offset="1" stop-color="#8896a8" stop-opacity="0"/></linearGradient>
+    <filter id="g" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <symbol id="chMark" viewBox="0 0 100 100">
+      <circle cx="50" cy="55" r="40" fill="url(#bloom)"/>
+      <g transform="translate(0,3)"><line x1="14" y1="64" x2="86" y2="64" stroke="url(#hz)" stroke-width="2.6" stroke-linecap="round"/>
+        <g stroke="url(#sun)" stroke-width="5.2" stroke-linecap="round" fill="none" filter="url(#g)"><path d="M33 64 a17 17 0 0 1 34 0"/><line x1="50" y1="19" x2="50" y2="28"/><line x1="26.4" y1="35.6" x2="32" y2="41.3"/><line x1="73.6" y1="35.6" x2="68" y2="41.3"/></g></g>
+    </symbol>
+  </defs>
+</svg>
+
+<header>
+  <div class="brand"><svg width="32" height="32" aria-hidden="true"><use href="#chMark"/></svg><span class="word">ChartHorizon</span></div>
+  <nav><a class="lnk gh" href="https://github.com/ChartHorizon/charthorizon" target="_blank" rel="noopener">GitHub</a>
+    <a class="sup" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Support</a>
+    <a class="dl" id="dlPrimary" href="https://github.com/ChartHorizon/charthorizon/releases/latest" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>Download</a>
+  </nav>
+</header>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="glow"></div><div class="hair"></div>
+  <div class="inner">
+    <div class="eyebrow">EOD futures positioning · COT · seasonals · FX strength</div>
+    <h1>See where the big money is <em>positioned</em> —<br>before the market shows it.</h1>
+    <p class="lede">A local-first futures dashboard: commercial COT positioning, seasonality, term structure and FX strength — updated daily, on your own machine. No cloud, no sign-up.</p>
+    <div class="platforms">
+      <span class="os"><svg viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C39.3 141.6 4.1 184.6 4.1 270.3c0 25.3 4.6 51.4 13.8 78.4 12.3 35.4 56.6 122.2 102.8 120.8 24.1-.6 41.1-17.1 72.5-17.1 30.4 0 46.1 17.1 76.4 17.1 46.6-.7 86.7-79.6 98.4-115.1-62.6-29.5-58.3-86.4-58.3-87.6zm-56.5-184c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>macOS</span>
+      <span class="sep">·</span>
+      <span class="os"><svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M0 93.7l183.6-25.3v177.4H0V93.7zm0 324.6l183.6 25.3V268.4H0v149.9zm203.8 28L448 480V268.4H203.8v177.9zm0-380.6v180.1H448V32L203.8 65.7z"/></svg>Windows</span>
+      <span class="sep">·</span>
+      <span class="os"><svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M220.8 123.3c1 .5 1.8 1.7 3 1.7 1.1 0 2.8-.4 2.9-1.5.2-1.4-1.9-2.3-3.2-2.9-1.7-.7-3.9-1-5.5-.1-.4.2-.8.7-.6 1.1.3 1.3 2 1.2 3.4 1.6zm-21.9 1.7c1.2 0 2-1.2 3-1.7 1.4-.4 3.1-.3 3.4-1.6.2-.4-.2-.9-.6-1.1-1.6-.9-3.8-.6-5.5.1-1.3.6-3.4 1.5-3.2 2.9.1 1 1.8 1.5 2.9 1.4zM420 403.8c-3.6-4-5.3-11.6-7.2-19.7-1.8-8.1-3.9-16.1-10.5-21.7-1.3-1.1-2.6-2.1-4-2.9-1.3-.8-2.7-1.5-4.1-2 9.2-27.3 5.6-54.5-3.7-79.1-11.4-30.1-31.3-56.4-46.5-74.4-17-21.8-33.7-42.6-33.4-73.6.5-47.4 3.7-90.6-39.6-118.8-19.4-12.6-43.4-13.2-66.8-9.5-13.3 2.1-25.8 6.5-35.4 12.6-30.1 19.4-30.2 52.2-30.2 84.3 0 24.9-9.3 45.4-24.2 67.4-15.2 17.9-35.1 44.2-46.5 74.4-9.3 24.6-12.9 51.8-3.7 79.1-1.4.5-2.8 1.2-4.1 2-1.4.8-2.7 1.8-4 2.9-6.6 5.6-8.7 13.6-10.5 21.7-1.9 8.1-3.6 15.7-7.2 19.7-7.4 8.3-1.7 16.1 9.9 16.2 6.2 0 12.5-.8 18.8-.9 4.5-.1 9-.1 13.4.4 4.4.5 8.8 1.4 13.1 3.4 4.4 2 8.7 5.2 12.6 8.3 3.9 3.1 7.5 6.1 11.7 7.7 4.2 1.6 9.1 1.8 13.4 1.6 4.3-.2 8.2-.8 11.9-.8 7.4 0 13.4 1.5 19.4 1.5s12-1.5 19.4-1.5c3.7 0 7.6.6 11.9.8 4.3.2 9.2 0 13.4-1.6 4.2-1.6 7.8-4.6 11.7-7.7 3.9-3.1 8.2-6.3 12.6-8.3 4.3-2 8.7-2.9 13.1-3.4 4.4-.5 8.9-.5 13.4-.4 6.3.1 12.6.9 18.8.9 11.6-.1 17.3-7.9 9.9-16.2z"/></svg>Linux</span>
+      <span class="sep">·</span><span>Free, open source</span>
+    </div>
+    <div class="free"><b>AGPL-3.0</b> · runs offline · no account, ever</div>
+  </div>
+</section>
+
+<!-- PREVIEW (real dashboard screenshot) -->
+<div class="preview"><div class="wrap"><div class="window">
+  <div class="win-bar"><div class="dots"><i></i><i></i><i></i></div><div class="addr">localhost:8000 — ChartHorizon</div></div>
+  <img class="shot-img" src="assets/dashboard.png" alt="ChartHorizon — WTI Crude Oil continuous futures chart with volume, open interest, COT hedging program and calendar spread">
+</div>
+<p class="cap">The real dashboard — continuous price, roll markers, volume, CFTC open interest, COT hedging program and the front–next calendar spread.</p>
+</div></div>
+
+<!-- FEATURES -->
+<section class="block" id="features">
+  <div class="wrap">
+    <div class="eyebrow">One signal, four confirmations</div>
+    <h2 class="sec-title">Conviction, not noise.</h2>
+    <p class="sec-sub">ChartHorizon only flags a setup when independent signals agree — so you act on alignment, not a single indicator.</p>
+    <div class="feat-grid">
+      <div class="feat span2">
+        <div class="ic"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M21 7v6h-6"/></svg></div>
+        <h3>The 4/4 conviction system</h3>
+        <p>Commercial COT positioning, seasonality, term structure and FX strength have to line up before a setup counts. The Futures Strength board surfaces only 3/4 and 4/4 alignments — everything weaker is dropped.</p>
+      </div>
+      <div class="feat">
+        <div class="ic"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></div>
+        <h3>Commercial COT</h3>
+        <p>Track what the hedgers are doing each week, straight from the CFTC — public-domain positioning data.</p>
+      </div>
+      <div class="feat">
+        <div class="ic"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-7 5-7 8 0s5 7 8 0"/></svg></div>
+        <h3>Seasonality</h3>
+        <p>5-, 10-, 20- and 40-year seasonal curves with onset projection — only when four curves agree on direction.</p>
+      </div>
+      <div class="feat">
+        <div class="ic"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="8" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="16" cy="18" r="2" fill="currentColor" stroke="none"/></svg></div>
+        <h3>FX strength heatmap</h3>
+        <p>A currency-strength heatmap from −4 to +4 with a policy-rate bias, plus the highest-conviction pairs.</p>
+      </div>
+      <div class="feat">
+        <div class="ic"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></div>
+        <h3>Local-first &amp; private</h3>
+        <p>Runs entirely on your machine over localhost. No cloud, no account — your data never leaves your computer.</p>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n">40</div><div class="l">curated markets</div></div>
+      <div class="stat"><div class="n">9</div><div class="l">categories — energy to crypto</div></div>
+      <div class="stat"><div class="n">Daily</div><div class="l">end-of-day refresh</div></div>
+      <div class="stat"><div class="n">100%</div><div class="l">local · offline · open source</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- DATA & LEGAL -->
+<section class="block alt">
+  <div class="wrap">
+    <div class="eyebrow">Honest about the data</div>
+    <h2 class="sec-title">Data sources &amp; legal</h2>
+    <p class="sec-sub">ChartHorizon is local-first by design — partly because that is the only way to handle market data cleanly. Here is exactly what comes from where.</p>
+    <div class="legal-grid">
+      <div class="src"><span class="badge ok">Public domain</span><h4>CFTC — COT &amp; Open Interest</h4><p>Weekly Commitments of Traders and open interest come straight from the CFTC. Public domain — freely used and redistributed.</p></div>
+      <div class="src"><span class="badge warn">Personal use</span><h4>Yahoo Finance — prices</h4><p>OHLCV, contract chains, volume and seasonal history via yfinance. Personal use only — fetched and stored locally, never redistributed.</p></div>
+      <div class="src"><span class="badge ok">AGPL-3.0</span><h4>The software</h4><p>The full dashboard is open source under AGPL-3.0. Nothing is paywalled — inspect it, fork it, self-host it.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- SUPPORT / SPONSOR -->
+<section class="block support">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div class="eyebrow">Free forever</div>
+    <h2 class="sec-title">Powered by the people who use it.</h2>
+    <p class="sec-sub" style="margin-left:auto;margin-right:auto">ChartHorizon is free and open source — no paywall, no account. If it earns a place in your workflow, you can keep development moving.</p>
+    <div class="support-btns">
+      <a class="dl" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Buy me a coffee</a>
+      <a class="sup" href="https://github.com/sponsors/ChartHorizon" target="_blank" rel="noopener">GitHub Sponsors</a>
+    </div>
+    <p class="support-note">Sponsorship &amp; partnership enquiries welcome — <a href="https://github.com/ChartHorizon/charthorizon" target="_blank" rel="noopener">reach out on GitHub</a>.</p>
+    <!-- Sponsor logos: drop <a href="…"><img src="assets/sponsors/…" alt="…" height="36"></a> tiles here once you have sponsors. -->
+  </div>
+</section>
+
+<!-- CLOSING CTA -->
+<section class="cta">
+  <div class="glow"></div>
+  <h2>Start reading the horizon.</h2>
+  <p>Free, open source, and running in under a minute — on macOS, Windows or Linux.</p>
+  <a class="dl" id="dlPrimary2" href="https://github.com/ChartHorizon/charthorizon/releases/latest" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>Download ChartHorizon</a>
+  <div class="cta-all">
+    Or download directly:
+    <a href="https://github.com/ChartHorizon/charthorizon/releases/latest/download/ChartHorizon-macOS.dmg" target="_blank" rel="noopener">macOS&nbsp;(.dmg)</a>
+    <span class="sep">·</span>
+    <a href="https://github.com/ChartHorizon/charthorizon/releases/latest/download/ChartHorizon-Windows-Setup.exe" target="_blank" rel="noopener">Windows&nbsp;(.exe)</a>
+    <span class="sep">·</span>
+    <a href="https://github.com/ChartHorizon/charthorizon/releases/latest/download/ChartHorizon-x86_64.AppImage" target="_blank" rel="noopener">Linux&nbsp;(.AppImage)</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-top">
+      <div style="max-width:300px">
+        <div class="brand" style="margin-bottom:12px"><svg width="28" height="28" aria-hidden="true"><use href="#chMark"/></svg><span class="word" style="font-size:18px">ChartHorizon</span></div>
+        <p style="font-size:13px;color:var(--muted-2);line-height:1.55">EOD futures positioning, COT, seasonals and FX strength — local-first and open source.</p>
+      </div>
+      <div class="foot-links">
+        <div class="foot-col"><h6>Product</h6><a href="https://github.com/ChartHorizon/charthorizon/releases/latest" target="_blank" rel="noopener">Download</a><a href="#features">Features</a><a href="https://github.com/ChartHorizon/charthorizon/releases" target="_blank" rel="noopener">Changelog</a></div>
+        <div class="foot-col"><h6>Open source</h6><a href="https://github.com/ChartHorizon/charthorizon" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/ChartHorizon/charthorizon/blob/main/LICENSE" target="_blank" rel="noopener">License (AGPL-3.0)</a><a href="https://github.com/ChartHorizon/charthorizon/blob/main/DATA_STRATEGY.md" target="_blank" rel="noopener">Data strategy</a></div>
+        <div class="foot-col"><h6>Support</h6><a href="https://github.com/sponsors/ChartHorizon">Sponsor</a><span class="soon">Telegram</span><span class="soon">X / Twitter</span></div>
+      </div>
+    </div>
+    <div class="disclaimer">
+      <p><strong style="color:var(--muted)">Not financial advice · educational only · futures trading involves substantial risk of loss · seasonal &amp; positioning signals do not guarantee future results.</strong></p>
+      <p>ChartHorizon is an analysis tool, not a broker or advisor. Market data is provided “as is” for personal, informational use. You are responsible for your own trading decisions.</p>
+    </div>
+    <div class="copy"><span>© 2026 ChartHorizon · AGPL-3.0 · <a href="impressum.html">Impressum</a> · <a href="privacy.html">Datenschutz</a></span><span>Made for traders who want to see positioning clearly.</span></div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var A = {
+      mac:   { label: 'Download for macOS',  file: 'ChartHorizon-macOS.dmg' },
+      win:   { label: 'Download for Windows', file: 'ChartHorizon-Windows-Setup.exe' },
+      linux: { label: 'Download for Linux',  file: 'ChartHorizon-x86_64.AppImage' }
+    };
+    var p = (navigator.userAgent + ' ' + (navigator.platform || '')).toLowerCase();
+    var os = p.indexOf('win') > -1 ? 'win' : p.indexOf('linux') > -1 && p.indexOf('android') < 0 ? 'linux' : 'mac';
+    var base = 'https://github.com/ChartHorizon/charthorizon/releases/latest/download/';
+    ['dlPrimary', 'dlPrimary2'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.href = base + A[os].file;
+      var svg = el.querySelector('svg'); if (svg && svg.nextSibling) svg.nextSibling.textContent = ' ' + A[os].label;
+    });
+  })();
+</script>
+
+</body>
+</html>
