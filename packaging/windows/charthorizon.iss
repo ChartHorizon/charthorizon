@@ -2,7 +2,7 @@
 ; Expects the PyInstaller onedir output at dist\ChartHorizon\
 [Setup]
 AppName=ChartHorizon
-AppVersion=1.0.0
+AppVersion=1.0.2
 DefaultDirName={localappdata}\ChartHorizon
 DefaultGroupName=ChartHorizon
 PrivilegesRequired=lowest
@@ -11,6 +11,8 @@ OutputBaseFilename=ChartHorizon-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
 DisableProgramGroupPage=yes
+SetupIconFile=..\icons\charthorizon.ico
+UninstallDisplayIcon={app}\ChartHorizon.exe
 
 [Files]
 Source: "..\..\dist\ChartHorizon\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs

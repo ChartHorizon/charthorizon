@@ -969,6 +969,84 @@ function bindChartCrosshair(wrap, cfg) {
   hit.addEventListener('mouseleave', hide);
   hit.addEventListener('mouseout', hide);
   svg.addEventListener('mouseleave', hide);
+
+  // ── Measure tool: left-press + drag on the price pane reads the point difference
+  // and %-change between press and cursor (free, TradingView-style); releasing the
+  // button clears it. Always available, drawn under the crosshair hit-zone so the
+  // crosshair keeps working. The layer stays display:none until a drag, so it never
+  // appears in a static export. ──
+  const mLayer = make('g', { class: 'chart-measure-layer', style: 'display:none; pointer-events:none' });
+  const mLine = make('line', { class: 'chart-measure-line' });          // press -> cursor connector
+  const mDot0 = make('circle', { class: 'chart-measure-dot', r: 3 });   // press point
+  const mDot1 = make('circle', { class: 'chart-measure-dot', r: 3 });   // cursor point
+  const mLblG = make('g');
+  const mLblBg = make('rect', { class: 'chart-measure-label-bg', rx: 4 });
+  const mT1 = make('text', { class: 'chart-measure-t1' });
+  const mT2 = make('text', { class: 'chart-measure-t2' });
+  mLblG.append(mLblBg, mT1, mT2);
+  mLayer.append(mLine, mDot0, mDot1, mLblG);
+  svg.insertBefore(mLayer, hit);   // below the transparent hit-zone -> visible, no event steal
+
+  const priceFromY = y =>
+    cfg.pHi - ((clamp(y, cfg.padT, cfg.padT + cfg.priceH) - cfg.padT) / cfg.priceH) * cfg.pSpan;
+  let measuring = false, mStart = null;
+
+  function measureDraw(evt) {
+    if (!measuring || !mStart) return;
+    const p = localPoint(evt);
+    if (!p) return;
+    const plotL = cfg.padL, plotR = cfg.W - cfg.padR, topY = cfg.padT, botY = cfg.padT + cfg.priceH;
+    const x0 = mStart.x, y0 = mStart.y;
+    const x1 = clamp(p.x, plotL, plotR), y1 = clamp(p.y, topY, botY);
+    if (Math.abs(x1 - x0) + Math.abs(y1 - y0) < 3) { mLayer.style.display = 'none'; return; }  // ignore a plain click
+
+    const startPrice = priceFromY(y0), endPrice = priceFromY(y1);
+    const diff = endPrice - startPrice;
+    const pct = startPrice ? (diff / startPrice) * 100 : 0;
+    const up = diff >= 0;
+    const sign = up ? '+' : '';
+    mLayer.style.display = '';
+    mLayer.classList.toggle('up', up);
+    mLayer.classList.toggle('down', !up);
+    mLine.setAttribute('x1', x0.toFixed(1));
+    mLine.setAttribute('y1', y0.toFixed(1));
+    mLine.setAttribute('x2', x1.toFixed(1));
+    mLine.setAttribute('y2', y1.toFixed(1));
+    mDot0.setAttribute('cx', x0.toFixed(1)); mDot0.setAttribute('cy', y0.toFixed(1));
+    mDot1.setAttribute('cx', x1.toFixed(1)); mDot1.setAttribute('cy', y1.toFixed(1));
+
+    mT1.textContent = `Δ ${sign}${diff.toFixed(cfg.dec)}`;
+    mT2.textContent = `${sign}${pct.toFixed(2)}%`;
+    const lineH = 14, padX = 9;
+    const w = Math.max(mT1.textContent.length, mT2.textContent.length) * 6.6 + padX * 2;
+    const h = lineH * 2 + 9;
+    const lblX = clamp(x1 + 12, plotL, plotR - w);
+    const lblY = clamp(y1 > y0 ? y1 + 10 : y1 - 10 - h, topY, botY - h);
+    mLblG.setAttribute('transform', `translate(${lblX.toFixed(1)},${lblY.toFixed(1)})`);
+    mLblBg.setAttribute('x', 0); mLblBg.setAttribute('y', 0);
+    mLblBg.setAttribute('width', w.toFixed(1)); mLblBg.setAttribute('height', h);
+    mT1.setAttribute('x', padX); mT1.setAttribute('y', lineH);
+    mT2.setAttribute('x', padX); mT2.setAttribute('y', lineH * 2 + 2);
+  }
+  function measureEnd() {
+    measuring = false; mStart = null;
+    mLayer.style.display = 'none';
+  }
+  function measureStart(evt) {
+    if (evt.button !== 0) return;   // left button only
+    const p = localPoint(evt);
+    if (!p) return;
+    if (p.y < cfg.padT || p.y > cfg.padT + cfg.priceH) return;   // start only in the price pane
+    if (p.x < cfg.padL || p.x > cfg.W - cfg.padR) return;
+    measuring = true;
+    mStart = { x: clamp(p.x, cfg.padL, cfg.W - cfg.padR), y: clamp(p.y, cfg.padT, cfg.padT + cfg.priceH) };
+    evt.preventDefault();
+    document.addEventListener('mouseup', measureEnd, { once: true });   // self-removes -> no leak
+    measureDraw(evt);
+  }
+  hit.addEventListener('mousedown', measureStart);
+  hit.addEventListener('mousemove', measureDraw);
+  hit.addEventListener('pointermove', measureDraw);
 }
 
 // ── Multi-pane candlestick chart: price + OI + COT ──

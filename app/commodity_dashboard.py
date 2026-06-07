@@ -21,6 +21,7 @@ import csv
 import contextlib
 import io
 import json
+import tempfile
 import re
 import urllib.request
 import urllib.parse
@@ -64,6 +65,39 @@ from fetch_yfinance import *  # noqa: F401,F403
 from screener import *  # noqa: F401,F403
 
 
+# Background-refresh progress (read by start.py's /api/refresh-status). cwd is the
+# data root when the generator runs, so this resolves to <data_root>/ff_data/.
+PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
+
+
+def _write_refresh_progress(**fields):
+    """Best-effort: merge fields into ff_data/refresh_progress.json (atomic write).
+    Never raises — progress reporting must never break a refresh."""
+    try:
+        os.makedirs("ff_data", exist_ok=True)
+        data = {}
+        if os.path.exists(PROGRESS_FILE):
+            try:
+                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            except Exception:
+                data = {}
+        data.update(fields)
+        fd, tmp = tempfile.mkstemp(dir="ff_data", prefix=".progress_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, PROGRESS_FILE)
+        except Exception:
+            # os.replace failed after the temp was written — don't leak the orphan.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
 
 def gather_commodity_data(count=6):
     """
@@ -91,7 +125,14 @@ def gather_commodity_data(count=6):
     print()
 
     dataset = {}
+    _total = len(COMMODITIES)
+    _write_refresh_progress(state="running", total=_total, done=0, current=None, category=None)
+    _done = 0
     for key, cfg in COMMODITIES.items():
+        _write_refresh_progress(done=_done, current=cfg.get("display_name", key),
+                                category=cfg.get("category", ""))
+        _done += 1
+
         cfg["_key"] = key  # lets build_contract_list find the spec/expiry rule
         print(f"→ {cfg['display_name']}")
         contracts = select_yfinance_contracts(cfg, count=count)
@@ -142,6 +183,7 @@ def gather_commodity_data(count=6):
             "calendar_spread_series": calendar_spread_series,
         }
 
+    _write_refresh_progress(done=_total, current=None, category=None)
     return dataset
 
 
@@ -446,6 +488,8 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         f.write("window.__CONFIG__ = " + json.dumps(config, ensure_ascii=False) + ";\n")
     print(f"\n✓ Frontend config written: {config_path}")
     print(f"   (Static frontend: app/index.html + app/web/; data in ./{data_dir}/)")
+    _write_refresh_progress(state="done", done=len(COMMODITIES), current=None,
+                            category=None, latest_eod=gen_date)
     return config_path
 
 

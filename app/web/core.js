@@ -10,6 +10,11 @@ let seasonalState = { key: window.__CONFIG__.firstKey };
 // Cache for already loaded category data
 const catCache = {};   // slug -> { key -> payload }
 
+// Cache-buster bumped on an in-place data reload (see refresh.js). DATA_VERSION is a
+// const from config.js, so this nonce is the mutable part appended to data fetches.
+let _dataReloadNonce = 0;
+function bumpDataReloadNonce() { _dataReloadNonce++; }
+
 const CAT_ICONS = { Energy:'⚡', Metals:'🥇', Agriculture:'🌾', 'Livestock/Dairy':'🐄', Softs:'☕', Indices:'📈', Currencies:'💱', Bonds:'🏦', Crypto:'🪙' };
 // Sidebar category order: most broadly-followed / popular first. Keep in sync with
 // CATEGORY_POPULARITY in generate_html() (Python), which sets the same INDEX order.
@@ -65,16 +70,26 @@ function setTheme(theme) {
   rerenderThemedCharts();
 }
 function toggleTheme() { setTheme(currentTheme() === 'dark' ? 'light' : 'dark'); }
+// Repaint the Futures (overview) chart + heatmap from the current CHART_THEME.
+// SVG colors are baked in at render time, so a repaint is what actually recolors them.
+function repaintOverviewThemed() {
+  if (typeof chartState !== 'undefined' && chartState.key) {
+    const meta = INDEX[chartState.key];
+    const cat = meta && catCache[meta.slug];
+    if (cat && cat[chartState.key] && typeof loadChart === 'function') loadChart(cat[chartState.key]);
+  }
+  if (typeof renderFuturesHeat === 'function') renderFuturesHeat();
+}
+// Set when the theme changes while the Futures tab is hidden. Every other tab
+// self-heals via its PAGES `load`, but overview has `load: null`, so switchPage()
+// consumes this flag to repaint the chart when the Futures tab is shown again.
+let _overviewThemeDirty = false;
 // Repaint the chart surface that is currently visible so its SVG colors follow the
 // new theme (CSS-styled surfaces recolor on their own via the tokens).
 function rerenderThemedCharts() {
   try {
-    if (!document.getElementById('overviewPage')?.hidden && typeof chartState !== 'undefined' && chartState.key) {
-      const meta = INDEX[chartState.key];
-      const cat = meta && catCache[meta.slug];
-      if (cat && cat[chartState.key] && typeof loadChart === 'function') loadChart(cat[chartState.key]);
-    }
-    if (!document.getElementById('overviewPage')?.hidden && typeof renderFuturesHeat === 'function') renderFuturesHeat();
+    if (!document.getElementById('overviewPage')?.hidden) repaintOverviewThemed();
+    else _overviewThemeDirty = true;
     if (!document.getElementById('seasonalsPage')?.hidden && typeof renderSeasonalsPage === 'function') renderSeasonalsPage();
     if (!document.getElementById('smtPage')?.hidden && typeof renderSmtCharts === 'function') renderSmtCharts();
     if (!document.getElementById('screenerWeekly')?.hidden && typeof renderWeeklyOutlook === 'function') renderWeeklyOutlook();
@@ -133,6 +148,7 @@ function switchPage(page) {
   }
   const activeP = PAGES.find(p => p.id === target);
   if (activeP && activeP.load) activeP.load();
+  if (target === 'overview' && _overviewThemeDirty) { _overviewThemeDirty = false; repaintOverviewThemed(); }
   renderWatchlist();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -242,7 +258,7 @@ function removeFromWatchlist(key, event) {
 async function loadCategory(slug) {
   if (catCache[slug]) return catCache[slug];
   try {
-    const res = await fetch(`${DATA_DIR}/data_${slug}.json?v=${DATA_VERSION}`, { cache: 'no-store' });
+    const res = await fetch(`${DATA_DIR}/data_${slug}.json?v=${DATA_VERSION}&r=${_dataReloadNonce}`, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     catCache[slug] = data;

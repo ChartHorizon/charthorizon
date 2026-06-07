@@ -1,4 +1,5 @@
 let screenerData = null;
+function resetScreenerData() { screenerData = null; }
 let screenerSort = { col: 'category', dir: 1 };
 const screenerFilters = { seasonal: new Set(), cot: new Set(), cot_hedge: new Set(), structure: new Set() };
 let screenerView = 'daily';   // 'daily' (live screener) | 'weekly' (4/4 + 3/4 outlook)
@@ -55,7 +56,7 @@ async function ensureScreenerData(statusEl = null) {
   if (screenerData) return true;
   if (statusEl) statusEl.innerHTML = '<div class="screener-empty">Loading screener…</div>';
   try {
-    const res = await fetch(`${DATA_DIR}/screener.json?v=${DATA_VERSION}`, { cache: 'no-store' });
+    const res = await fetch(`${DATA_DIR}/screener.json?v=${DATA_VERSION}&r=${_dataReloadNonce}`, { cache: 'no-store' });
     if (!res.ok) throw new Error('not found');
     screenerData = await res.json();
     populateScreenerCategories();

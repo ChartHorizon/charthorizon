@@ -28,6 +28,7 @@ import webbrowser
 import http.server
 import socketserver
 import json
+import tempfile
 import re
 import urllib.parse
 from datetime import datetime, time, timedelta
@@ -43,6 +44,9 @@ GENERATOR = "commodity_dashboard.py"
 REQUIRED = ["yfinance", "python-dateutil", "pypdf", "curl_cffi"]
 REFRESH_STATE_FILE = os.path.join("ff_data", "refresh_state.json")
 YFINANCE_EOD_READY_ET = time(17, 30)
+PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
+LOCK_FILE = os.path.join("ff_data", "refresh.lock")
+LOCK_MAX_AGE = 1800  # seconds — a refresh never takes this long; older lock = stale
 
 FROZEN = getattr(sys, "frozen", False)
 
@@ -75,6 +79,109 @@ def info(msg):  print(f"  {msg}")
 def step(msg):  print(f"\n▶ {msg}")
 def ok(msg):    print(f"  ✓ {msg}")
 def warn(msg):  print(f"  ⚠ {msg}")
+
+
+def _read_progress():
+    try:
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_progress(**fields):
+    """Best-effort atomic merge into ff_data/refresh_progress.json."""
+    try:
+        os.makedirs("ff_data", exist_ok=True)
+        data = _read_progress() or {}
+        data.update(fields)
+        fd, tmp = tempfile.mkstemp(dir="ff_data", prefix=".progress_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, PROGRESS_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
+
+def _pid_alive(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True            # exists, owned by someone else
+    except OSError:
+        return True            # Windows: os.kill(pid,0) unreliable — age fallback covers stale
+    return True
+
+
+def _read_lock():
+    try:
+        with open(LOCK_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _lock_is_active(lock):
+    """A lock is active only if its holder pid is alive AND it is not older than
+    LOCK_MAX_AGE (so a crash on any OS eventually frees it)."""
+    if not lock:
+        return False
+    started = lock.get("started_epoch")
+    if started is None:
+        return False   # no timestamp -> treat as stale (safe direction; never wedge)
+    try:
+        if (datetime.now().timestamp() - float(started)) > LOCK_MAX_AGE:
+            return False
+    except (TypeError, ValueError):
+        return False   # unparseable timestamp -> treat as stale
+    return _pid_alive(lock.get("pid"))
+
+
+def acquire_refresh_lock(trigger):
+    """Best-effort cross-process lock. Returns True if acquired, False if a live
+    refresh already holds it. (Single local user — the TOCTOU window is negligible
+    and the in-process spawn lock covers the common double-click case.)"""
+    if _lock_is_active(_read_lock()):
+        return False
+    try:
+        os.makedirs("ff_data", exist_ok=True)
+        with open(LOCK_FILE, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(),
+                       "started_epoch": datetime.now().timestamp(),
+                       "trigger": trigger}, f)
+        return True
+    except Exception:
+        return False
+
+
+def release_refresh_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
+
+
+def refresh_status_payload():
+    """Progress for the API, cross-checked against the lock: a 'running' state with
+    no live lock (crashed run) is reported as 'idle' so the bar never freezes."""
+    prog = _read_progress() or {"state": "idle"}
+    active = _lock_is_active(_read_lock())
+    if prog.get("state") == "running" and not active:
+        prog = dict(prog)
+        prog["state"] = "idle"
+    prog["running"] = active
+    return prog
 
 
 def check_python():
@@ -235,24 +342,91 @@ def write_refresh_state(status):
         json.dump(payload, f, ensure_ascii=False)
 
 
-def generate_dashboard():
-    """Erzeugt ff_data/ neu. Dev: ruft commodity_dashboard.py als Subprozess.
-    Frozen: re-exec't das gebündelte Binary mit --run-generator (gleiche Prozess-Isolation,
-    aber ohne System-Python)."""
-    step("Generiere Dashboard (Daten werden geladen – das kann 1–2 Min dauern)…")
+def _run_generator_subprocess():
+    """Run the generator once; return its process return code. No sys.exit, so it is
+    safe to call from a background thread."""
     cmd = [sys.executable, "--run-generator"] if FROZEN else [sys.executable, GENERATOR]
     if not FROZEN and not os.path.exists(GENERATOR):
         print(f"\n✗ {GENERATOR} nicht gefunden!")
-        sys.exit(1)
+        return 1
     try:
-        subprocess.check_call(cmd, cwd=DATA_ROOT)
-    except subprocess.CalledProcessError:
+        return subprocess.call(cmd, cwd=DATA_ROOT)
+    except Exception as e:
+        print(f"\n✗ Generator-Subprozess fehlgeschlagen: {e}")
+        return 1
+
+
+def generate_dashboard():
+    """Erzeugt ff_data/ neu (blockierend). Bricht bei Fehler mit sys.exit ab —
+    fuer den Vordergrund-Pfad (--refresh, Erstlauf)."""
+    step("Generiere Dashboard (Daten werden geladen – das kann 1–2 Min dauern)…")
+    rc = _run_generator_subprocess()
+    if rc != 0:
         print("\n✗ Fehler beim Generieren des Dashboards.")
         sys.exit(1)
     if not os.path.exists(os.path.join(DATA_ROOT, "ff_data", "config.js")):
         print("\n✗ ff_data/config.js wurde nicht erstellt.")
         sys.exit(1)
     ok("Dashboard erstellt")
+
+
+_refresh_spawn_lock = threading.Lock()
+
+
+def _run_locked_refresh():
+    """Runs the generator while holding the lock; finalizes progress + releases.
+    The lock is assumed already acquired by the caller. (The trigger is already
+    recorded in the lock + progress file, so it is not needed here.)"""
+    try:
+        clear_contract_history_cache()
+        rc = _run_generator_subprocess()
+        if rc == 0:
+            _write_progress(state="done",
+                            finished_at=datetime.now().isoformat(timespec="seconds"))
+            write_refresh_state("refreshed")
+        else:
+            _write_progress(state="error",
+                            finished_at=datetime.now().isoformat(timespec="seconds"),
+                            error=f"generator-rc-{rc}")
+    finally:
+        release_refresh_lock()
+
+
+def start_background_refresh(trigger="manual"):
+    """Spawn a background refresh thread if none is running. Returns an API dict.
+    Used by the manual endpoint AND the warm-start auto-trigger."""
+    with _refresh_spawn_lock:
+        if not acquire_refresh_lock(trigger):
+            return {"running": True, "already": True}
+        _write_progress(state="running", trigger=trigger, total=None, done=0,
+                        current=None, category=None,
+                        started_at=datetime.now().isoformat(timespec="seconds"),
+                        finished_at=None, latest_eod=None, error=None)
+        try:
+            threading.Thread(target=_run_locked_refresh, daemon=True).start()
+        except Exception:
+            # Thread spawn failed (interpreter shutdown / thread limit) — don't
+            # leave the file lock orphaned for up to LOCK_MAX_AGE.
+            release_refresh_lock()
+            return {"running": False, "error": "spawn-failed"}
+        return {"running": True, "started": True}
+
+
+def foreground_refresh():
+    """Blocking refresh for the --refresh CLI path. Respects the shared lock so it
+    never collides with a running server's background refresh or the 23:30 job."""
+    if not acquire_refresh_lock("cli"):
+        warn("Ein anderer Refresh laeuft bereits — uebersprungen.")
+        write_refresh_state("skipped_locked")
+        return
+    try:
+        clear_contract_history_cache()
+        generate_dashboard()   # generator writes its own running->done progress
+        _write_progress(state="done",
+                        finished_at=datetime.now().isoformat(timespec="seconds"))
+        write_refresh_state("refreshed")
+    finally:
+        release_refresh_lock()
 
 
 def free_port(port):
@@ -381,8 +555,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         # edited frontend file shows up on a normal reload instead of being served
         # stale from the browser's heuristic cache. SimpleHTTPRequestHandler answers
         # If-Modified-Since with 304, so this stays cheap. The JSON API sets its own
-        # Cache-Control (no-store) in _send_json, so skip that path to avoid a dupe.
-        if urllib.parse.urlparse(self.path).path != "/api/contract-history":
+        # Cache-Control (no-store) in _send_json, so skip the /api/ paths to avoid a dupe.
+        if not urllib.parse.urlparse(self.path).path.startswith("/api/"):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
@@ -397,6 +571,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/refresh-status":
+            self._send_json(200, refresh_status_payload())
+            return
         if parsed.path == "/api/contract-history":
             qs = urllib.parse.parse_qs(parsed.query)
             symbol = (qs.get("symbol") or [""])[0].strip()
@@ -413,6 +590,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/refresh":
+            # The manual button always runs (bypasses the EoD "skip because current"
+            # gate). The generator still ingests settled EoD only — never intraday.
+            self._send_json(200, start_background_refresh("manual"))
+            return
+        self._send_json(404, {"error": "not found"})
 
 
 def serve(open_browser=True):
@@ -501,16 +687,15 @@ def main():
                 target = status["target"].isoformat()
                 latest = status["latest"].isoformat() if status["latest"] else "keine Daten"
                 info(f"EoD-Refresh nötig (Ziel {target}, lokal bis {latest})")
-                clear_contract_history_cache()
-                generate_dashboard()
-                write_refresh_state("refreshed")
+                foreground_refresh()
         else:
-            if args.refresh and args.force_refresh:
-                info("Force refresh: EoD-Skip-Regel wird ignoriert")
             if args.refresh:
-                clear_contract_history_cache()
-            generate_dashboard()
-            write_refresh_state("refreshed")
+                if args.force_refresh:
+                    info("Force refresh: EoD-Skip-Regel wird ignoriert")
+                foreground_refresh()
+            else:
+                generate_dashboard()      # erster Lauf ohne Daten — unconditional
+                write_refresh_state("refreshed")
     else:
         step("Nutze vorhandene Dashboard-Dateien")
         ok("Kein neuer Daten-Download nötig")
@@ -518,6 +703,12 @@ def main():
         step("Datenmodus abgeschlossen")
         ok("Webserver wurde nicht gestartet")
         return
+
+    # Warm start (data already present, no CLI --refresh): serve instantly, and only
+    # if the EoD gate says we're behind, kick a background refresh so the page stays
+    # instant. The in-watchlist bar polls /api/refresh-status.
+    if (not args.refresh) and dashboard_exists() and not eod_refresh_status()["is_current"]:
+        start_background_refresh("auto")
 
     # Frozen first launch with no data yet: open the splash and fetch in the background,
     # so a double-clicked app shows progress instead of a dead window. (Dev keeps the

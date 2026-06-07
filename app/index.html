@@ -126,6 +126,14 @@
       <button class="watchlist-add" type="button" onclick="addCurrentToWatchlist('overview')" data-watchlist-add title="Add current market">+ Market</button>
     </div>
     <div class="watchlist-list" data-watchlist-body></div>
+    <div class="watchlist-refresh" data-watchlist-refresh>
+      <div class="wlr-row">
+        <span class="wlr-label" data-wlr-label>Aktualisieren</span>
+        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
+      </div>
+      <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
+      <div class="wlr-sub" data-wlr-sub></div>
+    </div>
   </aside>
 </div>
 
@@ -176,6 +184,14 @@
         <button class="watchlist-add" type="button" onclick="addCurrentToWatchlist('seasonals')" data-watchlist-add title="Add current market">+ Market</button>
       </div>
       <div class="watchlist-list" data-watchlist-body></div>
+      <div class="watchlist-refresh" data-watchlist-refresh>
+        <div class="wlr-row">
+          <span class="wlr-label" data-wlr-label>Aktualisieren</span>
+          <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
+        </div>
+        <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
+        <div class="wlr-sub" data-wlr-sub></div>
+      </div>
     </aside>
   </div>
 </section>
@@ -232,6 +248,14 @@
       </div>
     </div>
     <div class="watchlist-list" data-watchlist-body></div>
+    <div class="watchlist-refresh" data-watchlist-refresh>
+      <div class="wlr-row">
+        <span class="wlr-label" data-wlr-label>Aktualisieren</span>
+        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
+      </div>
+      <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
+      <div class="wlr-sub" data-wlr-sub></div>
+    </div>
   </aside>
   </div>
 </section>
@@ -274,6 +298,14 @@
         </div>
       </div>
       <div class="watchlist-list" data-watchlist-body></div>
+      <div class="watchlist-refresh" data-watchlist-refresh>
+        <div class="wlr-row">
+          <span class="wlr-label" data-wlr-label>Aktualisieren</span>
+          <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
+        </div>
+        <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
+        <div class="wlr-sub" data-wlr-sub></div>
+      </div>
     </aside>
   </div>
 </section>
@@ -365,6 +397,7 @@
 <script src="web/forex.js?v=3"></script>
 <script src="web/smt.js?v=2"></script>
 <script src="web/tools.js?v=3"></script>
+<script src="web/refresh.js?v=1"></script>
 <script src="web/boot.js?v=2"></script>
 
 </body>

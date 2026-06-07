@@ -49,6 +49,10 @@ if (_cardKey === 'fx') {
     const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);
     if (savedPage && savedPage !== 'overview' && PAGE_IDS.has(savedPage)) switchPage(savedPage);
   } catch (e) {}
+    // Surface any background EoD refresh as the watchlist progress bar (normal
+    // dashboard only — card-mode branches above never reach here, so bot PNGs are
+    // unchanged).
+    if (typeof startRefreshPolling === 'function') startRefreshPolling();
 }
 
 // Responsive: redraw chart on resize (debounced)
