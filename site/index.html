@@ -50,6 +50,12 @@
   .sup{display:inline-flex; align-items:center; gap:7px; font-size:13.5px; font-weight:500; padding:9px 15px; border-radius:11px; text-decoration:none; color:var(--ink); border:1px solid var(--panel-line); background:rgba(154,167,184,.06); transition:.18s}
   .sup:hover{border-color:rgba(252,211,77,.4); background:rgba(249,115,22,.08)}
   .sup svg{width:15px; height:15px; color:var(--orange); fill:currentColor}
+  /* Support/Donate-CTA: pink-rot + dezenter Herzschlag (ab und zu leicht bemerkbar) */
+  .sup-heart{color:#fff; background:linear-gradient(135deg,#fb7185,#e11d48); border-color:transparent; box-shadow:0 8px 28px -12px rgba(225,29,72,.6); animation:sup-heartbeat 7s ease-in-out infinite}
+  .sup-heart svg{color:#fff}
+  .sup-heart:hover{filter:brightness(1.07); border-color:transparent; background:linear-gradient(135deg,#fb7185,#e11d48); animation:none}
+  @keyframes sup-heartbeat{0%,70%,100%{transform:scale(1); box-shadow:0 8px 28px -12px rgba(225,29,72,.6), 0 0 0 0 rgba(244,63,94,0)} 76%{transform:scale(1.05); box-shadow:0 8px 28px -12px rgba(225,29,72,.6), 0 0 0 0 rgba(244,63,94,.5)} 88%{transform:scale(1); box-shadow:0 8px 28px -12px rgba(225,29,72,.6), 0 0 0 10px rgba(244,63,94,0)}}
+  @media (prefers-reduced-motion: reduce){.sup-heart{animation:none}}
 
   /* hero — content pulled up (less empty band under the header) */
   .hero{position:relative; min-height:82vh; display:grid; place-items:center; text-align:center; overflow:hidden; padding:104px 0 40px;
@@ -164,7 +170,7 @@
 <header>
   <div class="brand"><svg width="32" height="32" aria-hidden="true"><use href="#chMark"/></svg><span class="word">ChartHorizon</span></div>
   <nav><a class="lnk gh" href="https://github.com/ChartHorizon/charthorizon" target="_blank" rel="noopener">GitHub</a>
-    <a class="sup" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Support</a>
+    <a class="sup sup-heart" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Support</a>
     <a class="dl" id="dlPrimary" href="https://github.com/ChartHorizon/charthorizon/releases/latest" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>Download</a>
   </nav>
 </header>
@@ -260,7 +266,7 @@
     <h2 class="sec-title">Powered by the people who use it.</h2>
     <p class="sec-sub" style="margin-left:auto;margin-right:auto">ChartHorizon is free and open source — no paywall, no account. If it earns a place in your workflow, you can keep development moving.</p>
     <div class="support-btns">
-      <a class="dl" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Buy me a coffee</a>
+      <a class="dl sup-heart" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Buy me a coffee</a>
       <a class="sup" href="https://github.com/sponsors/ChartHorizon" target="_blank" rel="noopener">GitHub Sponsors</a>
     </div>
     <p class="support-note">Sponsorship &amp; partnership enquiries welcome — <a href="https://github.com/ChartHorizon/charthorizon" target="_blank" rel="noopener">reach out on GitHub</a>.</p>
