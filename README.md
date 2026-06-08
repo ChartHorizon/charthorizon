@@ -35,6 +35,28 @@ Download for your OS from the [latest release](https://github.com/ChartHorizon/c
 >
 > *Auto-update (daily refresh) currently applies to the source install only; the bundled app refreshes on launch. Bundled-app auto-update is out of scope for v1.*
 
+## Updating the app
+
+New versions are released on the [releases page](https://github.com/ChartHorizon/charthorizon/releases/latest). There's no in-app updater yet, so updating to a newer version is a quick manual reinstall — **your data is kept**: the EOD archive and settings live in a separate per-user folder, not inside the app, so a reinstall never touches them.
+
+1. **Quit ChartHorizon** if it's running.
+2. **Download** the installer for your OS from the latest release.
+3. **Install over the old version:**
+   - **macOS:** open the `.dmg`, drag `ChartHorizon` into **Applications** and choose **Replace**.
+   - **Windows:** run the new `.exe` — it installs over the existing per-user install.
+   - **Linux:** replace the old `.AppImage` with the new file (`chmod +x` it again).
+4. **Launch it** (the same one-time unsigned-app warning as above may reappear for a new version).
+
+Your data folder is:
+
+| OS | Location |
+|----|----------|
+| macOS | `~/Library/Application Support/ChartHorizon/` |
+| Windows | `%LOCALAPPDATA%\ChartHorizon\` |
+| Linux | `~/.local/share/charthorizon/` |
+
+On the first launch after updating, ChartHorizon refreshes to the latest EOD data in the background — no re-fetch from scratch.
+
 ## Getting started
 
 You don't need any coding experience. For a normal launch you just double-click one file.
