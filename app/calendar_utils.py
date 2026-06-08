@@ -114,7 +114,16 @@ def _us_market_holidays(year):
     if year in _holiday_cache:
         return _holiday_cache[year]
     hols = set()
-    hols.add(_observed(date(year, 1, 1)))                 # New Year's Day
+    # New Year's Day, observed. The observed date can land in the PRIOR year (Jan 1 on a
+    # Saturday -> Fri Dec 31), so a year's set must (a) include next year's New Year when
+    # it is observed back into THIS December, and (b) NOT include this year's New Year when
+    # it was pushed into last December — _is_business_day looks the date up by ITS OWN year.
+    ny_this = _observed(date(year, 1, 1))
+    if ny_this.year == year:
+        hols.add(ny_this)
+    ny_next = _observed(date(year + 1, 1, 1))
+    if ny_next.year == year:
+        hols.add(ny_next)
     hols.add(_nth_weekday(year, 1, 0, 3))                 # MLK Day (3. Mo Jan)
     hols.add(_nth_weekday(year, 2, 0, 3))                 # Presidents' Day (3. Mo Feb)
     hols.add(_easter(year) - timedelta(days=2))           # Good Friday

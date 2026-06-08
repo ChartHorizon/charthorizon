@@ -272,14 +272,18 @@ def _seasonal_signal_at(curves, doy):
     return "bullish" if v == 1 else "bearish" if v == -1 else "neutral"
 
 
-def _screener_seasonal_signal(seasonal_history):
+def _screener_seasonal_signal(seasonal_history, curves=None):
     """Tightened seasonal filter (quality > quantity). Builds the distinct 5/10/20/40-year
     seasonal curves and combines two gates: (1) the 3-of-4 rule -- at least three of the
     four INDEPENDENT curves share a direction and none points the opposite way; and (2) a
     minimum-duration gate (SEASONAL_MIN_RUN_DAYS) -- that aligned direction must hold for a
     sustained run, not a brief blip. Fewer than four independent curves -> neutral. Returns
-    'bullish' / 'bearish' / 'neutral', or None when there is no usable history."""
-    curves = _seasonal_distinct_curves(seasonal_history)
+    'bullish' / 'bearish' / 'neutral', or None when there is no usable history.
+
+    `curves` may be passed pre-built (by build_screener_summary) to avoid rebuilding the
+    distinct curves twice per market (signal + event)."""
+    if curves is None:
+        curves = _seasonal_distinct_curves(seasonal_history)
     if not curves:
         return None
     cur = _screener_doy(date.today().isoformat())
@@ -288,7 +292,7 @@ def _screener_seasonal_signal(seasonal_history):
     return _seasonal_signal_at(curves, cur)
 
 
-def _screener_seasonal_event(seasonal_history, today=None):
+def _screener_seasonal_event(seasonal_history, today=None, curves=None):
     """Next seasonal change for the Weekly Outlook — when the gated seasonal signal next
     flips. Returns ``{"type": "onset"|"offset", "date": ISO, "direction": "bullish"|"bearish"}``
     or ``None`` when there is no usable seasonal signal (fewer than four distinct curves).
@@ -302,8 +306,12 @@ def _screener_seasonal_event(seasonal_history, today=None):
     signal, scanned forward up to a year. The frontend turns ``date`` into a relative
     "in N days / next week" against the viewer's own today, so the projection stays
     correct even if the data is a day stale.
+
+    `curves` may be passed pre-built (by build_screener_summary) to avoid rebuilding the
+    distinct curves twice per market (signal + event).
     """
-    curves = _seasonal_distinct_curves(seasonal_history)
+    if curves is None:
+        curves = _seasonal_distinct_curves(seasonal_history)
     if not curves or len(curves) < 4:
         return None
     seq = _seasonal_gated_sequence(curves)
@@ -361,7 +369,13 @@ def _screener_cot_hedge_signal(cot_series, days=182):
                 window.append(net)
     if not window:
         return None
-    midpoint = (min(window) + max(window)) / 2
+    lo, hi = min(window), max(window)
+    if hi == lo:
+        # Flat window (constant net, or a single COT point): there is no positioning
+        # range to sit high/low within, so `>= midpoint` would always read bullish.
+        # That is not a signal — return neutral.
+        return "neutral"
+    midpoint = (lo + hi) / 2
     return "bullish" if window[-1] >= midpoint else "bearish"
 
 
@@ -392,6 +406,10 @@ def build_screener_summary(by_cat):
             cc = mk.get("continuous_contract", {})
             contracts = mk.get("contracts") or []
             front = contracts[0] if contracts else {}
+            # Build the distinct seasonal curves once and share them between the
+            # signal and the event (both otherwise rebuild them from scratch).
+            seasonal_history = cc.get("seasonal_history") or []
+            seasonal_curves = _seasonal_distinct_curves(seasonal_history)
             out.append({
                 "key": key,
                 "display_name": mk.get("display_name"),
@@ -399,10 +417,10 @@ def build_screener_summary(by_cat):
                 "slug": _slug(cat),
                 "last": front.get("last"),
                 "change_pct": front.get("change_pct"),
-                "seasonal": _screener_seasonal_signal(cc.get("seasonal_history") or []),
+                "seasonal": _screener_seasonal_signal(seasonal_history, curves=seasonal_curves),
                 "cot": _screener_cot_signal(mk.get("cot_series") or []),
                 "cot_hedge": _screener_cot_hedge_signal(mk.get("cot_series") or []),
                 "structure": _screener_structure_signal(contracts),
-                "seasonal_event": _screener_seasonal_event(cc.get("seasonal_history") or []),
+                "seasonal_event": _screener_seasonal_event(seasonal_history, curves=seasonal_curves),
             })
     return out

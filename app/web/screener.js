@@ -588,11 +588,13 @@ function wkDrawChart(el) {
     const x1 = barXs[i1], x2 = barXs[i2], col = p.direction === 'bullish' ? '#16a34a' : '#dc2626';
     if (x2 > x1) bands += `<rect x="${x1.toFixed(1)}" y="${padT}" width="${(x2 - x1).toFixed(1)}" height="${priceH}" fill="${col}" opacity="0.18"/>`;
     const b = bars[i1], mx = x1;
-    if (b) {
+    // Entry/drop markers only when their day is actually in view: ps/pe outside the
+    // window get clamped by nearestIdx to bar 0 / n-1, drawing a phantom marker at the edge.
+    if (b && ps >= t0) {
       if (p.direction === 'bullish') { const y = pY(b.low) + 6; marks += `<path d="M ${mx.toFixed(1)},${y.toFixed(1)} L ${(mx - 6).toFixed(1)},${(y + 11).toFixed(1)} L ${(mx + 6).toFixed(1)},${(y + 11).toFixed(1)} Z" fill="${CHART_THEME.bull}" stroke="#fff" stroke-width="0.8"/>`; }
       else { const y = pY(b.high) - 6; marks += `<path d="M ${mx.toFixed(1)},${y.toFixed(1)} L ${(mx - 6).toFixed(1)},${(y - 11).toFixed(1)} L ${(mx + 6).toFixed(1)},${(y - 11).toFixed(1)} Z" fill="${CHART_THEME.bear}" stroke="#fff" stroke-width="0.8"/>`; }
     }
-    if (p.end) {
+    if (p.end && pe <= t1) {
       const eb = bars[i2], ex = x2;
       if (eb) { const ey = p.direction === 'bullish' ? pY(eb.high) - 13 : pY(eb.low) + 13;
         marks += `<g fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round">`

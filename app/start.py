@@ -439,11 +439,15 @@ def free_port(port):
     return port
 
 
+# Serializes the lazy contract-history cache (request threads read/write it) against
+# the refresh thread wiping it, so a wipe mid-request cannot race the open()/replace().
+_contract_cache_lock = threading.Lock()
+
+
 def _contract_history_cache_path(symbol, period):
     safe_symbol = re.sub(r"[^A-Za-z0-9_.=-]+", "_", symbol)
     safe_period = re.sub(r"[^A-Za-z0-9_.=-]+", "_", period)
     cache_dir = os.path.join("ff_data", "contract_history")
-    os.makedirs(cache_dir, exist_ok=True)
     return os.path.join(cache_dir, f"{safe_symbol}_{safe_period}.json")
 
 
@@ -456,9 +460,10 @@ def clear_contract_history_cache():
     """
     import shutil
     cache_dir = os.path.join("ff_data", "contract_history")
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-        ok("Einzelkontrakt-Cache geleert (wird bei Bedarf neu geladen)")
+    with _contract_cache_lock:
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            ok("Einzelkontrakt-Cache geleert (wird bei Bedarf neu geladen)")
 
 
 def _trim_leading_flat(rows):
@@ -503,13 +508,16 @@ def _history_rows(symbol, period):
         if any(v != v for v in (o, h, l, c)):
             continue
         volume = row["Volume"] if "Volume" in row else None
+        # `volume is not None` guards the missing-column case (None == None is True,
+        # so the bare NaN-check `volume == volume` would let None reach int() -> 500);
+        # the second clause then drops NaN volumes.
         rows.append({
             "date": idx.strftime("%Y-%m-%d"),
             "open": round(float(o), 4),
             "high": round(float(h), 4),
             "low": round(float(l), 4),
             "close": round(float(c), 4),
-            "volume": int(volume) if volume == volume else None,
+            "volume": int(volume) if volume is not None and volume == volume else None,
         })
     return _drop_unsettled_tail(_trim_leading_flat(rows))
 
@@ -517,10 +525,20 @@ def _history_rows(symbol, period):
 def get_contract_history(symbol, period="5y"):
     """Holt und cached die Historie eines einzelnen Futures-Kontrakts."""
     cache_path = _contract_history_cache_path(symbol, period)
-    if os.path.exists(cache_path):
-        with open(cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    with _contract_cache_lock:
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (ValueError, OSError):
+                # Korrupte/abgeschnittene Cache-Datei (z.B. Absturz mitten im Schreiben):
+                # verwerfen und neu erzeugen, statt bei jedem Aufruf 500 zu liefern.
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
 
+    # Netzwerk-Fetch bewusst außerhalb des Locks (langsam) — nur die FS-Ops sind serialisiert.
     payload = {
         "symbol": symbol,
         "period": period,
@@ -528,8 +546,24 @@ def get_contract_history(symbol, period="5y"):
         "contract_type": "single_expiry_month",
         "history": _history_rows(symbol, period),
     }
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+    with _contract_cache_lock:
+        cache_dir = os.path.dirname(cache_path)
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            # Atomar schreiben (tempfile + os.replace), damit ein Absturz/voller Datenträger
+            # keine halbe JSON-Datei hinterlässt, die jeden späteren Read crasht.
+            fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".ch_", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                os.replace(tmp, cache_path)
+            except OSError:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        except OSError:
+            pass   # Cache best-effort: bei FS-Problemen liefern wir die Historie trotzdem aus.
     return payload
 
 

@@ -1112,9 +1112,12 @@ function loadChart(cfg) {
   };
   const xForDate = date => barXs[nearestBarIndexByTime(new Date(date).getTime())];
 
-  // Price scale
-  const pMin = Math.min(...bars.map(d => d.low));
-  const pMax = Math.max(...bars.map(d => d.high));
+  // Price scale. Filter to finite values first: a single null/undefined low/high would
+  // make Math.min/Math.max NaN, poisoning the whole domain so the SVG renders nothing.
+  const lows = bars.map(d => d.low).filter(Number.isFinite);
+  const highs = bars.map(d => d.high).filter(Number.isFinite);
+  const pMin = lows.length ? Math.min(...lows) : 0;
+  const pMax = highs.length ? Math.max(...highs) : 1;
   const pRng = (pMax - pMin) || 1;
   const pad = pRng * 0.05;
   const pLo = pMin - pad, pHi = pMax + pad, pSpan = pHi - pLo;
@@ -1519,7 +1522,10 @@ function loadChart(cfg) {
   if (document.body.classList.contains('card-mode') && window.__fourFourLog) {
     const periods = ((window.__fourFourLog[chartState.key] || {}).periods) || [];
     const lastX = barXs[barXs.length - 1];
+    const winT0 = barTimes[0], winT1 = barTimes[n - 1];
     periods.forEach(p => {
+      const ps = new Date(p.start).getTime();
+      const pe = p.end ? new Date(p.end).getTime() : null;
       const x1 = xForDate(p.start), x2 = p.end ? xForDate(p.end) : lastX;
       if (x1 != null && x2 != null && x2 > x1) {
         const col = p.direction === 'bullish' ? '#16a34a' : '#dc2626';
@@ -1527,8 +1533,10 @@ function loadChart(cfg) {
       }
       // Drop-Marker am Ende einer GESCHLOSSENEN 4/4-Periode (Setup auf 3/4 gefallen):
       // hohles, weiss umrandetes Amber-X am Fall-Punkt. Offene Perioden (end=null) bekommen keinen.
-      if (p.end) {
-        const eIdx = nearestBarIndexByTime(new Date(p.end).getTime());
+      // Nur zeichnen, wenn der Fall-Tag im sichtbaren Fenster liegt — sonst klemmt
+      // nearestBarIndexByTime ihn an den Rand und setzt einen Phantom-Marker am Chart-Rand.
+      if (pe != null && pe >= winT0 && pe <= winT1) {
+        const eIdx = nearestBarIndexByTime(pe);
         const eb = bars[eIdx], ex = barXs[eIdx];
         if (eb != null && ex != null) {
           const ey = p.direction === 'bullish' ? pY(eb.high) - 13 : pY(eb.low) + 13;
@@ -1540,7 +1548,9 @@ function loadChart(cfg) {
             + `</g>`;
         }
       }
-      const idx = nearestBarIndexByTime(new Date(p.start).getTime());
+      // Entry-Marker nur, wenn der Einstiegs-Tag im sichtbaren Fenster liegt (sonst Phantom am Rand).
+      if (!(ps >= winT0 && ps <= winT1)) return;
+      const idx = nearestBarIndexByTime(ps);
       const b = bars[idx], mx = barXs[idx];
       if (b == null || mx == null) return;
       if (p.direction === 'bullish') {

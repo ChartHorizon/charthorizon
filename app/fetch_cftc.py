@@ -11,7 +11,7 @@ import json
 import re
 import urllib.request
 import urllib.parse
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
 try:
@@ -233,7 +233,10 @@ def _fetch_cftc_dataset(dataset, wanted_codes):
         total_oi = _to_int(row.get("open_interest_all"))
         cot_long = _to_int(row.get(long_field))
         cot_short = _to_int(row.get(short_field))
-        if not (code and iso) or None in (total_oi, cot_long, cot_short):
+        # A missing Open Interest must not discard otherwise-valid COT positioning;
+        # oi may be None (the OI series builder skips None-oi rows). Only the COT
+        # long/short are required to form the net signal.
+        if not (code and iso) or None in (cot_long, cot_short):
             continue
         cot_net = cot_long - cot_short
         result.setdefault(code, []).append({
@@ -287,27 +290,50 @@ def fetch_cftc_cot_api():
     if missing:
         print(f"   ⚠  No CFTC series for: {', '.join(sorted(missing))}")
 
-    return _finish_cot_result(merged, "Public Reporting API combined")
+    # Each per-dataset series was already deduped/sorted/trimmed by _finish_cot_result
+    # inside _fetch_cftc_dataset; `merged` only selects whole series, so re-finishing it
+    # would just repeat that work. Log the combined count and return as-is.
+    print(f"   ✓ CFTC COT (Public Reporting API combined): {len(merged)} markets loaded")
+    return merged
 
 
 def fetch_cftc_cot_legacy_txt():
     """
-    Fallback: loads the legacy CFTC text file and parses it as CSV.
+    Fallback: loads the legacy CFTC disaggregated text file and parses it as CSV.
+
+    NOTE: f_disagg.txt only carries the Producer/Merchant (commercial) cohort for
+    *physical* commodities. Financial contracts (Indices/Bonds/Currencies) have no
+    Producer/Merchant category here — their commercial side lives in the Legacy
+    (Commercial) report — so we SKIP them rather than attribute producer/merchant
+    (or empty) numbers to them, which would violate the 'COT reads the commercial
+    side' rule. On this fallback path financials simply get no COT until the API
+    recovers.
     """
     url = "https://www.cftc.gov/dea/newcot/f_disagg.txt"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         text = resp.read().decode("utf-8", errors="ignore")
 
+    code_category = _code_to_category()
+    prod_merc_categories = {
+        cat for cat, order in CFTC_CATEGORY_PREFERENCE.items()
+        if order and order[0] == "Disaggregated Futures Only"
+    }
+
     result = {}
     reader = csv.DictReader(text.splitlines())
     for row in reader:
         code = (row.get("CFTC_Contract_Market_Code") or "").strip()
+        # Producer/Merchant only represents the commercial side for physical
+        # commodities; never attribute it to a financial contract.
+        category = code_category.get(code)
+        if category is not None and category not in prod_merc_categories:
+            continue
         iso = _parse_cftc_date(row.get("Report_Date_as_MM_DD_YYYY"))
         total_oi = _to_int(row.get("Open_Interest_All"))
         comm_long = _to_int(row.get("Prod_Merc_Positions_Long_All"))
         comm_short = _to_int(row.get("Prod_Merc_Positions_Short_All"))
-        if not (code and iso) or None in (total_oi, comm_long, comm_short):
+        if not (code and iso) or None in (comm_long, comm_short):
             continue
         result.setdefault(code, []).append({
             "date": iso,
@@ -356,7 +382,12 @@ def _cot_now_et():
     """Current time in Eastern Time, matching the CFTC publication schedule."""
     if CFTC_ET_TZ:
         return datetime.now(CFTC_ET_TZ)
-    return datetime.now()
+    # zoneinfo unavailable (pre-3.9 without backport): approximate Eastern as a fixed
+    # UTC-5 (EST) instead of naive machine-local time. On a non-ET box the old fallback
+    # compared the local wall clock against 15:45 "ET" and could open the release window
+    # hours early; UTC-5 is at worst 1h behind real ET during DST, which only ever DELAYS
+    # the window — it never fetches before the 15:30 ET publication.
+    return (datetime.now(timezone.utc) - timedelta(hours=5)).replace(tzinfo=None)
 
 
 def _cot_release_dates_for_year(year):

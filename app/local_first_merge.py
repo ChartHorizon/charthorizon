@@ -148,7 +148,9 @@ def _series_health(rows, *, kind="generic"):
     for prev, cur in zip(dates, dates[1:]):
         max_gap = max(max_gap, (cur - prev).days)
     years = len({d.year for d in dates})
-    points = len(rows or [])
+    # Count UNIQUE dates, not raw rows: a fresh fetch padded with duplicate-date rows
+    # must not pass the "materially shorter" gate while actually covering fewer days.
+    points = len(dates)
 
     status = "ok"
     if kind == "price" and (points < 900 or years < 4):
@@ -252,9 +254,14 @@ _OI_SOURCE_PRIORITY = {"cftc_cot": 1}
 def _merge_oi_series(existing_series, snapshot, cot_series=None, max_points=1300):
     """Merges OI points from several sources into one clean, sorted daily series.
 
-    Inputs (low to high priority on date collisions):
-      - weekly COT history (multi-year base)
-      - the previously stored CFTC series
+    Inputs are considered low -> high priority on a date collision (later wins on an
+    equal-rank tie), so a fresh CFTC value REVISES a previously stored date instead of
+    being silently kept stale:
+      - the previously stored CFTC series (oldest baseline)
+      - weekly COT history from this run (revisions + new weeks)
+      - the live snapshot (highest)
+    Dates present only in the stored series are never dropped (no collision), so the
+    never-lose-history invariant still holds.
     """
     by_date = {}
 
@@ -280,9 +287,9 @@ def _merge_oi_series(existing_series, snapshot, cot_series=None, max_points=1300
         if new_rank >= old_rank:
             by_date[day] = row
 
-    for row in _oi_series_from_cot(cot_series):
-        consider(row)
     for row in existing_series or []:
+        consider(row)
+    for row in _oi_series_from_cot(cot_series):
         consider(row)
     consider(snapshot)
 

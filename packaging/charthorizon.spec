@@ -47,4 +47,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='ChartHorizon',
 coll = COLLECT(exe, a.binaries, a.datas, name='ChartHorizon')
 app = BUNDLE(coll, name='ChartHorizon.app', bundle_identifier='com.charthorizon.app',
              icon=os.path.join(ICON_DIR, 'charthorizon.icns'),
-             info_plist={'CFBundleName': 'ChartHorizon', 'CFBundleShortVersionString': '1.0.2', 'LSBackgroundOnly': False})
+             info_plist={'CFBundleName': 'ChartHorizon', 'CFBundleShortVersionString': '1.0.3', 'LSBackgroundOnly': False})

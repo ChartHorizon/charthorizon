@@ -2,7 +2,7 @@
 ; Expects the PyInstaller onedir output at dist\ChartHorizon\
 [Setup]
 AppName=ChartHorizon
-AppVersion=1.0.2
+AppVersion=1.0.3
 DefaultDirName={localappdata}\ChartHorizon
 DefaultGroupName=ChartHorizon
 PrivilegesRequired=lowest

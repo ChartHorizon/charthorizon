@@ -32,6 +32,17 @@ function smtInstrumentType(key) {
 let smtState = { a: 'gold', b: 'silver', c: 'usdx', range: 365, interval: 'daily', contractMode: 'continuous' };
 let smtSeq = 0;          // guards against out-of-order async renders
 
+// Per-market ACTUAL contract mode after loading. Front-Month silently falls back to the
+// native continuous when a leg has no tradable front contract (e.g. the USDX proxy) or the
+// fetch fails; the label must reflect what was actually drawn, not just the toggle, so the
+// on-screen chart and the PNG export are not mislabeled. Set during smtLoadBars, which is
+// awaited before the slot/label renders.
+let smtActualMode = {};   // marketKey -> 'frontMonth' | 'continuous'
+function smtModeLabel(key) {
+  if (smtState.contractMode !== 'frontMonth') return 'Continuous';
+  return smtActualMode[key] === 'continuous' ? 'Continuous (no front month)' : 'Front Month';
+}
+
 // ── Trend-line annotations: drawn into each chart's SVG (so the PNG export
 // captures them for free), anchored to (date, price) so they survive timeframe
 // and market switches. Keyed by market so a market keeps its lines in either slot.
@@ -174,27 +185,32 @@ async function smtLoadBars(key) {
   const catData = await loadCategory(meta.slug);
   const cfg = catData && catData[key];
   if (!cfg) return [];
-  if (smtState.contractMode === 'frontMonth') return smtLoadFrontContractBars(cfg);
+  if (smtState.contractMode === 'frontMonth') return smtLoadFrontContractBars(cfg, key);
+  smtActualMode[key] = 'continuous';
   return getContinuousContract(cfg).history || [];
 }
 
 // Front-month mode: load the current front contract's own daily history (lazy
 // /api/contract-history fetch, cached on the contract). Falls back to the native
 // continuous when there is no tradable front contract (e.g. the USDX proxy).
-async function smtLoadFrontContractBars(cfg) {
+async function smtLoadFrontContractBars(cfg, key) {
+  const markFront = () => { if (key) smtActualMode[key] = 'frontMonth'; };
+  const markFallback = () => { if (key) smtActualMode[key] = 'continuous'; };
   const front = (cfg.contracts || []).find(c => c && c.available && c.yf_symbol)
     || (cfg.contracts || [])[0];
-  if (!front || !front.yf_symbol) return getContinuousContract(cfg).history || [];
-  if (front.chart_history && front.chart_history.length) return front.chart_history;
+  if (!front || !front.yf_symbol) { markFallback(); return getContinuousContract(cfg).history || []; }
+  if (front.chart_history && front.chart_history.length) { markFront(); return front.chart_history; }
   try {
     const url = `/api/contract-history?symbol=${encodeURIComponent(front.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}`;
     const res = await fetch(url);
     const payload = await res.json();
     if (res.ok && Array.isArray(payload.history) && payload.history.length) {
       front.chart_history = payload.history;
+      markFront();
       return payload.history;
     }
   } catch (e) {}
+  markFallback();
   return getContinuousContract(cfg).history || [];
 }
 
@@ -356,7 +372,7 @@ function smtChartSlot(key, bars, domain, width, height) {
   const title = esc(m.display_name || key);
   const intervalLabel = smtState.interval === 'weekly' ? 'Weekly' : 'Daily';
   const rangeLabel = (SMT_RANGES.find(r => r[0] === smtState.range) || [0, ''])[1];
-  const modeLabel = smtState.contractMode === 'frontMonth' ? 'Front Month' : 'Continuous';
+  const modeLabel = smtModeLabel(key);
   const head = `<div class="smt-chart-title">${title} <span class="smt-chart-meta">${smtInstrumentType(key)} · ${modeLabel} · ${intervalLabel} · ${rangeLabel}</span></div>`;
   if (!bars.length || !domain) {
     return `<div class="smt-chart-slot">${head}<div class="smt-empty">No history for this market and window.</div></div>`;
@@ -605,7 +621,7 @@ function smtSvgToCanvas(targetWidth) {
     for (let i = 0; i < svgs.length; i++) {
       const key = svgs[i].dataset.key;
       const name = (INDEX[key] && INDEX[key].display_name) || key || '';
-      const meta = `${smtInstrumentType(key)} · ${smtState.contractMode === 'frontMonth' ? 'Front Month' : 'Continuous'} · ${smtState.interval === 'weekly' ? 'Weekly' : 'Daily'} · ${(SMT_RANGES.find(r => r[0] === smtState.range) || [0, ''])[1]}`;
+      const meta = `${smtInstrumentType(key)} · ${smtModeLabel(key)} · ${smtState.interval === 'weekly' ? 'Weekly' : 'Daily'} · ${(SMT_RANGES.find(r => r[0] === smtState.range) || [0, ''])[1]}`;
       cx.save();
       cx.fillStyle = '#0f172a';
       cx.font = '600 13px Sora, system-ui, sans-serif';
