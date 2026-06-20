@@ -33,5 +33,8 @@ if [ ! -x appimagetool ]; then
     "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
   chmod +x appimagetool
 fi
-ARCH=x86_64 ./appimagetool "$APPDIR" "dist/ChartHorizon-${VERSION}-x86_64.AppImage"
+# APPIMAGE_EXTRACT_AND_RUN: appimagetool is itself an AppImage and would need FUSE
+# (libfuse.so.2) to mount-and-run — absent on GitHub ubuntu-latest. Extract-and-run
+# unpacks it instead, so the build needs no FUSE on the runner.
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "$APPDIR" "dist/ChartHorizon-${VERSION}-x86_64.AppImage"
 echo "Built: dist/ChartHorizon-${VERSION}-x86_64.AppImage"
