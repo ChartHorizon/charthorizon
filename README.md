@@ -14,14 +14,25 @@ Unsigned installers for the latest release:
 
 Get them from the [Releases page](../../releases/latest).
 
-### Opening an unsigned build (one time)
+### Install & first launch
 
-The installers are unsigned, so the OS shows a one-time warning:
+The builds are **unsigned**, so the first launch takes one manual step:
 
-- **macOS:** right-click the app → **Open** → **Open** (or System Settings →
-  Privacy & Security → **Open Anyway**).
-- **Windows:** SmartScreen → **More info** → **Run anyway**.
-- **Linux:** `chmod +x ChartHorizon-*-x86_64.AppImage` then run it.
+- **macOS:** open the `.dmg`, then drag **ChartHorizon** onto the **Applications**
+  folder shown beside it. Launch it from Applications — on first run, right-click the
+  app → **Open** → **Open**. If macOS still says the app is *"damaged"* or can't be
+  opened, clear the download quarantine once in Terminal, then open it normally:
+  ```
+  xattr -cr /Applications/ChartHorizon.app
+  ```
+- **Windows:** run the `.exe` installer; if SmartScreen appears, click **More info** →
+  **Run anyway**. It installs per-user (no admin) and adds Start-menu/desktop shortcuts.
+- **Linux:** `chmod +x ChartHorizon-*-x86_64.AppImage`, then run it. If it reports
+  *"AppImages require FUSE"* (common on newer distros), either install FUSE 2
+  (`sudo apt install libfuse2` on Debian/Ubuntu) or run it without FUSE:
+  ```
+  ./ChartHorizon-*-x86_64.AppImage --appimage-extract-and-run
+  ```
 
 ## How it works
 
