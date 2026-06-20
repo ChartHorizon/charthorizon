@@ -10,10 +10,9 @@
     4. Öffnet das Dashboard im Browser
 
   Starten:
-    python3 start.py            (schnell starten)
-    python3 start.py --refresh  (EoD-Daten laden, falls der Zieltag noch fehlt)
-    python3 start.py --refresh --force-refresh  (Daten-Download erzwingen)
-    python3 start.py --refresh --no-serve  (nur EoD-Update, kein Webserver)
+    python3 start.py            (schnell starten; holt im Hintergrund die neuesten Daten)
+    python3 start.py --refresh  (immer die aktuellsten yfinance-Daten laden)
+    python3 start.py --refresh --no-serve  (nur Daten-Update, kein Webserver)
 
   Beenden:  Strg + C  (Ctrl + C)
 ═══════════════════════════════════════════════════════════════════════
@@ -25,6 +24,35 @@ import argparse
 import subprocess
 import threading
 import webbrowser
+
+import live_cache
+
+try:
+    from curl_cffi import requests as _curl_requests
+except ImportError:
+    _curl_requests = None
+
+
+def _build_live_session():
+    """One shared browser-impersonating session for the live-quote path. Cookie/crumb
+    reuse + a Chrome fingerprint cut Yahoo 429s at the source. Returns None when
+    curl_cffi is unavailable or the API rejects our args (the live path then falls back
+    to a bare yfinance Ticker — still protected by the cache + rate cap)."""
+    if _curl_requests is None:
+        return None
+    try:
+        return _curl_requests.Session(impersonate="chrome",
+                                      timeout=live_cache.LIVE_FETCH_TIMEOUT_SECONDS)
+    except Exception:
+        try:
+            return _curl_requests.Session(impersonate="chrome")
+        except Exception:
+            return None
+
+
+_LIVE_SESSION = _build_live_session()
+
+
 import http.server
 import socketserver
 import json
@@ -42,7 +70,6 @@ PORT = 8000
 HTML_FILE = "index.html"
 GENERATOR = "commodity_dashboard.py"
 REQUIRED = ["yfinance", "python-dateutil", "pypdf", "curl_cffi"]
-REFRESH_STATE_FILE = os.path.join("ff_data", "refresh_state.json")
 YFINANCE_EOD_READY_ET = time(17, 30)
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
 LOCK_FILE = os.path.join("ff_data", "refresh.lock")
@@ -267,12 +294,14 @@ def _previous_business_day(day):
     return _latest_business_day_on_or_before(day - timedelta(days=1))
 
 
-def expected_yfinance_eod_date(now_et=None):
-    """Business date that should be available from yfinance by now.
+def _latest_settled_eod_date(now_et=None):
+    """Latest business date whose settled EoD bar should already exist from yfinance.
 
-    We use 17:30 ET as a practical delay buffer after the US futures close.
-    Before that, today's EoD bar is not expected yet, so the previous business
-    day is considered current.
+    This is the settle cutoff for the contract-history endpoint's unsettled-tail
+    guard (`_drop_unsettled_tail`) — a still-forming bar is never served. We use
+    17:30 ET as a practical delay buffer after the US futures close; before that,
+    today's bar has not settled yet, so the previous business day is the latest
+    settled date.
     """
     now_et = now_et or _eastern_now()
     today = now_et.date()
@@ -288,58 +317,6 @@ def _parse_date(value):
         return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return None
-
-
-def latest_price_date_from_quality():
-    """Latest price-history end date in ff_data/data_quality.json."""
-    path = os.path.join("ff_data", "data_quality.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except Exception:
-        return None
-    latest = None
-    for market in (payload.get("markets") or {}).values():
-        price = market.get("price") or {}
-        health = price.get("health") or {}
-        end = _parse_date(health.get("end"))
-        if end and (latest is None or end > latest):
-            latest = end
-    return latest
-
-
-def eod_refresh_status():
-    """Whether the local yfinance EoD files already cover the expected date."""
-    now_et = _eastern_now()
-    target = expected_yfinance_eod_date(now_et)
-    latest = latest_price_date_from_quality()
-    return {
-        "is_current": bool(latest and latest >= target),
-        "now_et": now_et,
-        "target": target,
-        "latest": latest,
-    }
-
-
-def write_refresh_state(status):
-    """Small audit file for the local EoD refresh gate."""
-    os.makedirs(os.path.dirname(REFRESH_STATE_FILE), exist_ok=True)
-    now_et = _eastern_now()
-    target = expected_yfinance_eod_date(now_et)
-    latest = latest_price_date_from_quality()
-    payload = {
-        "last_checked_at": datetime.now().isoformat(timespec="seconds"),
-        "last_checked_at_et": now_et.isoformat(timespec="seconds"),
-        "status": status,
-        "target_eod_date": target.isoformat(),
-        "latest_price_date": latest.isoformat() if latest else None,
-        "current_for_target": bool(latest and latest >= target),
-        "yfinance_eod_rule": "target advances after 17:30 ET; before that it uses the previous business day",
-    }
-    with open(REFRESH_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
 
 
 def _run_generator_subprocess():
@@ -383,7 +360,6 @@ def _run_locked_refresh():
         if rc == 0:
             _write_progress(state="done",
                             finished_at=datetime.now().isoformat(timespec="seconds"))
-            write_refresh_state("refreshed")
         else:
             _write_progress(state="error",
                             finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -417,14 +393,12 @@ def foreground_refresh():
     never collides with a running server's background refresh or the 23:30 job."""
     if not acquire_refresh_lock("cli"):
         warn("Ein anderer Refresh laeuft bereits — uebersprungen.")
-        write_refresh_state("skipped_locked")
         return
     try:
         clear_contract_history_cache()
         generate_dashboard()   # generator writes its own running->done progress
         _write_progress(state="done",
                         finished_at=datetime.now().isoformat(timespec="seconds"))
-        write_refresh_state("refreshed")
     finally:
         release_refresh_lock()
 
@@ -484,7 +458,7 @@ def _drop_unsettled_tail(rows):
     """Verwirft nachlaufende Bars jenseits des letzten settled EoD (nie ein Pre-Settle-Bar
     ausliefern). Gespiegelt zur Ingest-Regel im Generator; hier datumsbasiert genügt für
     den lazy Einzelkontrakt-Endpoint."""
-    cutoff = expected_yfinance_eod_date()
+    cutoff = _latest_settled_eod_date()
     while rows:
         d = _parse_date(rows[-1].get("date"))
         if d is not None and d > cutoff:
@@ -539,13 +513,20 @@ def get_contract_history(symbol, period="5y"):
                     pass
 
     # Netzwerk-Fetch bewusst außerhalb des Locks (langsam) — nur die FS-Ops sind serialisiert.
+    history = _history_rows(symbol, period)
     payload = {
         "symbol": symbol,
         "period": period,
         "source": "yfinance",
         "contract_type": "single_expiry_month",
-        "history": _history_rows(symbol, period),
+        "history": history,
     }
+    # Ein LEERES Ergebnis nie cachen: das passiert v.a. während eines Refreshs (Cache gerade
+    # geleert + Yahoo durch den Refresh gedrosselt). Würde man die leere Antwort cachen, bliebe
+    # der Kontrakt bis zum nächsten Refresh leer ("No chart history"). So holt der nächste Aufruf
+    # frisch — sobald Yahoo wieder liefert, steht die Historie.
+    if not history:
+        return payload
     with _contract_cache_lock:
         cache_dir = os.path.dirname(cache_path)
         try:
@@ -567,6 +548,90 @@ def get_contract_history(symbol, period="5y"):
     return payload
 
 
+def _live_quote_row(symbol, session=None):
+    """Latest price for one symbol, INCLUDING the still-forming (unsettled) bar.
+
+    The deliberate inverse of `_history_rows` + `_drop_unsettled_tail`: it keeps the
+    unsettled tail and persists NOTHING (no cache file, no JSON, no SQLite). Display-only
+    — the frontend overlays it on the chart and discards it on reload.
+    """
+    import yfinance as yf
+
+    ticker = yf.Ticker(symbol, session=session) if session is not None else yf.Ticker(symbol)
+    # 5 days guarantees at least one bar after weekends/holidays for a single latest quote.
+    hist = ticker.history(period="5d", interval="1d")
+    if hist is None or hist.empty:
+        return None
+    idx = hist.index[-1]
+    row = hist.iloc[-1]
+    close = row.get("Close")
+    if close is None or close != close:  # missing column or NaN
+        return None
+
+    def _px(v):
+        # round like the settled series; drop missing/NaN so the frontend can fall back.
+        return round(float(v), 4) if v is not None and v == v else None
+
+    # The still-forming 1d bar already carries today's intraday Open/High/Low/Close, so
+    # the live overlay can paint a REAL candle (not a flat single-price mark). Display-only;
+    # persisted nowhere.
+    # idx is yfinance's native tz; "day" is a display label only and uses the same
+    # strftime convention as _history_rows, so it lines up with the settled series.
+    return {
+        "day": idx.strftime("%Y-%m-%d"),
+        "price": round(float(close), 4),
+        "open": _px(row.get("Open")),
+        "high": _px(row.get("High")),
+        "low": _px(row.get("Low")),
+    }
+
+
+def _is_rate_limit_error(exc):
+    """Best-effort 429 detection across yfinance/curl_cffi versions (the dedicated
+    YFRateLimitError isn't present in every build)."""
+    if "ratelimit" in type(exc).__name__.lower():
+        return True
+    text = str(exc).lower()
+    return "429" in text or "too many requests" in text or "rate limit" in text
+
+
+def _live_fetch_fn(symbol):
+    """Injected into LiveQuoteCache. Returns {"day","price"} (or a None-valued row) and
+    re-raises a 429 as live_cache.RateLimitedError so the breaker can trip on it."""
+    try:
+        row = _live_quote_row(symbol, session=_LIVE_SESSION)
+    except live_cache.RateLimitedError:
+        raise
+    except Exception as e:
+        if _is_rate_limit_error(e):
+            raise live_cache.RateLimitedError(str(e))
+        raise
+    return row if row is not None else {"day": None, "price": None}
+
+
+# One process-wide cache shared by every request thread (cross-tab + cross-poll dedup).
+_live_quote_cache = live_cache.LiveQuoteCache(_live_fetch_fn)
+
+
+def live_quote_payload(symbol):
+    """Display-only live quote, served through the RAM-only cache. Never persisted."""
+    q = _live_quote_cache.get(symbol)
+    return {
+        "symbol": symbol, "price": q.get("price"), "day": q.get("day"),
+        "open": q.get("open"), "high": q.get("high"), "low": q.get("low"),
+    }
+
+
+def live_quotes_payload(symbols):
+    """Batch form: one request warms/serves many symbols (e.g. the SMT tab's 3 charts)."""
+    return {"quotes": _live_quote_cache.get_many(symbols)}
+
+
+def live_cooldown_retry_after():
+    """Seconds to back off if the breaker is open (cooldown), else 0."""
+    return _live_quote_cache.retry_after() if _live_quote_cache.cooldown_active() else 0
+
+
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         return
@@ -585,13 +650,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return os.path.join(APP_DIR, rel)
 
     def end_headers(self):
-        # Local dev server: force revalidation of static assets (HTML/JS/CSS) so an
-        # edited frontend file shows up on a normal reload instead of being served
-        # stale from the browser's heuristic cache. SimpleHTTPRequestHandler answers
-        # If-Modified-Since with 304, so this stays cheap. The JSON API sets its own
-        # Cache-Control (no-store) in _send_json, so skip the /api/ paths to avoid a dupe.
-        if not urllib.parse.urlparse(self.path).path.startswith("/api/"):
-            self.send_header("Cache-Control", "no-cache")
+        # Local dev server: never serve a stale frontend. The HTML document references the
+        # ?v-versioned assets, so a cached document means old ?v -> old JS (the "works in one
+        # browser, broken in another" trap — e.g. Opera serving a pre-fix page). The document
+        # gets no-store (never cached at all, which also defeats the back/forward cache and the
+        # browser's heuristic cache); the versioned JS/CSS get no-cache (revalidate -> cheap
+        # 304s). The JSON API sets its own Cache-Control (no-store) in _send_json, so skip /api/.
+        path = urllib.parse.urlparse(self.path).path
+        if not path.startswith("/api/"):
+            if path.endswith("/") or path.endswith(".html"):
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+            else:
+                self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def _send_json(self, status, payload):
@@ -623,13 +693,39 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(500, {"error": str(e), "symbol": symbol})
             return
 
+        if parsed.path == "/api/live-quote":
+            qs = urllib.parse.parse_qs(parsed.query)
+            retry = live_cooldown_retry_after()
+            symbols_raw = (qs.get("symbols") or [""])[0].strip()
+            if symbols_raw:                              # batch form: ?symbols=A,B,C
+                syms = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+                syms = [s for s in syms if re.fullmatch(r"[A-Za-z0-9_.=-]{2,32}", s)][:12]
+                payload = live_quotes_payload(syms)
+                if retry > 0:
+                    payload["retry_after"] = retry
+                    self._send_json(429, payload)
+                else:
+                    self._send_json(200, payload)
+                return
+            symbol = (qs.get("symbol") or [""])[0].strip()   # single form (back-compat)
+            if not re.fullmatch(r"[A-Za-z0-9_.=-]{2,32}", symbol):
+                self._send_json(400, {"error": "Ungueltiges Symbol"})
+                return
+            payload = live_quote_payload(symbol)
+            if retry > 0:
+                payload["retry_after"] = retry
+                self._send_json(429, payload)
+            else:
+                self._send_json(200, payload)
+            return
+
         super().do_GET()
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/refresh":
-            # The manual button always runs (bypasses the EoD "skip because current"
-            # gate). The generator still ingests settled EoD only — never intraday.
+            # The manual button always runs. The generator still ingests settled
+            # EoD only — never intraday.
             self._send_json(200, start_background_refresh("manual"))
             return
         self._send_json(404, {"error": "not found"})
@@ -674,7 +770,6 @@ def _first_run_generate():
     poll loop redirects to the dashboard."""
     try:
         generate_dashboard()
-        write_refresh_state("refreshed")
     except SystemExit:
         pass
 
@@ -682,7 +777,9 @@ def _first_run_generate():
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--refresh", action="store_true")
-    parser.add_argument("--force-refresh", action="store_true")
+    # Kept as a harmless no-op for backward compatibility: --refresh always does a
+    # full fetch now (the old EoD skip-gate is gone), so --force-refresh adds nothing.
+    parser.add_argument("--force-refresh", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-serve", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--run-generator", action="store_true")
@@ -707,29 +804,12 @@ def main():
     check_python()
     ensure_packages()
     if (args.refresh or not dashboard_exists()) and not (FROZEN and not dashboard_exists() and not args.refresh):
-        if args.refresh and dashboard_exists() and not args.force_refresh:
-            status = eod_refresh_status()
-            if status["is_current"]:
-                step("Prüfe EoD-Aktualisierung")
-                ok(
-                    "Yfinance EoD-Daten sind aktuell "
-                    f"(Ziel {status['target'].isoformat()}, lokal bis {status['latest'].isoformat()})"
-                )
-                info("Kein neuer API-Download nötig")
-                write_refresh_state("skipped_current")
-            else:
-                target = status["target"].isoformat()
-                latest = status["latest"].isoformat() if status["latest"] else "keine Daten"
-                info(f"EoD-Refresh nötig (Ziel {target}, lokal bis {latest})")
-                foreground_refresh()
+        if args.refresh:
+            # Immer die aktuellsten yfinance-Daten holen (kein EoD-Skip-Gate mehr).
+            # Der Generator speichert weiterhin nur settled EoD — nie Intraday.
+            foreground_refresh()
         else:
-            if args.refresh:
-                if args.force_refresh:
-                    info("Force refresh: EoD-Skip-Regel wird ignoriert")
-                foreground_refresh()
-            else:
-                generate_dashboard()      # erster Lauf ohne Daten — unconditional
-                write_refresh_state("refreshed")
+            generate_dashboard()      # erster Lauf ohne Daten — unconditional
     else:
         step("Nutze vorhandene Dashboard-Dateien")
         ok("Kein neuer Daten-Download nötig")
@@ -738,10 +818,11 @@ def main():
         ok("Webserver wurde nicht gestartet")
         return
 
-    # Warm start (data already present, no CLI --refresh): serve instantly, and only
-    # if the EoD gate says we're behind, kick a background refresh so the page stays
-    # instant. The in-watchlist bar polls /api/refresh-status.
-    if (not args.refresh) and dashboard_exists() and not eod_refresh_status()["is_current"]:
+    # Warm start (data already present, no CLI --refresh): serve instantly and always
+    # kick a background refresh so the page is pulling the freshest yfinance data on
+    # every open. The in-watchlist bar polls /api/refresh-status. (The lock serializes
+    # against any other refresh; the generator still ingests settled EoD only.)
+    if (not args.refresh) and dashboard_exists():
         start_background_refresh("auto")
 
     # Frozen first launch with no data yet: open the splash and fetch in the background,

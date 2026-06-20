@@ -34,6 +34,7 @@ async function activateSelectedContract(cfg) {
     chartState.chartMode = 'continuous';
     loadChart(cfg);
     renderTable(cfg);
+    if (typeof restartLiveLayer === 'function') restartLiveLayer();
     return;
   }
   await selectCurveContract(idx);
@@ -67,6 +68,7 @@ async function selectCurveContract(index, fallbackToContinuous = false) {
         chartState.contractLabel = null;
         loadChart(cfg);
         renderTable(cfg);
+        if (typeof restartLiveLayer === 'function') restartLiveLayer();
         return;
       }
       renderContractError(cfg, contract, e.message || String(e));
@@ -79,10 +81,13 @@ async function selectCurveContract(index, fallbackToContinuous = false) {
   if (getCurrentCfg() !== cfg) return;
   loadChart(cfg);
   renderTable(cfg);
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 
 function renderTable(cfg) {
   const dec = cfg.tick_decimals;
+  // FRONT badge marks the lead (highest-volume) contract, not row 0 — see frontContractIndex.
+  const frontIdx = frontContractIndex(cfg.contracts);
   document.getElementById('curveBody').innerHTML = cfg.contracts.map((c,i) => {
     const price = fmtNum(c.last, dec);
     const chg = fmtNum(c.change, dec);
@@ -90,7 +95,7 @@ function renderTable(cfg) {
     const up = (pct ?? 0) >= 0;
     const vol = fmtInt(c.volume);
     const oi = fmtInt(c.open_interest);
-    const fb = i === 0 ? '<span class="front-badge">FRONT</span>' : '';
+    const fb = i === frontIdx ? '<span class="front-badge">FRONT</span>' : '';
     const delivery = esc(c.delivery_month_label || c.label || '');
     const contractSymbol = [c.contract_symbol, c.yf_symbol].filter(Boolean).join(' · ');
     const active = chartState.chartMode === 'contract' && chartState.contractSymbol === c.yf_symbol;
@@ -135,6 +140,7 @@ function renderSpecs(cfg) {
 
 async function switchCommodity(key) {
   currentKey = key;
+  try { localStorage.setItem(LAST_MARKET_KEY, key); } catch (e) {}
   const meta = INDEX[key];
   if (!meta) return;
   renderWatchlist();
@@ -170,15 +176,35 @@ async function switchCommodity(key) {
   chartState.key = key;
   renderSpecs(cfg);
   renderWatchlist();
-  // Default chart = the front-month single contract (row 0 = FRONT). Falls back to
-  // the continuous series if its history can't be fetched (e.g. no local API server).
-  const frontIdx = (cfg.contracts || []).findIndex(c => c && c.yf_symbol);
+  // Default chart = the front-month single contract (the lead / highest-volume contract,
+  // FRONT-badged). Falls back to the continuous series if its history can't be fetched
+  // (e.g. no local API server).
+  const frontIdx = frontContractIndex(cfg.contracts);
   if (frontIdx >= 0) {
-    await selectCurveContract(frontIdx, true);
+    const front = cfg.contracts[frontIdx];
+    if ((front.chart_history || []).length) {
+      // Front history already cached → render the front month immediately.
+      await selectCurveContract(frontIdx, true);
+    } else {
+      // Instant first paint from the continuous series (already in the category JSON, no
+      // fetch); load the front contract in the background and swap to it when ready.
+      loadChart(cfg);            // chartState.chartMode === 'continuous' (set above)
+      renderTable(cfg);
+      fetchContractHistory(front).then(() => {
+        // Swap only if still on this market, the user hasn't changed the view, AND the fetch
+        // actually returned history. During a board refresh the single-contract cache is cleared
+        // and a re-fetch can come back empty (Yahoo throttled) — swapping then would show an empty
+        // "No chart history" pane, so we stay on the continuous (which always has data) instead.
+        if (chartState.key === key && chartState.chartMode === 'continuous' && (front.chart_history || []).length) {
+          selectCurveContract(frontIdx, true);
+        }
+      }).catch(() => {});        // on failure, leave the continuous chart shown
+    }
   } else {
     loadChart(cfg);
     renderTable(cfg);
   }
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 
 // ── Futures Strength heatmap (bottom of the Futures tab) ────────────────────

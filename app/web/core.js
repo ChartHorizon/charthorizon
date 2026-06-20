@@ -4,6 +4,7 @@ const DATA_DIR = window.__CONFIG__.dataDir;  // folder with the category JSON fi
 const DATA_VERSION = window.__CONFIG__.dataVersion;
 const WATCHLIST_KEY = "charthorizon.watchlist.v1";
 const ACTIVE_PAGE_KEY = "charthorizon.activePage.v1"; // remembers active top tab across reloads
+const LAST_MARKET_KEY = "charthorizon.lastMarket.v1"; // restore the viewed market across reloads
 let currentKey = window.__CONFIG__.firstKey;
 let seasonalState = { key: window.__CONFIG__.firstKey };
 
@@ -30,9 +31,9 @@ const CHART_THEME = {
   gridSoft:'#d9dee5',
   axis:'#aeb8c4',
   text:'#000000',
-  bull:'#4f72e8',         // LIGHT fallback = original blue/red (DARK theme overrides to TradingView green/red)
+  bull:'#6b89f0',         // LIGHT fallback (lightened blue/red; DARK theme overrides to TradingView green/red)
   bullWick:'#91a6f1',
-  bear:'#ee5b45',
+  bear:'#f3795f',
   bearWick:'#f3a08f',
   volume:'#8b98aa',
   volumeBull:'#0ea679',
@@ -41,13 +42,15 @@ const CHART_THEME = {
   oiCftc:'#52657f',       // CFTC weekly history (baseline)
   oiCme:'#0ea679',        // (unused, kept for theme stability)
   oiYf:'#e8853a',         // yfinance fallback (estimated / lower quality)
-  spread:'#7c3aed'        // calendar spread (front - next)
+  spread:'#7c3aed',       // calendar spread (front - next)
+  trend:'#000000'         // Macro-Shift user trend lines (black light / white dark)
 };
 const _CHART_THEME_VARS = {
   bg:'--chart-bg', grid:'--chart-grid', gridSoft:'--chart-grid-soft', axis:'--chart-axis', text:'--chart-text',
   bull:'--chart-bull', bullWick:'--chart-bull-wick', bear:'--chart-bear', bearWick:'--chart-bear-wick',
   volume:'--chart-volume', volumeBull:'--chart-volume-bull', volumeBear:'--chart-volume-bear',
-  oi:'--chart-oi', oiCftc:'--chart-oi-cftc', oiCme:'--chart-oi-cme', oiYf:'--chart-oi-yf', spread:'--chart-spread'
+  oi:'--chart-oi', oiCftc:'--chart-oi-cftc', oiCme:'--chart-oi-cme', oiYf:'--chart-oi-yf', spread:'--chart-spread',
+  trend:'--chart-trend'
 };
 // Pull the active theme's --chart-* tokens into CHART_THEME (mutates in place).
 function applyChartTheme() {
@@ -58,17 +61,199 @@ function applyChartTheme() {
   }
 }
 
-// ── Light / Dark theme switch (persisted; the visible chart repaints) ──
-function currentTheme() {
+
+// ── Chart-Stil-Optionen (Spiegel zu CHART_THEME; von chart.js gelesen) ──
+// `border`: candle-body outline. null = none (stroke == fill); a hex string = that colour;
+// 'darken' = a darker shade of the fill colour (chart.js resolves it per candle).
+const CHART_STYLE_DEFAULT = { candle: 'filled', wick: 'thin', width: 'normal', grid: 'normal', border: null };
+let CHART_STYLE = { ...CHART_STYLE_DEFAULT };
+
+// Die editierbaren Farb-Tokens (Reihenfolge nur fuer Robustheit; UI-Gruppen in settings.js).
+const CHART_COLOR_TOKENS = [
+  '--chart-bg', '--chart-grid', '--chart-grid-soft', '--chart-axis', '--chart-text',
+  '--chart-bull', '--chart-bull-wick', '--chart-bear', '--chart-bear-wick',
+  '--chart-volume', '--chart-volume-bull', '--chart-volume-bear',
+  '--chart-oi', '--chart-oi-cftc', '--chart-oi-cme', '--chart-oi-yf',
+  '--chart-spread', '--chart-trend'
+];
+
+const CHART_PRESETS_KEY = 'ch_chart_presets.v1';
+const CHART_TZ_KEY = 'ch_timezone.v1';
+
+// Content-Bot-Card-Mode: Presets/Stile NICHT anwenden (PNG-Exporte muessen stabil bleiben).
+function _isCardMode() {
+  try { return !!new URLSearchParams(location.search).get('card'); } catch (e) { return false; }
+}
+
+// Read-only colored built-in presets shipped per theme, IN ADDITION to "Standard".
+// "Standard" is the only built-in with colors:null (= CSS defaults); these carry explicit colors.
+const THEME_BUILTIN_PRESETS = {
+  light: [
+    {
+      id: 'black_on_white', name: 'Black on White', builtin: true,
+      style: { candle: 'hollow', wick: 'thin', width: 'normal', grid: 'normal' },
+      colors: {
+        '--chart-bg': '#ffffff', '--chart-grid': '#d9d9d9', '--chart-grid-soft': '#ececec',
+        '--chart-axis': '#a8a8a8', '--chart-text': '#000000',
+        '--chart-bull': '#000000', '--chart-bull-wick': '#000000', '--chart-bear': '#000000', '--chart-bear-wick': '#000000',
+        '--chart-volume': '#9a9a9a', '--chart-volume-bull': '#6b6b6b', '--chart-volume-bear': '#000000',
+        '--chart-oi': '#555555', '--chart-oi-cftc': '#555555', '--chart-oi-cme': '#777777', '--chart-oi-yf': '#999999',
+        '--chart-spread': '#444444', '--chart-trend': '#000000',
+      },
+    },
+    {
+      id: 'green_black_light', name: 'Green/Black', builtin: true,
+      style: { candle: 'filled', wick: 'thin', width: 'normal', grid: 'normal', border: '#000000' },
+      colors: {
+        '--chart-bg': '#e8e8e8', '--chart-grid': '#cfcfcf', '--chart-grid-soft': '#dcdcdc',
+        '--chart-axis': '#b0b0b0', '--chart-text': '#111111',
+        '--chart-bull': '#43a047', '--chart-bull-wick': '#000000', '--chart-bear': '#000000', '--chart-bear-wick': '#000000',
+        '--chart-volume': '#9a9a9a', '--chart-volume-bull': '#43a047', '--chart-volume-bear': '#000000',
+        '--chart-oi': '#555555', '--chart-oi-cftc': '#555555', '--chart-oi-cme': '#43a047', '--chart-oi-yf': '#b06a1f',
+        '--chart-spread': '#5a3fb0', '--chart-trend': '#000000',
+      },
+    },
+  ],
+  dark: [
+    {
+      id: 'green_white_on_black', name: 'Green on Black', builtin: true,
+      style: { candle: 'hollow', wick: 'thin', width: 'normal', grid: 'normal' },
+      colors: {
+        '--chart-bg': '#000000', '--chart-grid': '#1a1a1a', '--chart-grid-soft': '#121212',
+        '--chart-axis': '#333333', '--chart-text': '#cccccc',
+        '--chart-bull': '#2ecc40', '--chart-bull-wick': '#2ecc40', '--chart-bear': '#ffffff', '--chart-bear-wick': '#ffffff',
+        '--chart-volume': '#444444', '--chart-volume-bull': '#2ecc40', '--chart-volume-bear': '#cfcfcf',
+        '--chart-oi': '#8a8a8a', '--chart-oi-cftc': '#8a8a8a', '--chart-oi-cme': '#2ecc40', '--chart-oi-yf': '#e8853a',
+        '--chart-spread': '#b388ff', '--chart-trend': '#ffffff',
+      },
+    },
+  ],
+};
+const STANDARD_PRESET = { id: 'standard', name: 'Standard', builtin: true, colors: null, style: null };
+// Deep clone so the canonical constants are never aliased into the mutable store.
+function _clonePreset(p) { return JSON.parse(JSON.stringify(p)); }
+function _builtinPresetsFor(theme) { return (THEME_BUILTIN_PRESETS[theme] || []).map(_clonePreset); }
+// Standard keeps CSS-default colours; the light variant draws candle outlines a shade darker than
+// the fill (border:'darken') for definition on the light background. Dark Standard stays plain.
+function _standardFor(theme) {
+  const std = _clonePreset(STANDARD_PRESET);
+  if (theme === 'light') std.style = { border: 'darken' };
+  return std;
+}
+
+function _defaultPresetStore() {
+  const mk = (theme) => ({ activeId: 'standard', presets: [_standardFor(theme), ..._builtinPresetsFor(theme)] });
+  return { light: mk('light'), dark: mk('dark') };
+}
+
+// Liest den Preset-Store robust (defektes/fehlendes JSON -> Defaults; Standard erzwungen).
+function loadPresetStore() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CHART_PRESETS_KEY) || 'null');
+    if (!raw || !raw.light || !raw.dark) return _defaultPresetStore();
+    for (const th of ['light', 'dark']) {
+      const t = raw[th];
+      if (!t || !Array.isArray(t.presets) || !t.presets.length) { raw[th] = _defaultPresetStore()[th]; continue; }
+      // Keep only the user's own presets (ids are always 'p_…', see newPreset); regenerate built-ins
+      // canonically so new/renamed/removed built-ins propagate and a retired built-in id is NOT kept
+      // around as a stray "custom".
+      const customs = t.presets.filter(p => p && typeof p.id === 'string' && p.id.startsWith('p_'));
+      t.presets = [_standardFor(th), ..._builtinPresetsFor(th), ...customs];
+      if (!t.presets.some(p => p && p.id === t.activeId)) t.activeId = 'standard';
+    }
+    return raw;
+  } catch (e) { return _defaultPresetStore(); }
+}
+
+function savePresetStore(store) {
+  try { localStorage.setItem(CHART_PRESETS_KEY, JSON.stringify(store)); } catch (e) {}
+}
+
+function getActivePreset(theme = currentTheme()) {
+  const store = loadPresetStore();
+  const t = store[theme] || store.light;
+  return t.presets.find(p => p.id === t.activeId) || t.presets[0];
+}
+
+// Setzt die Inline-Vars + CHART_STYLE des aktiven Presets, OHNE neu zu zeichnen
+// (fuer den initialen Load, bevor die anderen Module/das DOM bereit sind).
+function applyActivePresetVars() {
+  const root = document.documentElement;
+  if (_isCardMode()) {
+    CHART_COLOR_TOKENS.forEach(tok => root.style.removeProperty(tok));
+    CHART_STYLE = { ...CHART_STYLE_DEFAULT };
+    applyChartTheme();
+    return;
+  }
+  const preset = getActivePreset();
+  if (!preset || !preset.colors) {
+    CHART_COLOR_TOKENS.forEach(tok => root.style.removeProperty(tok));
+    CHART_STYLE = { ...CHART_STYLE_DEFAULT, ...((preset && preset.style) || {}) };   // colours=CSS defaults, but honour style (e.g. Standard's border)
+  } else {
+    CHART_COLOR_TOKENS.forEach(tok => {
+      const v = preset.colors[tok];
+      if (v) root.style.setProperty(tok, v); else root.style.removeProperty(tok);
+    });
+    CHART_STYLE = { ...CHART_STYLE_DEFAULT, ...(preset.style || {}) };
+  }
+  applyChartTheme();
+}
+
+// Wie oben + sichtbare Charts neu zeichnen (nach Theme-Wechsel / Settings-Aenderung).
+function applyActivePreset() { applyActivePresetVars(); rerenderThemedCharts(); }
+
+// ── Zeitzone (nur die Header-Uhr) ──
+function getTimezone() {
+  try { return localStorage.getItem(CHART_TZ_KEY) || 'auto'; } catch (e) { return 'auto'; }
+}
+function setTimezone(tz) {
+  try { localStorage.setItem(CHART_TZ_KEY, tz || 'auto'); } catch (e) {}
+}
+function resolveTimezone() {
+  const tz = getTimezone();
+  if (tz && tz !== 'auto') return tz;
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York'; }
+  catch (e) { return 'America/New_York'; }
+}
+
+// ── Theme mode: Light / Dark / System (persisted; the visible charts repaint) ──
+const THEME_MODE_KEY = 'ch_theme_mode';
+function currentTheme() {   // the RESOLVED theme (data-theme); unchanged contract
   return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
 }
-function setTheme(theme) {
-  const t = theme === 'dark' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', t);
-  try { localStorage.setItem('ch_theme', t); } catch (e) {}
-  applyChartTheme();
-  rerenderThemedCharts();
+// Stored mode; falls back to the legacy explicit ch_theme, else 'system'.
+function getThemeMode() {
+  try {
+    const m = localStorage.getItem(THEME_MODE_KEY);
+    if (m === 'light' || m === 'dark' || m === 'system') return m;
+    const legacy = localStorage.getItem('ch_theme');
+    if (legacy === 'light' || legacy === 'dark') return legacy;
+  } catch (e) {}
+  return 'system';
 }
+function _systemPrefersDark() {
+  try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); }
+  catch (e) { return false; }
+}
+function resolveTheme(mode) {
+  if (mode === 'dark') return 'dark';
+  if (mode === 'light') return 'light';
+  return _systemPrefersDark() ? 'dark' : 'light';   // 'system'
+}
+// Runtime: resolve the current mode, set data-theme, repaint everything.
+function applyThemeMode() {
+  document.documentElement.setAttribute('data-theme', resolveTheme(getThemeMode()));
+  applyActivePreset();
+}
+// Persist a mode and apply it. Never called in card-mode.
+function setThemeMode(mode) {
+  const m = (mode === 'light' || mode === 'dark') ? mode : 'system';
+  try { localStorage.setItem(THEME_MODE_KEY, m); localStorage.removeItem('ch_theme'); } catch (e) {}
+  applyThemeMode();
+  if (typeof refreshSettingsThemeUI === 'function') refreshSettingsThemeUI();
+}
+// Explicit light/dark (header toggle, key 't') — leaves 'system'.
+function setTheme(theme) { setThemeMode(theme === 'dark' ? 'dark' : 'light'); }
 function toggleTheme() { setTheme(currentTheme() === 'dark' ? 'light' : 'dark'); }
 // Repaint the Futures (overview) chart + heatmap from the current CHART_THEME.
 // SVG colors are baked in at render time, so a repaint is what actually recolors them.
@@ -84,6 +269,9 @@ function repaintOverviewThemed() {
 // self-heals via its PAGES `load`, but overview has `load: null`, so switchPage()
 // consumes this flag to repaint the chart when the Futures tab is shown again.
 let _overviewThemeDirty = false;
+// Same idea for the Forex tab's TradingView pair chart: its theme is baked in at
+// creation, so a theme switch while Forex is hidden must re-mount it on return.
+let _fxThemeDirty = false;
 // Repaint the chart surface that is currently visible so its SVG colors follow the
 // new theme (CSS-styled surfaces recolor on their own via the tokens).
 function rerenderThemedCharts() {
@@ -93,11 +281,27 @@ function rerenderThemedCharts() {
     if (!document.getElementById('seasonalsPage')?.hidden && typeof renderSeasonalsPage === 'function') renderSeasonalsPage();
     if (!document.getElementById('smtPage')?.hidden && typeof renderSmtCharts === 'function') renderSmtCharts();
     if (!document.getElementById('screenerWeekly')?.hidden && typeof renderWeeklyOutlook === 'function') renderWeeklyOutlook();
-    if (!document.getElementById('forexPage')?.hidden && typeof renderFxSection === 'function') renderFxSection();
+    if (!document.getElementById('forexPage')?.hidden) {
+      if (typeof repaintFxThemed === 'function') repaintFxThemed();
+    } else if (typeof fxPairState !== 'undefined' && fxPairState) _fxThemeDirty = true;
     if (!document.getElementById('toolsPage')?.hidden && typeof reloadToolsCalendar === 'function') reloadToolsCalendar();
+    if (!document.getElementById('bigchartPage')?.hidden && typeof repaintBigChartThemed === 'function') repaintBigChartThemed();
   } catch (e) { console.warn('theme rerender failed', e); }
 }
-applyChartTheme();   // populate CHART_THEME from the theme active at load
+// Initial theme: head script already set data-theme; re-assert from the stored mode
+// (skip in card-mode, which is locked to dark), then populate CHART_THEME/CHART_STYLE
+// WITHOUT a full repaint (DOM/other modules not ready; boot.js does the first render).
+if (!_isCardMode()) document.documentElement.setAttribute('data-theme', resolveTheme(getThemeMode()));
+applyActivePresetVars();
+// Live-follow the OS when in 'system' mode (never in card-mode).
+try {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (_isCardMode() || getThemeMode() !== 'system') return;
+    document.documentElement.setAttribute('data-theme', resolveTheme('system'));
+    applyActivePreset();
+    if (typeof refreshSettingsThemeUI === 'function') refreshSettingsThemeUI();
+  });
+} catch (e) {}
 
 function readWatchlist() {
   try {
@@ -129,12 +333,21 @@ const PAGES = [
   { id: 'seasonals', load: () => renderSeasonalsPage() },
   { id: 'smt',       load: () => openSmt() },
   { id: 'tools',     load: () => openTools() },
+  { id: 'bigchart',  load: () => openBigChart() },
+  { id: 'settings',  load: () => openSettings() },
 ];
 const PAGE_IDS = new Set(PAGES.map(p => p.id));
 
 function switchPage(page) {
   const target = PAGE_IDS.has(page) ? page : 'overview';
   try { localStorage.setItem(ACTIVE_PAGE_KEY, target); } catch (e) {}
+  // The Charts tab is a fixed-to-viewport, no-scroll surface: lock page scroll and hide the
+  // risk-notice footer (which otherwise pushes the page past one screen). CSS does the rest.
+  document.body.classList.toggle('bigchart-tab', target === 'bigchart');
+  if (typeof startLiveLayer === 'function') {
+    // Screener too: startLiveLayer self-gates to the Weekly Outlook via _liveLayerPage().
+    if (target === 'overview' || target === 'smt' || target === 'screener') startLiveLayer(); else stopLiveLayer();
+  }
   if (target === 'seasonals' && currentKey && INDEX[currentKey]) seasonalState.key = currentKey;
   document.querySelectorAll('[data-page-tab]').forEach(tab => {
     const active = tab.dataset.pageTab === target;
@@ -149,6 +362,9 @@ function switchPage(page) {
   const activeP = PAGES.find(p => p.id === target);
   if (activeP && activeP.load) activeP.load();
   if (target === 'overview' && _overviewThemeDirty) { _overviewThemeDirty = false; repaintOverviewThemed(); }
+  // openForex() already rebuilt the heatmap with the current theme; just re-mount the
+  // open TradingView pair chart so it follows the theme switched while Forex was hidden.
+  if (target === 'forex' && _fxThemeDirty) { _fxThemeDirty = false; if (typeof remountFxPairChart === 'function') remountFxPairChart(); }
   renderWatchlist();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -159,6 +375,34 @@ function activePage() {
   }
   return 'overview';
 }
+
+// ── Keyboard accelerators (power users) ──
+// 1–7 jump to the seven top tabs (in nav order), t toggles theme, / focuses the
+// Screener search. Suppressed while typing in a field (Esc blurs it) and in the
+// content-bot card-mode export. Invisible to novices; the nav tab titles hint them.
+function _isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el.isContentEditable;
+}
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (document.body.classList.contains('card-mode') || document.body.classList.contains('fx-card-mode')) return;
+  const typing = _isTypingTarget(e.target);
+  if (e.key === 'Escape' && typing) { e.target.blur(); return; }
+  if (typing) return;
+  if (e.key >= '1' && e.key <= '8') {
+    const p = PAGES[+e.key - 1];
+    if (p) { e.preventDefault(); switchPage(p.id); }
+  } else if (e.key === 't' || e.key === 'T') {
+    e.preventDefault(); toggleTheme();
+  } else if (e.key === '/') {
+    e.preventDefault();
+    switchPage('screener');
+    const s = document.getElementById('screenerSearch');
+    if (s) { s.focus(); s.select(); }
+  }
+});
 
 function activeMarketKey(context = activePage()) {
   return context === 'seasonals' ? seasonalState.key : currentKey;
@@ -198,7 +442,7 @@ function renderWatchlist() {
     }
     if (!body) return;
     if (!watchlist.length) {
-      body.innerHTML = '<div class="watchlist-empty">No markets saved.</div>';
+      body.innerHTML = '<div class="watchlist-empty">No markets yet. Tap ★ on a Screener row, or use + Market above, to track one here.</div>';
       return;
     }
     body.innerHTML = watchlist.map(key => {

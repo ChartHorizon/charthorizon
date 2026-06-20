@@ -1,24 +1,23 @@
-; Inno Setup script — per-user install (no admin). Compiled by ISCC.exe in CI.
-; Expects the PyInstaller onedir output at dist\ChartHorizon\
+; dashboard/packaging/windows/charthorizon.iss
+#define MyVersion GetEnv("CHARTHORIZON_VERSION")
+
 [Setup]
 AppName=ChartHorizon
-AppVersion=1.0.3
+AppVersion={#MyVersion}
 DefaultDirName={localappdata}\ChartHorizon
-DefaultGroupName=ChartHorizon
 PrivilegesRequired=lowest
+DisableProgramGroupPage=yes
 OutputDir=..\..\dist
-OutputBaseFilename=ChartHorizon-Windows-Setup
+OutputBaseFilename=ChartHorizon-{#MyVersion}-Windows-Setup
+SetupIconFile=..\icons\icon.ico
 Compression=lzma2
 SolidCompression=yes
-DisableProgramGroupPage=yes
-SetupIconFile=..\icons\charthorizon.ico
-UninstallDisplayIcon={app}\ChartHorizon.exe
 
 [Files]
-Source: "..\..\dist\ChartHorizon\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+Source: "..\..\dist\ChartHorizon\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\ChartHorizon"; Filename: "{app}\ChartHorizon.exe"
+Name: "{userprograms}\ChartHorizon"; Filename: "{app}\ChartHorizon.exe"
 Name: "{userdesktop}\ChartHorizon"; Filename: "{app}\ChartHorizon.exe"
 
 [Run]

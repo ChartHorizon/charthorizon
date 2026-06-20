@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
-# Wrap the PyInstaller onedir (dist/ChartHorizon) into dist/ChartHorizon-x86_64.AppImage.
-# Expects appimagetool on PATH (the CI installs it).
+# Build the Linux AppImage. Usage: packaging/linux/build_appimage.sh <version>
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+VERSION="${1:?usage: build_appimage.sh <version>}"
+cd "$(dirname "$0")/../.."            # -> dashboard/
+python3 packaging/build_icons.py
+python3 -m PyInstaller packaging/charthorizon.spec --noconfirm --clean
+
 APPDIR="dist/ChartHorizon.AppDir"
-rm -rf "$APPDIR"; mkdir -p "$APPDIR/usr/bin"
-cp -R dist/ChartHorizon/* "$APPDIR/usr/bin/"
-cat > "$APPDIR/AppRun" <<'EOF'
-#!/bin/sh
-HERE="$(dirname "$(readlink -f "$0")")"
-exec "$HERE/usr/bin/ChartHorizon" "$@"
-EOF
-chmod +x "$APPDIR/AppRun"
-cat > "$APPDIR/charthorizon.desktop" <<'EOF'
+rm -rf "$APPDIR"
+mkdir -p "$APPDIR/usr/bin"
+cp -r dist/ChartHorizon/* "$APPDIR/usr/bin/"
+cp packaging/icons/icon.png "$APPDIR/charthorizon.png"
+
+cat > "$APPDIR/charthorizon.desktop" <<EOF
 [Desktop Entry]
 Name=ChartHorizon
 Exec=ChartHorizon
 Icon=charthorizon
 Type=Application
-Terminal=false
 Categories=Office;Finance;
 EOF
-# App icon (sun logo). The .desktop Icon= references "charthorizon"; appimagetool also
-# uses the top-level .DirIcon for the AppImage's own thumbnail.
-cp packaging/icons/charthorizon.png "$APPDIR/charthorizon.png"
-cp packaging/icons/charthorizon.png "$APPDIR/.DirIcon"
-ARCH=x86_64 appimagetool --appimage-extract-and-run "$APPDIR" dist/ChartHorizon-x86_64.AppImage
-echo "OK: dist/ChartHorizon-x86_64.AppImage"
+
+cat > "$APPDIR/AppRun" <<'EOF'
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/ChartHorizon" "$@"
+EOF
+chmod +x "$APPDIR/AppRun"
+
+if [ ! -x appimagetool ]; then
+  curl -fsSL -o appimagetool \
+    "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+  chmod +x appimagetool
+fi
+ARCH=x86_64 ./appimagetool "$APPDIR" "dist/ChartHorizon-${VERSION}-x86_64.AppImage"
+echo "Built: dist/ChartHorizon-${VERSION}-x86_64.AppImage"

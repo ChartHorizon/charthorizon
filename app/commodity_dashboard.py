@@ -23,6 +23,8 @@ import io
 import json
 import tempfile
 import re
+import threading
+import concurrent.futures
 import urllib.request
 import urllib.parse
 from datetime import date, datetime, time, timedelta
@@ -63,6 +65,7 @@ from contracts import *  # noqa: F401,F403
 from local_first_merge import *  # noqa: F401,F403
 from fetch_yfinance import *  # noqa: F401,F403
 from screener import *  # noqa: F401,F403
+import fx_rates
 
 
 # Background-refresh progress (read by start.py's /api/refresh-status). cwd is the
@@ -99,6 +102,32 @@ def _write_refresh_progress(**fields):
         pass
 
 
+def _gather_one_market(key, cfg, cot_all, count):
+    """Fetch one market's yfinance data. Self-contained so it can run on a worker thread."""
+    cfg["_key"] = key  # lets build_contract_list find the spec/expiry rule
+    print(f"→ {cfg['display_name']}")
+    contracts = select_yfinance_contracts(cfg, count=count)
+    chart_symbol, chart_history = fetch_price_chart_history(cfg)
+    if _should_refresh_seasonal(key):
+        seasonal_history = fetch_seasonal_price_history(cfg, chart_history)
+    else:
+        seasonal_history = []  # reuse the cached seasonal history (refreshed yearly)
+    chart_history, total_volume_series, calendar_spread_series = fetch_yfinance_liquid_continuous_history(
+        cfg, fallback_history=chart_history)
+    continuous_contract = build_continuous_contract(
+        cfg, chart_symbol, chart_history, total_volume_series=total_volume_series)
+    continuous_contract["seasonal_history"] = seasonal_history
+    cot_series = cot_all.get(cfg.get("cftc_code"), [])
+    return key, {
+        "config": cfg,
+        "contracts": contracts,
+        "continuous_contract": continuous_contract,
+        "daily_oi_snapshot": None,
+        "cot_series": cot_series,
+        "calendar_spread_series": calendar_spread_series,
+    }
+
+
 def gather_commodity_data(count=6):
     """
     Collects yfinance contracts, continuous charts and CFTC data for each market.
@@ -127,64 +156,58 @@ def gather_commodity_data(count=6):
     dataset = {}
     _total = len(COMMODITIES)
     _write_refresh_progress(state="running", total=_total, done=0, current=None, category=None)
-    _done = 0
-    for key, cfg in COMMODITIES.items():
-        _write_refresh_progress(done=_done, current=cfg.get("display_name", key),
-                                category=cfg.get("category", ""))
-        _done += 1
+    items = list(COMMODITIES.items())
+    workers = max(1, int(REFRESH_FETCH_WORKERS))
 
-        cfg["_key"] = key  # lets build_contract_list find the spec/expiry rule
-        print(f"→ {cfg['display_name']}")
-        contracts = select_yfinance_contracts(cfg, count=count)
+    # Prime the lazy seasonal-year cache single-threaded so the parallel workers below
+    # don't race its first-touch population (fetch_yfinance._existing_seasonal_years).
+    if items:
+        _should_refresh_seasonal(items[0][0])
 
-        # chart history (native Yahoo front-month continuous)
-        print(f"   · chart history {cfg.get('yf_continuous')}…")
-        chart_symbol, chart_history = fetch_price_chart_history(cfg)
-        # Seasonal tendency is refreshed at most once per year (see helper);
-        # in between, the cached seasonal series is reused in the merge step.
-        if _should_refresh_seasonal(key):
-            seasonal_history = fetch_seasonal_price_history(cfg, chart_history)
-            if seasonal_history:
-                print(f"   · seasonal history: {seasonal_history[0]['date']} → {seasonal_history[-1]['date']} ({len(seasonal_history):,} bars, yearly refresh)")
-        else:
-            seasonal_history = []  # reuse the cached seasonal history (refreshed yearly)
-            print("   · seasonal history: reusing cached (yearly refresh)")
-        print("   · native front-month continuous chart from yfinance…")
-        chart_history, total_volume_series, calendar_spread_series = fetch_yfinance_liquid_continuous_history(
-            cfg,
-            fallback_history=chart_history,
-        )
-        if total_volume_series:
-            latest_vol = total_volume_series[-1]
-            print(
-                f"   · total volume: {latest_vol['volume']:,}"
-                f"{' from ' + str(latest_vol.get('contract_count')) + ' contracts' if latest_vol.get('contract_count') else ''}"
-                f" as of {latest_vol['date']}"
-            )
-        if chart_history:
-            print(f"   · chart bars: {len(chart_history):,}")
-        continuous_contract = build_continuous_contract(
-            cfg,
-            chart_symbol,
-            chart_history,
-            total_volume_series=total_volume_series,
-        )
-        continuous_contract["seasonal_history"] = seasonal_history
+    if workers <= 1:
+        _done = 0
+        for key, cfg in items:
+            _write_refresh_progress(done=_done, current=cfg.get("display_name", key),
+                                    category=cfg.get("category", ""))
+            _done += 1
+            k, entry = _gather_one_market(key, cfg, cot_all, count)
+            dataset[k] = entry
+    else:
+        _progress_lock = threading.Lock()
+        _done = {"n": 0}
 
-        # COT series for this market
-        cot_series = cot_all.get(cfg.get("cftc_code"), [])
+        def _task(item):
+            key, cfg = item
+            with _progress_lock:
+                _write_refresh_progress(done=_done["n"], current=cfg.get("display_name", key),
+                                        category=cfg.get("category", ""))
+            k, entry = _gather_one_market(key, cfg, cot_all, count)
+            with _progress_lock:
+                _done["n"] += 1
+                _write_refresh_progress(done=_done["n"], current=None, category=None)
+            return k, entry
 
-        dataset[key] = {
-            "config": cfg,
-            "contracts": contracts,
-            "continuous_contract": continuous_contract,
-            "daily_oi_snapshot": None,
-            "cot_series": cot_series,
-            "calendar_spread_series": calendar_spread_series,
-        }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for k, entry in ex.map(_task, items):
+                dataset[k] = entry
 
     _write_refresh_progress(done=_total, current=None, category=None)
     return dataset
+
+
+def _previous_fx_rates(config_path):
+    """Read the fxRates block from an existing ff_data/config.js, or None.
+
+    Used as the fallback when the BIS fetch fails, so a daily refresh keeps the
+    last-known rates instead of dropping back to the forex.js built-in default.
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = f.read().strip()
+        raw = raw[raw.index("{"):raw.rindex("}") + 1]
+        return json.loads(raw).get("fxRates") or None
+    except Exception:
+        return None
 
 
 def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_data"):
@@ -476,6 +499,13 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     gen_date = date.today().strftime("%b %d, %Y")
     data_version = datetime.now().strftime("%Y%m%d%H%M%S")
 
+    config_path = os.path.join(data_dir, "config.js")
+
+    # Central-bank policy rates for the FX strength score: live from BIS, with a
+    # fallback to the previous values so a BIS outage never breaks the refresh.
+    # forex.js prefers window.__CONFIG__.fxRates over its built-in default.
+    fx_rate_table = fx_rates.fetch_fx_rates() or _previous_fx_rates(config_path)
+
     config = {
         "index": index,
         "firstKey": first_key,
@@ -483,7 +513,8 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         "genDate": gen_date,
         "dataVersion": data_version,
     }
-    config_path = os.path.join(data_dir, "config.js")
+    if fx_rate_table:
+        config["fxRates"] = fx_rate_table
     with open(config_path, "w", encoding="utf-8") as f:
         f.write("window.__CONFIG__ = " + json.dumps(config, ensure_ascii=False) + ";\n")
     print(f"\n✓ Frontend config written: {config_path}")

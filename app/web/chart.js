@@ -1,5 +1,5 @@
 const CHART_EXPORT_CSS = `
-  text { font-family: 'Sora', system-ui, sans-serif; }
+  text { font-family: 'Geist', system-ui, sans-serif; }
 `;
 const CHART_EXPORT_WIDTH = 1200; // ~on-screen display size; height stays proportional to the chart.
 const CHART_EXPORT_TITLE_H = 70; // header band: brand rows + a metadata row (data-as-of / export time).
@@ -112,6 +112,7 @@ function buildExportSvg(kind = null) {
 
   // Remove the interactive crosshair layer if present.
   svg.querySelectorAll('.chart-crosshair-layer').forEach(el => el.remove());
+  svg.querySelectorAll('.chart-live-dot').forEach(el => el.remove());
 
   const vb = (svg.getAttribute('viewBox') || '0 0 1000 600').split(/\s+/).map(Number);
   const w = vb[2] || 1000;
@@ -137,7 +138,7 @@ function buildExportSvg(kind = null) {
     <style>${CHART_EXPORT_CSS}</style>
     <rect x="0" y="0" width="${w}" height="${totalH}" fill="${pal.bg}"/>
     <text x="${pad}" y="20" font-size="11" font-weight="600" letter-spacing="1" fill="${pal.cat}">${escapeXml(ctx.category)}</text>
-    <text x="${pad}" y="42" font-size="20" font-family="'Instrument Serif', Georgia, serif" fill="${pal.name}">${escapeXml(ctx.name)}</text>
+    <text x="${pad}" y="42" font-size="20" font-family="'Geist', system-ui, sans-serif" fill="${pal.name}">${escapeXml(ctx.name)}</text>
     <text x="${w - pad}" y="20" font-size="10" fill="${pal.sym}" text-anchor="end">${escapeXml(ctx.symbol)}</text>
     <text x="${w - pad}" y="42" font-size="11" font-weight="700" fill="${pal.brand}" text-anchor="end">ChartHorizon</text>
     ${ctx.asOf ? `<text x="${pad}" y="60" font-size="10" fill="${pal.meta}">Data as of ${escapeXml(ctx.asOf)}</text>` : ''}
@@ -317,7 +318,7 @@ function drawSvgText(ctx, el) {
   const css = window.getComputedStyle(el);
   const size = parseNum(el.getAttribute('font-size') || css.fontSize, 10);
   const weight = el.getAttribute('font-weight') || css.fontWeight || '400';
-  const family = el.getAttribute('font-family') || css.fontFamily || 'Sora, system-ui, sans-serif';
+  const family = el.getAttribute('font-family') || css.fontFamily || 'Geist, system-ui, sans-serif';
   ctx.font = `${weight} ${size}px ${family}`;
   const anchor = el.getAttribute('text-anchor') || css.textAnchor;
   ctx.textAlign = anchor === 'middle' ? 'center' : (anchor === 'end' ? 'right' : 'left');
@@ -353,7 +354,7 @@ function drawExportHeader(ctx, w, exportCtx = getChartExportContext()) {
   const pad = 16;
   const pal = exportPalette();
   ctx.fillStyle = pal.cat;
-  ctx.font = '600 11px Sora, system-ui, sans-serif';
+  ctx.font = '600 11px Geist, system-ui, sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText(exportCtx.category, pad, 20);
   ctx.fillStyle = pal.name;
@@ -361,13 +362,13 @@ function drawExportHeader(ctx, w, exportCtx = getChartExportContext()) {
   ctx.fillText(exportCtx.name, pad, 42);
   ctx.textAlign = 'right';
   ctx.fillStyle = pal.sym;
-  ctx.font = '10px Sora, system-ui, sans-serif';
+  ctx.font = '10px Geist, system-ui, sans-serif';
   ctx.fillText(exportCtx.symbol, w - pad, 20);
   ctx.fillStyle = pal.brand;
-  ctx.font = '700 11px Sora, system-ui, sans-serif';
+  ctx.font = '700 11px Geist, system-ui, sans-serif';
   ctx.fillText('ChartHorizon', w - pad, 42);
   // Metadata row: data "as of" date (left) and export timestamp (right).
-  ctx.font = '10px Sora, system-ui, sans-serif';
+  ctx.font = '10px Geist, system-ui, sans-serif';
   ctx.fillStyle = pal.meta;
   ctx.textAlign = 'left';
   if (exportCtx.asOf) ctx.fillText(`Data as of ${exportCtx.asOf}`, pad, 60);
@@ -394,13 +395,13 @@ function drawExportFooter(ctx, w, y, exportCtx) {
       until = new Date(exportCtx.runway.until).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
     } catch (e) {}
     ctx.fillStyle = pal.strong;
-    ctx.font = '600 11px Sora, system-ui, sans-serif';
+    ctx.font = '600 11px Geist, system-ui, sans-serif';
     const tail = exportCtx.runway.note || 'before dropping to 3/4';
     ctx.fillText(`Seasonal window supports this setup ~${exportCtx.runway.days} more days (until ${until}) ${tail}`, pad, cursor + 17);
     cursor += 21;
   }
   ctx.fillStyle = pal.meta;
-  ctx.font = '9px Sora, system-ui, sans-serif';
+  ctx.font = '9px Geist, system-ui, sans-serif';
   ctx.fillText(CARD_RISK_DISCLAIMER, pad, cursor + 15);
 }
 
@@ -546,32 +547,35 @@ function setBtnStatus(buttonId, labelId, text, restore, ms = 2400) {
   setTimeout(() => { label.textContent = restore; btn.classList.remove('copied'); }, ms);
 }
 
-// Share the current chart on X (Twitter). X's web intent cannot attach an image,
-// so we copy the chart PNG to the clipboard first (while this tab still has focus)
-// and open the compose window with prefilled text — the user then pastes the image
-// into the post with Cmd/Ctrl+V.
+// Share the current chart on X (Twitter). X's web intent cannot attach an image, so
+// we copy the chart PNG to the clipboard and the user pastes it into the post with
+// Cmd/Ctrl+V. The clipboard write must be ISSUED inside the click gesture: Safari/
+// WebKit rejects a write made after `await`, so we hand ClipboardItem a Promise<Blob>
+// (the blob renders lazily) instead of awaiting the blob first. Chrome/Firefox accept
+// the promise form too. Awaiting the blob first silently failed on Safari (no image).
 async function shareToX(kind = 'overview') {
   const ctx = getChartExportContext(kind);
   const text = `${ctx.name || 'Chart'} · ChartHorizon`;
   const intentUrl = `https://x.com/intent/post?text=${encodeURIComponent(text)}`;
 
   let copied = false;
-  try {
-    const blob = await chartSvgToPngBlob(CHART_EXPORT_WIDTH, kind);
-    if (navigator.clipboard && window.ClipboardItem) {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+  if (navigator.clipboard && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': chartSvgToPngBlob(CHART_EXPORT_WIDTH, kind) }),
+      ]);
       copied = true;
+    } catch (e) {
+      // Clipboard blocked/unavailable — still open the compose window.
     }
-  } catch (e) {
-    // Clipboard may be blocked/unavailable — still open the compose window.
   }
 
   const win = window.open(intentUrl, '_blank');
   if (!win) {
-    setBtnStatus(ctx.xButtonId, ctx.xLabelId, 'Allow popups', 'X', 3000);
+    setBtnStatus(ctx.xButtonId, ctx.xLabelId, 'Allow popups', '', 3000);
     return;
   }
-  setBtnStatus(ctx.xButtonId, ctx.xLabelId, copied ? 'Copied · paste in X' : 'Opened X', 'X', 3000);
+  setBtnStatus(ctx.xButtonId, ctx.xLabelId, copied ? 'Copied · paste in X' : 'Opened X', '', 3000);
 }
 
 // ── Build sidebars grouped by category from the lightweight INDEX ──
@@ -588,22 +592,171 @@ let chartState = {
   contractLabel: null
 };
 
-const RANGE_DAYS = { '6m': 182, '12m': 365, '5y': 1825 };
+// Pane geometry below the price pane. Shared by loadChart and the maximized Charts tab
+// (bigchart.js), which subtracts the reserved pane height from its viewport-filling price
+// pane so price + panes still fit the window. OI/COT are CFTC-weekly data, so they only
+// render in daily/weekly views — see paneShowsOiCot() and the showOi/showCot gates in loadChart.
+const PANE_H = { volume: 62, oi: 68, cot: 84, spread: 64 };
+const PANE_GAP = 22;
+// Height of one technical-indicator oscillator pane (RSI/Stoch/MACD/ATR — Charts tab only).
+const PANE_H_TA = 72;
+
+// How many TA oscillator panes a chartState would render (Charts-tab only state carries
+// .indicators; the Futures tab has none → 0). Mirrors the gating in loadChart so panesHeight
+// and the maximize math agree. Hidden via the visibility eye (_indHidden) → counts 0.
+function taPaneCount(state) {
+  if (!state || state._indHidden || !Array.isArray(state.indicators) || typeof INDICATOR_DEFS === 'undefined') return 0;
+  return state.indicators.filter(i =>
+    i && i.visible !== false && INDICATOR_DEFS[i.type] && INDICATOR_DEFS[i.type].kind === 'pane').length;
+}
+
+// Whether the current interval shows the CFTC OI + COT panes (weekly data → daily/weekly only).
+function paneShowsOiCot(interval) {
+  return interval === 'daily' || interval === 'weekly';
+}
+
+// Total height reserved below the price pane for the active toggles/interval. Mirrors the
+// pane stacking in loadChart so the Charts tab can size its maximized price pane to leave
+// exactly this much room. `state` is a chartState-shaped object (reads showVolume/showSpread/interval).
+function panesHeight(state) {
+  let h = 0;
+  if (state.showVolume) h += PANE_H.volume + PANE_GAP;
+  // OI and COT default on (Futures tab has no flags → undefined !== false → both shown); the
+  // Charts tab can turn each off independently via its OI / COT toggles (bigChartState.showOi/showCot).
+  const oiCotOk = paneShowsOiCot(state.interval);
+  if (oiCotOk && state.showOi !== false) h += PANE_H.oi + PANE_GAP;
+  if (oiCotOk && state.showCot !== false) h += PANE_H.cot + PANE_GAP;
+  if (state.showSpread) h += PANE_H.spread + PANE_GAP;
+  h += taPaneCount(state) * (PANE_H_TA + PANE_GAP);
+  return h;
+}
+
+// ── Technical-indicator SVG render helpers (Charts tab). Pure string builders that read the
+// normalized spec from computeIndicator(). Overlays draw into the price pane; oscillator panes
+// draw into their own stacked band. ──
+
+// Polyline from an aligned (number|null)[]; the pen lifts across null gaps (no bridging).
+function _taLinePath(values, xs, yFn, color, width, dash, opacity) {
+  let d = '', pen = false;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) { pen = false; continue; }
+    d += (pen ? 'L' : 'M') + xs[i].toFixed(1) + ' ' + yFn(v).toFixed(1) + ' ';
+    pen = true;
+  }
+  if (!d) return '';
+  return `<path d="${d.trim()}" fill="none" stroke="${color}" stroke-width="${width || 1.4}"`
+    + (dash ? ` stroke-dasharray="${dash}"` : '')
+    + (opacity != null ? ` opacity="${opacity}"` : '') + '/>';
+}
+
+// Faint filled band between two aligned series (Bollinger). Split into contiguous segments so
+// gaps aren't bridged into one closed blob.
+function _taBandPath(upper, lower, xs, yFn, color) {
+  let out = '', i = 0;
+  const N = upper.length;
+  while (i < N) {
+    if (!Number.isFinite(upper[i]) || !Number.isFinite(lower[i])) { i++; continue; }
+    let j = i;
+    while (j < N && Number.isFinite(upper[j]) && Number.isFinite(lower[j])) j++;
+    let top = '', bot = '';
+    for (let k = i; k < j; k++) top += (k === i ? 'M' : 'L') + xs[k].toFixed(1) + ' ' + yFn(upper[k]).toFixed(1) + ' ';
+    for (let k = j - 1; k >= i; k--) bot += 'L' + xs[k].toFixed(1) + ' ' + yFn(lower[k]).toFixed(1) + ' ';
+    out += `<path d="${(top + bot).trim()} Z" fill="${color}" opacity="0.07" stroke="none"/>`;
+    i = j;
+  }
+  return out;
+}
+
+// Render one oscillator pane. Returns { svg, heading, cross } — `cross` is the crosshair spec
+// (geometry + value→y fn + per-line values) the crosshair reads back for hover readouts.
+function _renderTaPane(ind, data, geo) {
+  const { top, h, padL, padR, W, dec, barXs, slot } = geo;
+  const bottom = top + h;
+  const grid = CHART_THEME.grid, axis = CHART_THEME.axis, txt = CHART_THEME.text;
+  let lo, hi;
+  if (data.domain) { lo = data.domain[0]; hi = data.domain[1]; }
+  else {
+    lo = Infinity; hi = -Infinity;
+    data.series.forEach(s => s.values.forEach(v => { if (Number.isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }));
+    if (data.zero) { if (0 < lo) lo = 0; if (0 > hi) hi = 0; }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) { const c = Number.isFinite(lo) ? lo : 0; lo = c - 1; hi = c + 1; }
+    const padv = (hi - lo) * 0.08; lo -= padv; hi += padv;
+  }
+  const span = (hi - lo) || 1;
+  const yFn = v => top + (1 - (v - lo) / span) * h;
+  const pdec = (data.dec != null) ? data.dec : dec;
+  let svg = `<line x1="${padL}" y1="${top}" x2="${W - padR}" y2="${top}" stroke="${grid}"/>`
+    + `<line x1="${padL}" y1="${bottom}" x2="${W - padR}" y2="${bottom}" stroke="${grid}"/>`;
+  (data.refs || []).forEach(rf => {
+    if (rf.value < lo || rf.value > hi) return;
+    const y = yFn(rf.value).toFixed(1);
+    svg += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.6"/>`
+      + `<text x="${W - padR + 5}" y="${(+y + 3).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${rf.label}</text>`;
+  });
+  if (data.zero) {
+    const zy = yFn(0).toFixed(1);
+    svg += `<line x1="${padL}" y1="${zy}" x2="${W - padR}" y2="${zy}" stroke="${axis}" stroke-dasharray="4,3" opacity="0.6"/>`;
+  }
+  data.series.forEach(s => {
+    if (s.kind === 'hist') {
+      const baseY = yFn(0);
+      const bw = Math.max(1, (slot || 6) * 0.6);
+      for (let i = 0; i < s.values.length; i++) {
+        const v = s.values[i];
+        if (!Number.isFinite(v)) continue;
+        const y = yFn(v), yy = Math.min(baseY, y), hh = Math.max(0.5, Math.abs(baseY - y));
+        const c = v >= 0 ? (s.up || '#26a69a') : (s.down || '#ef5350');
+        svg += `<rect x="${(barXs[i] - bw / 2).toFixed(1)}" y="${yy.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${c}" opacity="0.5"/>`;
+      }
+    } else {
+      svg += _taLinePath(s.values, barXs, yFn, s.color, s.width || 1.4);
+    }
+  });
+  // Auto-scaled panes (MACD/ATR) label their own hi/lo at the right axis; fixed 0–100 panes
+  // (RSI/Stoch) rely on the ref-line labels instead.
+  if (!data.domain) {
+    svg += `<text x="${W - padR + 5}" y="${(top + 8).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${hi.toFixed(pdec)}</text>`
+      + `<text x="${W - padR + 5}" y="${(bottom - 2).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${lo.toFixed(pdec)}</text>`;
+  }
+  const heading = `<text x="${padL}" y="${(top - 8).toFixed(1)}" font-size="10" font-weight="600" fill="${indicatorColor(ind)}" font-family="Geist" letter-spacing="0.05em">${esc(indicatorChipLabel(ind).toUpperCase())}</text>`;
+  const cross = { top, h, yFn, dec: pdec, legend: data.legend };
+  return { svg, heading, cross };
+}
+
+const RANGE_DAYS = { '6m': 182, '12m': 365, '5y': 1825, '20y': 7305, 'max': 100000 };
 const CONTRACT_HISTORY_PERIOD = '5y';
 
-// Aggregate daily bars to weekly bars.
-function aggregateWeekly(bars) {
+// ISO-ish week bucket key (year + week number). Shared by aggregateWeekly and the live
+// overlay so a live tick merges into the EXACT same week bucket the settled bars built.
+function weekKeyOf(date) {
+  const d = new Date(date);
+  const onejan = new Date(d.getFullYear(), 0, 1);
+  const week = Math.ceil((((d - onejan) / 86400000) + onejan.getDay() + 1) / 7);
+  return d.getFullYear() + '-W' + week;
+}
+
+// Calendar-month / calendar-quarter bucket keys (siblings of weekKeyOf). Used by the
+// maximized "Charts" tab's 1M / 3M timeframes — both derived from the same daily bars.
+function monthKeyOf(date) {
+  const d = new Date(date);
+  return d.getFullYear() + '-M' + (d.getMonth() + 1);
+}
+function quarterKeyOf(date) {
+  const d = new Date(date);
+  return d.getFullYear() + '-Q' + (Math.floor(d.getMonth() / 3) + 1);
+}
+
+// Aggregate daily bars into buckets keyed by keyFn (open=first, high/low=extremes,
+// close=last, date=last day in bucket, volume=sum). Bars must arrive in chronological order.
+function aggregateByKey(bars, keyFn) {
   if (!bars.length) return [];
-  const weeks = {};
+  const buckets = {};
   for (const b of bars) {
-    const d = new Date(b.date);
-    // ISO week as key (year + week number)
-    const onejan = new Date(d.getFullYear(), 0, 1);
-    const week = Math.ceil((((d - onejan) / 86400000) + onejan.getDay() + 1) / 7);
-    const key = d.getFullYear() + '-W' + week;
-    if (!weeks[key]) weeks[key] = { date: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume || 0 };
+    const key = keyFn(b.date);
+    if (!buckets[key]) buckets[key] = { date: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume || 0 };
     else {
-      const w = weeks[key];
+      const w = buckets[key];
       w.high = Math.max(w.high, b.high);
       w.low = Math.min(w.low, b.low);
       w.close = b.close;
@@ -611,17 +764,19 @@ function aggregateWeekly(bars) {
       w.volume += (b.volume || 0);
     }
   }
-  return Object.values(weeks);
+  return Object.values(buckets);
 }
+
+// Aggregate daily bars to weekly / monthly / quarterly bars.
+function aggregateWeekly(bars)    { return aggregateByKey(bars, weekKeyOf); }
+function aggregateMonthly(bars)   { return aggregateByKey(bars, monthKeyOf); }
+function aggregateQuarterly(bars) { return aggregateByKey(bars, quarterKeyOf); }
 
 function aggregateWeeklyVolume(rows) {
   if (!rows.length) return [];
   const weeks = {};
   for (const row of rows) {
-    const d = new Date(row.date);
-    const onejan = new Date(d.getFullYear(), 0, 1);
-    const week = Math.ceil((((d - onejan) / 86400000) + onejan.getDay() + 1) / 7);
-    const key = d.getFullYear() + '-W' + week;
+    const key = weekKeyOf(row.date);
     if (!weeks[key]) {
       weeks[key] = { ...row, date: row.date, volume: Number(row.volume) || 0 };
     } else {
@@ -643,6 +798,24 @@ function getContinuousContract(cfg) {
 
 function getContinuousHistory(cfg) {
   return getContinuousContract(cfg).history || [];
+}
+
+// The "front month" is the LEAD (most-liquid) contract — the one carrying the highest
+// reported volume — not merely the nearest by calendar. Liquidity rolls forward before a
+// contract expires, so the nearest calendar month can be nearly dead (e.g. mid-June gold
+// trades August, not June). Returns the index into `contracts` of the highest-volume
+// contract that has a yf_symbol; falls back to the first tradable contract (nearest by
+// calendar) when no contract reports positive volume. Ties keep the nearer expiry.
+function frontContractIndex(contracts) {
+  const list = contracts || [];
+  let best = -1, bestVol = 0;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (!c || !c.yf_symbol) continue;
+    const v = Number(c.volume);
+    if (Number.isFinite(v) && v > bestVol) { bestVol = v; best = i; }
+  }
+  return best >= 0 ? best : list.findIndex(c => c && c.yf_symbol);
 }
 
 function chartDisplayMode(source) {
@@ -690,7 +863,12 @@ function getChartBars(cfg) {
   cutoff.setDate(cutoff.getDate() - days);
   bars = bars.filter(b => new Date(b.date) >= cutoff);
   // Interval
-  if (chartState.interval === 'weekly') bars = aggregateWeekly(bars);
+  switch (chartState.interval) {
+    case 'weekly':    bars = aggregateWeekly(bars); break;
+    case 'monthly':   bars = aggregateMonthly(bars); break;
+    case 'quarterly': bars = aggregateQuarterly(bars); break;
+    // 'daily' -> raw
+  }
   return bars;
 }
 
@@ -837,6 +1015,13 @@ function bindChartCrosshair(wrap, cfg) {
   const oiLabel = label();
   const cotLabel = label();
   const spreadLabel = label();
+  // TA oscillator panes: one dot + right-axis label per series line (e.g. Stoch %K/%D, MACD/signal),
+  // built dynamically from cfg.taPanes. Each carries its pane geometry + value→y fn.
+  const taPaneCrosshair = (cfg.taPanes || []).map(p => ({
+    p,
+    lines: (p.legend || []).map(L => ({ L, dot: make('circle', { class: 'crosshair-dot', r: 3, fill: L.color || '#888' }), lbl: label() })),
+  }));
+  taPaneCrosshair.forEach(tp => tp.lines.forEach(ln => layer.appendChild(ln.dot)));
   setOhlcReadout(cfg.bars[cfg.bars.length - 1]);
   svg.appendChild(layer);
 
@@ -871,7 +1056,18 @@ function bindChartCrosshair(wrap, cfg) {
     dot.setAttribute('cy', point.y.toFixed(1));
     if (color) dot.setAttribute('fill', color);
   }
+  // Middle-mouse toggle: the middle button flips the inspection crosshair on/off and the
+  // choice sticks as a manual override. Default (override null) follows the tool — off under
+  // the Charts-tab Cursor tool (a plain arrow for selecting/moving drawings), on for every
+  // other tool and on the Futures tab (no palette). The override wins over that default, so
+  // you can summon the crosshair even while the Cursor tool is active, and dismiss it again.
+  let crosshairOverride = null;   // null = follow tool default; true/false = manual on/off
+  function crosshairShouldShow() {
+    const cursorTool = cfg.drawingsActive && typeof drawState !== 'undefined' && drawState.tool === 'cursor';
+    return crosshairOverride === null ? !cursorTool : crosshairOverride;
+  }
   function update(evt) {
+    if (!crosshairShouldShow()) { hide(); return; }
     const p = localPoint(evt);
     if (!p) return;
 
@@ -899,7 +1095,8 @@ function bindChartCrosshair(wrap, cfg) {
       if (idx >= 0) x = cfg.spreadPoints[idx].x;
     }
 
-    const bar = cfg.bars[nearestBarByX(x)];
+    const barIdx = nearestBarByX(x);
+    const bar = cfg.bars[barIdx];
     const volumePoints = cfg.volumePoints || [];
     const oiPoints = cfg.oiPoints || [];
     const cotPoints = cfg.cotPoints || [];
@@ -955,6 +1152,18 @@ function bindChartCrosshair(wrap, cfg) {
       showPoint(spreadDot, null);
       hideEl(spreadLabel);
     }
+    // TA oscillator panes: dot + right-axis readout per line at the hovered bar.
+    taPaneCrosshair.forEach(({ p, lines }) => {
+      lines.forEach(({ L, dot, lbl }) => {
+        const v = L.values[barIdx];
+        if (!Number.isFinite(v)) { dot.style.display = 'none'; hideEl(lbl); return; }
+        const yy = p.yFn(v);
+        dot.style.display = '';
+        dot.setAttribute('cx', x.toFixed(1));
+        dot.setAttribute('cy', yy.toFixed(1));
+        setLabel(lbl, `${L.label} ${v.toFixed(p.dec)}`, cfg.W - 4, clamp(yy, p.top + 9, p.top + p.h - 9), 'right');
+      });
+    });
   }
   function hide() {
     layer.style.display = 'none';
@@ -969,6 +1178,17 @@ function bindChartCrosshair(wrap, cfg) {
   hit.addEventListener('mouseleave', hide);
   hit.addEventListener('mouseout', hide);
   svg.addEventListener('mouseleave', hide);
+
+  // Middle mouse button toggles the crosshair on/off. preventDefault on the press
+  // suppresses the browser's middle-click autoscroll; auxclick is muted for the same reason.
+  function toggleCrosshair(evt) {
+    if (evt.button !== 1) return;   // middle button only
+    evt.preventDefault();
+    crosshairOverride = !crosshairShouldShow();   // flip the current effective state, then lock it
+    if (crosshairOverride) update(evt); else hide();
+  }
+  hit.addEventListener('mousedown', toggleCrosshair);
+  hit.addEventListener('auxclick', evt => { if (evt.button === 1) evt.preventDefault(); });
 
   // ── Measure tool: left-press + drag on the price pane reads the point difference
   // and %-change between press and cursor (free, TradingView-style); releasing the
@@ -1034,6 +1254,10 @@ function bindChartCrosshair(wrap, cfg) {
   }
   function measureStart(evt) {
     if (evt.button !== 0) return;   // left button only
+    // On the Charts tab the palette owns the mouse: drag-to-measure only under the Crosshair tool
+    // (like the Futures tab's always-on crosshair-measure). The Futures tab has no palette
+    // (cfg.drawingsActive is false) → measure stays unconditional there.
+    if (cfg.drawingsActive && typeof drawState !== 'undefined' && drawState.tool !== 'crosshair') return;
     const p = localPoint(evt);
     if (!p) return;
     if (p.y < cfg.padT || p.y > cfg.padT + cfg.priceH) return;   // start only in the price pane
@@ -1049,12 +1273,85 @@ function bindChartCrosshair(wrap, cfg) {
   hit.addEventListener('pointermove', measureDraw);
 }
 
+// Display-only live overlay: splice the latest live tick for the ACTIVE symbol onto a
+// COPY of the bars. Never mutates the persisted series (catCache / contract.chart_history)
+// and never runs in card-mode (content-bot PNGs stay byte-stable). `liveQuotes` is owned by
+// live.js (symbol -> {day, price, open?, high?, low?} — the still-forming bar's intraday
+// OHLC when Yahoo provides it, so the provisional candle has a real body + wicks instead of
+// a flat single-price mark). The typeof guard keeps this safe if live.js is absent.
+// Build the OHLC of a provisional live bar from a live quote (live.js shape:
+// {price, open?, high?, low?} — intraday OHLC of the still-forming bar). Any leg Yahoo
+// omits falls back to the last price, then high/low are clamped so low <= open,close <= high:
+// a degenerate or missing-OHLC tick still paints a thin valid candle, never an inverted one.
+// Shared by the Futures, Macro Shift (smt.js) and Screener (screener.js) live overlays.
+function liveBarOHLC(lp) {
+  const p = lp.price;
+  const o = Number.isFinite(lp.open) ? lp.open : p;
+  let hi = Number.isFinite(lp.high) ? lp.high : p;
+  let lo = Number.isFinite(lp.low) ? lp.low : p;
+  return { open: o, high: Math.max(hi, o, p), low: Math.min(lo, o, p), close: p };
+}
+
+function injectLivePoint(bars, symbol) {
+  if (!bars || !bars.length) return bars;
+  if (document.body.classList.contains('card-mode')) return bars;
+  if (typeof liveQuotes !== 'object' || !liveQuotes) return bars;
+  const lp = symbol && liveQuotes[symbol];
+  if (!lp || !Number.isFinite(lp.price) || !lp.day) return bars;
+
+  const out = bars.slice();
+  const c = liveBarOHLC(lp);       // real candle: {open, high, low, close}, missing legs filled
+  const p = c.close;
+  const last = out[out.length - 1];
+
+  if (chartState.interval === 'weekly') {
+    // The live tick belongs to the CURRENT week's bar: extend its high/low and move its
+    // close to the live price (open stays the week's open). Only when the last aggregated
+    // bar is actually this week — otherwise the live tick opens a fresh week.
+    if (last && weekKeyOf(last.date) === weekKeyOf(lp.day)) {
+      out[out.length - 1] = {
+        ...last,
+        high: Math.max(last.high, c.high),
+        low: Math.min(last.low, c.low),
+        close: p,
+        date: lp.day,
+        __live: true
+      };
+    } else {
+      out.push({ date: lp.day, ...c, volume: null, __live: true });
+    }
+    return out;
+  }
+
+  const pt = { date: lp.day, ...c, volume: null, __live: true };
+  if (last && String(last.date).slice(0, 10) === String(lp.day).slice(0, 10)) out[out.length - 1] = pt;
+  else out.push(pt);
+  return out;
+}
+
 // ── Multi-pane candlestick chart: price + OI + COT ──
-function loadChart(cfg) {
-  const body = document.getElementById('chartBody');
+// opts (all optional; defaults keep the Futures call site `loadChart(cfg)` unchanged):
+//   bodyId / symId  — render targets (default the Futures '#chartBody' / '#chartSym')
+//   controls        — render the Futures interval/range/filter toggle bar (default true)
+//   panes           — render the Volume/OI/COT/Spread panes below price (default true)
+//   rollMarkers     — draw scheduled-expiry roll vlines (default true)
+//   priceH          — fixed price-pane height (the Charts tab fills the viewport)
+//   wheelZoom       — enable mouse-wheel zoom: slice the visible bars to state.[zoomStart,zoomEnd]
+//                     and attach a cursor-anchored wheel handler + dblclick-to-reset (default off)
+//   rerender        — repaint callback the wheel handler calls (default: loadChart(cfg, opts));
+//                     the Charts tab passes () => renderBigChart(cfg) so its state-swap/maximize path runs
+// The maximized "Charts" tab calls with {controls:false, panes:true, rollMarkers:false, wheelZoom:true}
+// and swaps the global chartState for its own bigChartState (synchronous, restored after).
+function loadChart(cfg, opts = {}) {
+  const bodyId = opts.bodyId || 'chartBody';
+  const symId = opts.symId || 'chartSym';
+  const showControls = opts.controls !== false;
+  const showPanes = opts.panes !== false;
+  const showRoll = opts.rollMarkers !== false;
+  const body = document.getElementById(bodyId);
   const chartSource = getActiveChartSource(cfg);
   const fullHist = chartSource.history || [];
-  const symEl = document.getElementById('chartSym');
+  const symEl = document.getElementById(symId);
   if (symEl) {
     const modeLabel = chartSource.mode === 'contract' ? 'Single Contract' : chartSource.displayMode;
     symEl.textContent = `${chartSource.displaySymbol || chartSource.symbol} · ${modeLabel} · ${cfg.unit} · ${cfg.currency}`;
@@ -1064,15 +1361,36 @@ function loadChart(cfg) {
     const emptyMsg = chartSource.mode === 'contract'
       ? `No chart history available for ${esc(chartSource.displaySymbol || chartSource.label)}.`
       : 'No volume-led continuous history available. yfinance returned no chart data.';
-    body.innerHTML = renderChartControls() +
+    body.innerHTML = (showControls ? renderChartControls() : '') +
       `<div class="chart-empty">${emptyMsg}</div>`;
-    bindChartControls(cfg);
+    if (showControls) bindChartControls(cfg);
     return;
   }
 
-  const bars = getChartBars(cfg);
+  let bars = getChartBars(cfg);
+  bars = injectLivePoint(bars, chartSource.symbol);
+
+  // Mouse-wheel zoom (Charts tab): slice the full bar set to the saved visible window. The
+  // window auto-resets when the underlying view changes (market / interval / range / mode) so
+  // each timeframe opens full, but survives live-tick repaints (same signature). `fullBars`
+  // keeps the unsliced set for the wheel handler's index math below.
+  const st = chartState;
+  const wheelZoom = !!opts.wheelZoom;
+  const fullBars = bars;
+  if (wheelZoom) {
+    const N0 = fullBars.length;
+    st._zoomN = N0;                                 // full bar count for this view — read by the Charts tab's "jump to latest" button
+    const sig = `${st.key}|${st.interval}|${st.range}|${st.chartMode}|${st.contractSymbol || ''}`;
+    if (st._zoomSig !== sig) { st.zoomStart = null; st.zoomEnd = null; st._zoomSig = sig; }
+    if (N0 > 3 && Number.isFinite(st.zoomStart) && Number.isFinite(st.zoomEnd)) {
+      const zs = Math.max(0, Math.min(st.zoomStart, N0 - 2));
+      const ze = Math.max(zs + 1, Math.min(st.zoomEnd, N0 - 1));
+      st.zoomStart = zs; st.zoomEnd = ze;            // persist the clamped window
+      bars = fullBars.slice(zs, ze + 1);
+    }
+  }
+
   const cot  = normalizeCotSeries(cfg.cot_series || []);
-  const isWeekly = chartState.interval === 'weekly';
 
   // Responsive: derive width from the real content area.
   // body.clientWidth includes padding; the SVG is inside the content box.
@@ -1081,24 +1399,30 @@ function loadChart(cfg) {
   const bodyStyle = window.getComputedStyle(body);
   const padX = (Number.parseFloat(bodyStyle.paddingLeft) || 0) + (Number.parseFloat(bodyStyle.paddingRight) || 0);
   const wrapW = Math.max(320, (bodyRect.width || body.clientWidth || 900) - padX);
-  const W = Math.max(320, Math.floor(wrapW));
+  // -2 for the .chart-svg-wrap's 1px border each side: the SVG lives inside that wrap, so its
+  // available width is 2px less than #chartBody. Matching it keeps the SVG 1:1 (no fractional
+  // down-scale that would blur/double the 1px candle strokes).
+  const W = Math.max(320, Math.floor(wrapW) - 2);
   const padL = 52, padR = 56, padT = 8;
-  const priceH = Math.round(W * 0.38);   // keep price dominant; added panes grow the chart downward
-  const volumeH = 62, oiH = 68, cotH = 84, spreadH = 64, gap = 22;
+  // Price-pane height: default 38% of width (price stays dominant; panes grow downward).
+  // opts.priceH lets the maximized Charts tab fill the viewport height instead.
+  const priceH = Math.round(opts.priceH || (W * 0.38));
+  const volumeH = PANE_H.volume, oiH = PANE_H.oi, cotH = PANE_H.cot, spreadH = PANE_H.spread, gap = PANE_GAP;
   const innerW = W - padL - padR;
   const edgePad = Math.max(24, Math.min(56, Math.round(innerW * 0.05)));
   const plotW = Math.max(120, innerW - edgePad * 2);
   const n = bars.length;
 
   if (!n) {
-    body.innerHTML = renderChartControls() + '<div class="chart-empty">No data for the selected range.</div>';
-    bindChartControls(cfg);
+    body.innerHTML = (showControls ? renderChartControls() : '') + '<div class="chart-empty">No data for the selected range.</div>';
+    if (showControls) bindChartControls(cfg);
     return;
   }
 
   // Candle geometry
   const slot = plotW / n;
-  const candleW = Math.max(1, Math.min(12, slot * 0.7));
+  const _widthFactor = CHART_STYLE.width === 'narrow' ? 0.55 : CHART_STYLE.width === 'wide' ? 0.85 : 0.7;
+  const candleW = Math.max(1, Math.min(12, slot * _widthFactor));
   const xAt = i => padL + edgePad + slot * (i + 0.5);
   const barXs = bars.map((_, i) => xAt(i));
   const barTimes = bars.map(b => new Date(b.date).getTime());
@@ -1112,12 +1436,29 @@ function loadChart(cfg) {
   };
   const xForDate = date => barXs[nearestBarIndexByTime(new Date(date).getTime())];
 
+  // ── Technical indicators (Charts tab only). Compute now so price-pane overlays can widen the
+  // autoscale below, and oscillator panes can reserve stack height. The Futures tab / card-mode
+  // pass no opts.drawings and carry no chartState.indicators, so taActive is empty there. The
+  // visibility eye (_indHidden) blanks the list too. ──
+  const taActive = (opts.drawings && !chartState._indHidden && typeof INDICATOR_DEFS !== 'undefined' && Array.isArray(chartState.indicators))
+    ? chartState.indicators.filter(i => i && i.visible !== false && INDICATOR_DEFS[i.type])
+    : [];
+  const taOverlayData = taActive.filter(i => INDICATOR_DEFS[i.type].kind === 'overlay')
+    .map(ind => ({ ind, data: computeIndicator(ind, bars) })).filter(o => o.data);
+  const taPaneData = taActive.filter(i => INDICATOR_DEFS[i.type].kind === 'pane')
+    .map(ind => ({ ind, data: computeIndicator(ind, bars) })).filter(o => o.data);
+
   // Price scale. Filter to finite values first: a single null/undefined low/high would
   // make Math.min/Math.max NaN, poisoning the whole domain so the SVG renders nothing.
   const lows = bars.map(d => d.low).filter(Number.isFinite);
   const highs = bars.map(d => d.high).filter(Number.isFinite);
-  const pMin = lows.length ? Math.min(...lows) : 0;
-  const pMax = highs.length ? Math.max(...highs) : 1;
+  let pMin = lows.length ? Math.min(...lows) : 0;
+  let pMax = highs.length ? Math.max(...highs) : 1;
+  // Overlays (SMA/EMA/Bollinger) participate in the price domain so a long MA or a band edge
+  // never clips out of the price pane.
+  taOverlayData.forEach(({ data }) => data.lines.forEach(ln => {
+    for (let i = 0; i < ln.values.length; i++) { const v = ln.values[i]; if (Number.isFinite(v)) { if (v < pMin) pMin = v; if (v > pMax) pMax = v; } }
+  }));
   const pRng = (pMax - pMin) || 1;
   const pad = pRng * 0.05;
   const pLo = pMin - pad, pHi = pMax + pad, pSpan = pHi - pLo;
@@ -1125,19 +1466,93 @@ function loadChart(cfg) {
 
   const dec = cfg.tick_decimals;
 
-  // Candlesticks
+  // Candlesticks — stil-bewusst: gefuellt / hohl (Up nur Umriss) / Linie (nur Close); Docht-Dicke.
+  const _wickW = CHART_STYLE.wick === 'thick' ? 2 : CHART_STYLE.wick === 'medium' ? 1.5 : 1;
   let candles = '';
-  bars.forEach((d, i) => {
-    const x = xAt(i);
-    const up = d.close >= d.open;
-    const col = up ? CHART_THEME.bull : CHART_THEME.bear;
-    const wickCol = up ? CHART_THEME.bullWick : CHART_THEME.bearWick;
-    const yH = pY(d.high).toFixed(1), yL = pY(d.low).toFixed(1);
-    const yO = pY(d.open), yC = pY(d.close);
-    const bodyTop = Math.min(yO, yC), bodyH = Math.max(1, Math.abs(yC - yO));
-    candles += `<line x1="${x.toFixed(1)}" y1="${yH}" x2="${x.toFixed(1)}" y2="${yL}" stroke="${wickCol}" stroke-width="1"/>`;
-    candles += `<rect x="${(x - candleW/2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
-  });
+  if (CHART_STYLE.candle === 'line') {
+    let dPath = '';
+    bars.forEach((d, i) => {
+      if (!Number.isFinite(d.close)) return;
+      dPath += `${dPath ? 'L' : 'M'}${xAt(i).toFixed(1)} ${pY(d.close).toFixed(1)}`;
+    });
+    if (dPath) candles = `<path d="${dPath}" fill="none" stroke="${CHART_THEME.bull}" stroke-width="1.5"/>`;
+  } else {
+    const hollow = CHART_STYLE.candle === 'hollow';
+    const border = CHART_STYLE.border;   // null | hex | 'darken' — candle-body outline colour
+    const _darken = (hex) => {
+      const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || ''); if (!m) return hex || '#000000';
+      const n = parseInt(m[1], 16), d = v => Math.max(0, Math.round(v * 0.66));
+      return '#' + ((1 << 24) | (d((n >> 16) & 255) << 16) | (d((n >> 8) & 255) << 8) | d(n & 255)).toString(16).slice(1);
+    };
+    bars.forEach((d, i) => {
+      const x = xAt(i);
+      const up = d.close >= d.open;
+      const col = up ? CHART_THEME.bull : CHART_THEME.bear;
+      const wickCol = up ? CHART_THEME.bullWick : CHART_THEME.bearWick;
+      const yHn = pY(d.high), yLn = pY(d.low);
+      const bTopR = Math.min(pY(d.open), pY(d.close)), bBotR = Math.max(pY(d.open), pY(d.close));   // real body bounds
+      const fill = (hollow && up) ? 'none' : col;
+      const strokeCol = !border ? col : (border === 'darken' ? _darken(col) : border);   // body outline
+      const strokeW = border ? 1 : (hollow ? 1 : 0.5);
+      const wickStroke = border ? strokeCol : wickCol;   // wicks match the body outline when a border is set
+      // Pixel-snap to keep 1px outlines crisp at integer DPR: a 1px stroke is crisp only when its
+      // centre sits at integer+0.5. Bodies with a visible outline (hollow, or a border colour) align
+      // their EDGES to .5; plain filled bodies align their fill edges to whole pixels.
+      const a = (fill === 'none' || border) ? 0.5 : 0;
+      const wx = Math.round(x) + 0.5;                                   // 1px wick centre on the grid
+      const L = Math.round(x - candleW / 2) + a, R = Math.round(x + candleW / 2) + a;
+      const rT = Math.round(bTopR) + a, rB = Math.round(bBotR) + a;
+      // Wicks: two guarded segments (above + below the body) so they never cross a hollow body.
+      if (yHn < bTopR) candles += `<line x1="${wx}" y1="${Math.round(yHn) + 0.5}" x2="${wx}" y2="${Math.round(bTopR) + 0.5}" stroke="${wickStroke}" stroke-width="${_wickW}"/>`;
+      if (bBotR < yLn) candles += `<line x1="${wx}" y1="${Math.round(bBotR) + 0.5}" x2="${wx}" y2="${Math.round(yLn) + 0.5}" stroke="${wickStroke}" stroke-width="${_wickW}"/>`;
+      if (bBotR - bTopR < 1) {
+        // doji / sub-pixel body: a single open≈close line across the candle width, in the text
+        // colour (black on light themes, light on dark) rather than the up/down fill colour.
+        const y = Math.round(bTopR) + 0.5;
+        candles += `<line x1="${L}" y1="${y}" x2="${R}" y2="${y}" stroke="${CHART_THEME.text}" stroke-width="1"/>`;
+      } else {
+        candles += `<rect x="${L}" y="${rT}" width="${R - L}" height="${rB - rT}" fill="${fill}" stroke="${strokeCol}" stroke-width="${strokeW}"/>`;
+      }
+    });
+  }
+
+  // Live tick marker (display-only): a pulsing hollow dot on the provisional last point.
+  let liveDot = '';
+  const liveBar = bars[bars.length - 1];
+  if (liveBar && liveBar.__live) {
+    const lx = xAt(bars.length - 1).toFixed(1);
+    const ly = pY(liveBar.close).toFixed(1);
+    liveDot =
+      `<circle class="chart-live-dot" cx="${lx}" cy="${ly}" r="3" fill="none" stroke="${CHART_THEME.bull}" stroke-width="1.5">` +
+      `<animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite"/>` +
+      `<animate attributeName="opacity" values="1;0.2;1" dur="1.6s" repeatCount="indefinite"/></circle>`;
+  }
+
+  // ── Aktuelle-Preis-Linie: dezente gestrichelte Linie auf dem zuletzt handelnden Preis
+  // (Live-Tick wenn vorhanden — injectLivePoint hat ihn als letzten Bar gespliced; sonst der
+  // letzte settled Close) + Preis-Tag RECHTSBUENDIG an der Achse: rechte Kante fix am Chart-Rand,
+  // Tag waechst nach links — lange Zahlen (z.B. BTC) werden nie abgeschnitten. Eigene Klasse (kein
+  // chart-live-dot), damit der SVG-Export sie behaelt; erscheint auch in Card-Mode. `curY` wird
+  // unten genutzt, um das kollidierende Round-Level-Label auf gleicher Hoehe wegzulassen.
+  let priceLine = '';
+  let curY = null;
+  if (liveBar && Number.isFinite(liveBar.close)) {
+    const cp = liveBar.close;
+    const cy = pY(cp);
+    if (Number.isFinite(cy)) {
+      curY = cy;
+      const tagY = Math.max(padT + 8, Math.min(padT + priceH - 8, cy));
+      const txt = cp.toFixed(dec);
+      const tagW = Math.max(34, txt.length * 6.2 + 10);
+      const tagX = W - 2 - tagW;
+      priceLine =
+        `<line class="chart-price-line" x1="${padL}" y1="${cy.toFixed(1)}" x2="${tagX.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="5,4"/>` +
+        `<g class="chart-price-line">` +
+        `<rect x="${tagX.toFixed(1)}" y="${(tagY - 8).toFixed(1)}" width="${tagW.toFixed(1)}" height="16" rx="2.5" fill="${CHART_THEME.bg}" stroke="${CHART_THEME.axis}" stroke-width="1"/>` +
+        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist">${txt}</text>` +
+        `</g>`;
+    }
+  }
 
   // ── Roll-Marker: geplante Frontmonat-Verfallstermine (Boersenkalender) ──
   // Deterministisch aus contract_months + expiry_rule (generatorseitig in roll_dates).
@@ -1146,7 +1561,8 @@ function loadChart(cfg) {
   // Yahoos tatsaechlichem Roll liegen (dessen Punkt ist nicht bekannt). Labels werden
   // bei dichten (monatlichen) Zyklen ausgeduennt, die Linie bleibt.
   let rollLines = '', rollLabels = '';
-  if (!document.body.classList.contains('card-mode')
+  if (showRoll
+      && !document.body.classList.contains('card-mode')
       && chartSource.mode !== 'contract'
       && Array.isArray(cfg.roll_dates) && cfg.roll_dates.length) {
     const t0 = barTimes[0], t1 = barTimes[n - 1];
@@ -1157,7 +1573,7 @@ function loadChart(cfg) {
       const x = xForDate(r.date);
       rollLines += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(padT + priceH).toFixed(1)}" stroke="#64748b" stroke-width="1" stroke-dasharray="5,4" opacity="0.38"/>`;
       if (r.code && x - lastLabelX >= 24) {
-        rollLabels += `<text x="${(x + 2).toFixed(1)}" y="${(padT + priceH - 4).toFixed(1)}" font-size="9" font-weight="600" fill="#475569" font-family="Sora">${r.code}</text>`;
+        rollLabels += `<text x="${(x + 2).toFixed(1)}" y="${(padT + priceH - 4).toFixed(1)}" font-size="9" font-weight="600" fill="#475569" font-family="Geist">${r.code}</text>`;
         lastLabelX = x;
       }
     }
@@ -1179,14 +1595,21 @@ function loadChart(cfg) {
   }
   const levelStep = roundLevelStep(pSpan, pLo, pHi);
   const firstLevel = Math.ceil(pLo / levelStep) * levelStep;
+  const _gridOff = CHART_STYLE.grid === 'off';
+  const _gridOpacity = CHART_STYLE.grid === 'subtle' ? 0.4 : 0.78;
   let roundLevels = '';
   for (let lv = firstLevel; lv <= pHi; lv += levelStep) {
     // Smooth floating point noise
     lv = Math.round(lv / levelStep) * levelStep;
     if (lv < pLo || lv > pHi) continue;
     const y = pY(lv).toFixed(1);
-    roundLevels += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    roundLevels += `<text x="${W-padR+5}" y="${(+y+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${lv.toFixed(dec)}</text>`;
+    if (!_gridOff)
+      roundLevels += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="${_gridOpacity}"/>`;
+    // Label weglassen, wenn es mit dem Aktuelle-Preis-Tag auf gleicher Hoehe kollidiert.
+    // Rechtsbuendig (text-anchor=end) an der rechten Kante, damit lange Zahlen (BTC: "100000.00")
+    // nicht am Rand abgeschnitten werden.
+    if (!(curY != null && Math.abs(+y - curY) < 9))
+      roundLevels += `<text x="${W-4}" y="${(+y+3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${lv.toFixed(dec)}</text>`;
   }
 
   // ── OI and COT panes in daily and weekly views (CFTC data is weekly) ──
@@ -1201,11 +1624,45 @@ function loadChart(cfg) {
     return padL + edgePad + inset + usableW * index / (count - 1);
   }
 
-  const showVolume = chartState.showVolume;
-  const showSpread = chartState.showSpread;
+  const showVolume = showPanes && chartState.showVolume;
+  const showSpread = showPanes && chartState.showSpread;
+  // CFTC OI + COT are weekly data — only meaningful in daily/weekly views. In monthly/quarterly
+  // (the Charts tab's higher timeframes) they're hidden and reserve no height. The Charts tab can
+  // toggle OI and COT off independently (chartState.showOi/showCot === false); the Futures tab has
+  // no such flags (undefined !== false) so its OI/COT stay always-on.
+  const oiCotOk = showPanes && paneShowsOiCot(chartState.interval);
+  const showOi = oiCotOk && chartState.showOi !== false;
+  const showCot = oiCotOk && chartState.showCot !== false;
   let volumeSvg = '', oiSvg = '', cotSvg = '', spreadSvg = '', volumeTop = 0, oiTop = 0, cotTop = 0, spreadTop = 0;
+  // Pane tops via a running stack-cursor: each active pane lands below the previous one (or the
+  // price pane), so any on/off combination stacks with no gap. Mirrors panesHeight().
+  let stackBottom = padT + priceH;
+  if (showVolume) { volumeTop = stackBottom + PANE_GAP; stackBottom = volumeTop + PANE_H.volume; }
+  // TA oscillator panes (RSI/Stoch/MACD/ATR) stack directly under price/volume, above the CFTC
+  // OI/COT/spread panes (TradingView convention). Each reserves PANE_H_TA via the same cursor.
+  const taPaneLayout = (showPanes ? taPaneData : []).map(({ ind, data }) => {
+    const top = stackBottom + PANE_GAP; stackBottom = top + PANE_H_TA; return { ind, data, top, h: PANE_H_TA };
+  });
+  if (showOi)     { oiTop     = stackBottom + PANE_GAP; stackBottom = oiTop     + PANE_H.oi; }
+  if (showCot)    { cotTop    = stackBottom + PANE_GAP; stackBottom = cotTop    + PANE_H.cot; }
+  if (showSpread) { spreadTop = stackBottom + PANE_GAP; stackBottom = spreadTop + PANE_H.spread; }
+
+  // ── Build the TA overlay paths (price pane) and oscillator panes. taCrosshairPanes feeds the
+  // crosshair the per-pane geometry + value arrays for hover readouts. ──
+  let taOverlaySvg = '';
+  taOverlayData.forEach(({ data }) => {
+    if (data.band) taOverlaySvg += _taBandPath(data.band.upper, data.band.lower, barXs, pY, data.band.color);
+    data.lines.forEach(ln => { taOverlaySvg += _taLinePath(ln.values, barXs, pY, ln.color, ln.width, ln.dash, ln.opacity); });
+  });
+  let taPanesSvg = '', taPaneHeadings = '';
+  const taCrosshairPanes = [];
+  taPaneLayout.forEach(({ ind, data, top, h }) => {
+    const r = _renderTaPane(ind, data, { top, h, padL, padR, W, dec, barXs, slot });
+    taPanesSvg += r.svg; taPaneHeadings += r.heading; taCrosshairPanes.push(r.cross);
+  });
+
   let presentOiSources = new Set();
-  const panesH = (showVolume ? volumeH + gap : 0) + (oiH + gap) + (cotH + gap) + (showSpread ? spreadH + gap : 0);
+  const panesH = showPanes ? panesHeight(chartState) : 0;
   const visCot = cot.filter(inVisibleRange);
   const cotLabel = (cot[0] && (cot[0].cot_label || cot[0].cotLabel)) || 'Commercial Net';
   const cotReport = (cot[0] && cot[0].cot_report) || 'CFTC';
@@ -1227,7 +1684,7 @@ function loadChart(cfg) {
   const cotBars = (cotHedgingActive ? hedgeCot : visCot).filter(inVisibleRange);
   let crosshairVolumePoints = [], crosshairOiPoints = [], crosshairCotPoints = [], crosshairSpreadPoints = [];
 
-  volumeTop = padT + priceH + gap;
+  // volumeTop/oiTop/cotTop/spreadTop are precomputed above via the running stack-cursor.
   let volumeHeading = chartSource.mode === 'continuous' ? 'TOTAL' : 'CONTRACT';
   let volumeLegend = '';
 
@@ -1312,10 +1769,10 @@ function loadChart(cfg) {
         <line x1="${padL}" y1="${volumeTop}" x2="${W-padR}" y2="${volumeTop}" stroke="${CHART_THEME.grid}"/>
         <line x1="${padL}" y1="${volumeBase}" x2="${W-padR}" y2="${volumeBase}" stroke="${CHART_THEME.grid}"/>
         ${volumeBarsSvg}
-        <text x="${W-padR+5}" y="${(volumeTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(volumeMax/1000).toFixed(0)}K</text>`
-        : `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" font-style="italic">No volume data in this range</text>`;
+        <text x="${W-padR+5}" y="${(volumeTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(volumeMax/1000).toFixed(0)}K</text>`
+        : `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No volume data in this range</text>`;
     } else {
-      volumeSvg = `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" font-style="italic">No volume data in this range</text>`;
+      volumeSvg = `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No volume data in this range</text>`;
     }
   }
 
@@ -1328,9 +1785,8 @@ function loadChart(cfg) {
   const oiHeading = 'CFTC WEEKLY TOTAL';
   const oiLegend = `Open Interest: CFTC weekly total${latestOiDate ? ' · report date ' + latestOiDate : ''}`;
 
-  // OI pane
-  oiTop = showVolume ? volumeTop + volumeH + gap : padT + priceH + gap;
-  if (oiPoints.length) {
+  // OI pane (oiTop precomputed via the stack-cursor)
+  if (showOi && oiPoints.length) {
     const oiVals = oiPoints.map(d => d.oi);
     const oiMin = Math.min(...oiVals), oiMax = Math.max(...oiVals);
     const oiRng = oiMax - oiMin;
@@ -1359,15 +1815,14 @@ function loadChart(cfg) {
       <line x1="${padL}" y1="${oiTop+oiH}" x2="${W-padR}" y2="${oiTop+oiH}" stroke="${CHART_THEME.grid}"/>
       ${oiPoints.length > 1 ? `<path d="${oiPath}" fill="none" stroke="${CHART_THEME.oi}" stroke-width="1.5" opacity="0.8"/>` : ''}
       ${oiDots}
-      <text x="${W-padR+5}" y="${(oiTop+5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(oiMax/1000).toFixed(0)}K</text>
-      <text x="${W-padR+5}" y="${(oiTop+oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(oiMin/1000).toFixed(0)}K</text>`;
-  } else {
-    oiSvg = `<text x="${padL}" y="${oiTop+oiH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" font-style="italic">No Open Interest data in this range</text>`;
+      <text x="${W-padR+5}" y="${(oiTop+5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMax/1000).toFixed(0)}K</text>
+      <text x="${W-padR+5}" y="${(oiTop+oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMin/1000).toFixed(0)}K</text>`;
+  } else if (showOi) {
+    oiSvg = `<text x="${padL}" y="${oiTop+oiH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No Open Interest data in this range</text>`;
   }
 
-  // COT pane (report-dependent net position)
-  cotTop = oiTop + oiH + gap;
-  if (cotBars.length) {
+  // COT pane (report-dependent net position; cotTop precomputed via the stack-cursor)
+  if (showCot && cotBars.length) {
     const thresholdSource = cotHedgingActive ? hedgeCot : cotBars;
     const cotVals = thresholdSource.map(cotValue).filter(v => v !== null && v !== undefined);
     const cotMin = cotVals.length ? Math.min(...cotVals) : -1;
@@ -1395,23 +1850,26 @@ function loadChart(cfg) {
     });
     const upperLabel = cotHedgingActive ? cotMax : cotAbs;
     const lowerLabel = cotHedgingActive ? cotMin : -cotAbs;
-    const midLabel = cotHedgingActive ? `<text x="${W-padR+5}" y="${(cotMid+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.bull}" font-family="Sora">${(cotThreshold/1000).toFixed(0)}K</text>` : '';
+    const midLabel = cotHedgingActive ? `<text x="${W-padR+5}" y="${(cotMid+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.bull}" font-family="Geist">${(cotThreshold/1000).toFixed(0)}K</text>` : '';
     cotSvg = `
       <line x1="${padL}" y1="${cotMid.toFixed(1)}" x2="${W-padR}" y2="${cotMid.toFixed(1)}" stroke="${cotHedgingActive ? CHART_THEME.bull : CHART_THEME.axis}" stroke-dasharray="4,3"/>
       ${bars2}
-      <text x="${W-padR+5}" y="${(cotTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(upperLabel/1000).toFixed(0)}K</text>
+      <text x="${W-padR+5}" y="${(cotTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(upperLabel/1000).toFixed(0)}K</text>
       ${midLabel}
-      <text x="${W-padR+5}" y="${(cotTop+cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(lowerLabel/1000).toFixed(0)}K</text>`;
-  } else {
-    cotSvg = `<text x="${padL}" y="${cotTop+cotH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" font-style="italic">No CFTC COT data in this range</text>`;
+      <text x="${W-padR+5}" y="${(cotTop+cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(lowerLabel/1000).toFixed(0)}K</text>`;
+  } else if (showCot) {
+    cotSvg = `<text x="${padL}" y="${cotTop+cotH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No CFTC COT data in this range</text>`;
   }
 
   // Calendar-spread pane (front minus next contract; negative = contango).
   // Optional, off by default. Daily only — the spread is built from daily EoD
   // contracts; in weekly view we still plot the underlying daily points.
   if (showSpread) {
-    spreadTop = cotTop + cotH + gap;
-    const spreadSeries = normalizeSpreadSeries(cfg.calendar_spread_series || []).filter(inVisibleRange);
+    // spreadTop precomputed via the stack-cursor (stacks below COT / OI / Volume / price as present).
+    // Settled EoD only: the pane ends at the last closed bar. No live/forming point is
+    // appended (the price line keeps its live candle; the spread deliberately does not).
+    let spreadSeries = normalizeSpreadSeries(cfg.calendar_spread_series || []);
+    spreadSeries = spreadSeries.filter(inVisibleRange);
     if (spreadSeries.length) {
       const spVals = spreadSeries.map(d => d.spread);
       const dataLo = Math.min(...spVals), dataHi = Math.max(...spVals);
@@ -1447,31 +1905,56 @@ function loadChart(cfg) {
         <line x1="${padL}" y1="${spreadTop}" x2="${W-padR}" y2="${spreadTop}" stroke="${CHART_THEME.grid}"/>
         <line x1="${padL}" y1="${spreadTop+spreadH}" x2="${W-padR}" y2="${spreadTop+spreadH}" stroke="${CHART_THEME.grid}"/>
         <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W-padR}" y2="${zeroY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"${zeroPinned ? ' opacity="0.65"' : ''}/>
-        <text x="${W-padR+5}" y="${(zeroY+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">0</text>
+        <text x="${W-padR+5}" y="${(zeroY+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">0</text>
         ${spreadSeries.length > 1 ? `<path d="${spPath}" fill="none" stroke="${CHART_THEME.spread}" stroke-width="1.5" opacity="0.85"/>` : ''}
         ${spDots}
-        <text x="${W-padR+5}" y="${(spreadY(dataHi)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${dataHi.toFixed(dec)}</text>
-        <text x="${W-padR+5}" y="${(spreadY(dataLo)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${dataLo.toFixed(dec)}</text>`;
+        <text x="${W-padR+5}" y="${(spreadY(dataHi)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataHi.toFixed(dec)}</text>
+        <text x="${W-padR+5}" y="${(spreadY(dataLo)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataLo.toFixed(dec)}</text>`;
     } else {
-      spreadSvg = `<text x="${padL}" y="${spreadTop+spreadH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" font-style="italic">No calendar-spread data in this range (fills in over time)</text>`;
+      spreadSvg = `<text x="${padL}" y="${spreadTop+spreadH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No calendar-spread data in this range (fills in over time)</text>`;
     }
   }
 
   // X-Labels liegen unter dem letzten Pane.
   const axisY = padT + priceH + panesH;
   const totalH = axisY + 22;
+
+  // Period dividers (Charts tab "Dividers" toggle): full-height vertical lines at calendar
+  // boundaries — a new MONTH on the Daily timeframe, a new YEAR on Weekly/Monthly/Quarterly.
+  // Charts-tab only (chartState.showDividers is set on bigChartState) and never in card-mode.
+  let dividerLines = '', dividerLabels = '';
+  if (chartState.showDividers && bars.length && !document.body.classList.contains('card-mode')) {
+    const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const yearly = chartState.interval !== 'daily';   // daily → months; weekly/monthly/quarterly → years
+    let prevKey = null;
+    bars.forEach((d, i) => {
+      const dt = new Date(d.date);
+      const yr = dt.getUTCFullYear(), mo = dt.getUTCMonth();
+      const key = yearly ? yr : yr * 12 + mo;
+      if (prevKey !== null && key !== prevKey) {
+        const x = (barXs[i] - slot / 2).toFixed(1);
+        dividerLines += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${axisY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="4,3" opacity="0.7"/>`;
+        // Label the year on yearly dividers and on the January (year-start) daily divider; other
+        // monthly dividers stay unlabeled to avoid clutter when bars are dense.
+        const label = yearly ? String(yr) : (mo === 0 ? String(yr) : '');
+        if (label) dividerLabels += `<text x="${(barXs[i] - slot / 2 + 3).toFixed(1)}" y="${(padT + 10).toFixed(1)}" font-size="9" fill="${CHART_THEME.text}" font-family="Geist" opacity="0.85">${label}</text>`;
+      }
+      prevKey = key;
+    });
+  }
+
   let xLabels = '';
   for (let g = 0; g <= 5; g++) {
     const i = Math.round((n-1) * g / 5);
     const x = xAt(i).toFixed(1);
-    xLabels += `<text x="${x}" y="${totalH-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
+    xLabels += `<text x="${x}" y="${totalH-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
   }
-  const intervalLabel = isWeekly ? 'Weekly' : 'Daily';
-  const rangeLabel = { '6m':'6 Months', '12m':'12 Months', '5y':'5 Years' }[chartState.range];
+  const intervalLabel = { daily:'Daily', weekly:'Weekly', monthly:'Monthly', quarterly:'Quarterly' }[chartState.interval] || 'Daily';
+  const rangeLabel = { '6m':'6 Months', '12m':'12 Months', '5y':'5 Years', '20y':'20 Years', 'max':'Max History' }[chartState.range] || '';
 
   // Source legend, placed to the right of the OI heading.
   const oiHeadingText = `OPEN INTEREST (${oiHeading})`;
-  // width at 10px Sora 600 incl. 0.05em letter-spacing, plus a comfortable gap
+  // width at 10px Geist 600 incl. 0.05em letter-spacing, plus a comfortable gap
   const oiHeadingWidth = oiHeadingText.length * (6.8 + 0.5) + 28;
   const oiLegendStartX = padL + oiHeadingWidth;
   const legendDefs = [];
@@ -1481,30 +1964,39 @@ function loadChart(cfg) {
   if (legendDefs.length > 1) {
     let lx = oiLegendStartX;
     oiHeadingLegend = legendDefs.map(d => {
-      const g = `<g transform="translate(${lx.toFixed(1)},${(oiTop - 8).toFixed(1)})">${d.mark}<text x="7" y="0" font-size="9" fill="${CHART_THEME.text}" font-family="Sora">${d.label}</text></g>`;
+      const g = `<g transform="translate(${lx.toFixed(1)},${(oiTop - 8).toFixed(1)})">${d.mark}<text x="7" y="0" font-size="9" fill="${CHART_THEME.text}" font-family="Geist">${d.label}</text></g>`;
       lx += 18 + d.label.length * 5.0;
       return g;
     }).join('');
   }
 
   const volumePaneSvg = showVolume ? `
-        <text x="${padL}" y="${volumeTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" letter-spacing="0.05em">VOLUME (${volumeHeading})</text>
+        <text x="${padL}" y="${volumeTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">VOLUME (${volumeHeading})</text>
         ${volumeSvg}` : '';
 
-  const panesSvg = `
+  const panesSvg = showPanes ? `
         ${volumePaneSvg}
-        <text x="${padL}" y="${oiTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" letter-spacing="0.05em">${oiHeadingText}</text>
+        ${taPaneHeadings}
+        ${taPanesSvg}
+        ${showOi ? `<text x="${padL}" y="${oiTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">${oiHeadingText}</text>
         ${oiHeadingLegend}
-        ${oiSvg}
-        <text x="${padL}" y="${cotTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" letter-spacing="0.05em">COT · ${cotLabel.toUpperCase()}${cotHedgingActive ? ` · ${chartState.range.toUpperCase()} HEDGING PROGRAM` : ''}</text>
-        ${cotSvg}
-        ${showSpread ? `<text x="${padL}" y="${spreadTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" letter-spacing="0.05em">CALENDAR SPREAD · FRONT - NEXT (&lt;0 = CONTANGO)</text>` : ''}
-        ${spreadSvg}`;
+        ${oiSvg}` : ''}
+        ${showCot ? `<text x="${padL}" y="${cotTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">COT · ${cotLabel.toUpperCase()}${cotHedgingActive ? ` · ${chartState.range.toUpperCase()} HEDGING PROGRAM` : ''}</text>
+        ${cotSvg}` : ''}
+        ${showSpread ? `<text x="${padL}" y="${spreadTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">CALENDAR SPREAD · FRONT - NEXT (&lt;0 = CONTANGO)</text>` : ''}
+        ${spreadSvg}` : '';
 
   const chartKind = chartSource.mode === 'contract'
     ? `Single Contract ${esc(chartSource.displaySymbol || chartSource.label)}`
     : esc(chartSource.displayMode || 'Continuous Contract');
-  const sectionLabel = `${chartKind} · ${intervalLabel} · ${rangeLabel} (${n} Candles) · with ${showVolume ? 'Volume, ' : ''}CFTC OI &amp; COT${cotHedgingActive ? ' · COT Hedging Program' : ''}`;
+  const cftcPaneLabel = (showOi && showCot) ? 'CFTC OI &amp; COT' : (showOi ? 'CFTC OI' : (showCot ? 'CFTC COT' : null));
+  const paneBits = [showVolume ? 'Volume' : null, cftcPaneLabel, showSpread ? 'Calendar Spread' : null].filter(Boolean);
+  const sectionPanes = paneBits.length
+    ? ` · with ${paneBits.join(', ')}${cotHedgingActive && showCot ? ' · COT Hedging Program' : ''}`
+    : '';
+  const sectionLabel = showPanes
+    ? `${chartKind} · ${intervalLabel} · ${rangeLabel} (${n} Candles)${sectionPanes}`
+    : `${chartKind} · ${intervalLabel} · ${rangeLabel} (${n} Candles)`;
 
   const hedgingLegend = cotHedgingActive
     ? `COT Hedging Program ${chartState.range.toUpperCase()} trailing: green above midpoint, red below &nbsp;·&nbsp;`
@@ -1513,52 +2005,28 @@ function loadChart(cfg) {
   const priceSourceLabel = chartSource.mode === 'contract'
     ? 'single contract'
     : 'continuous';
-  const legend = `COT net: <span class="legend-dot" style="background:#0ea679"></span> net long &nbsp;
-       <span class="legend-dot" style="background:#e53e3e"></span> net short &nbsp;·&nbsp;
-       ${hedgingLegend}${volumeLegendText}${esc(oiLegend)} · COT: ${cotReport}${latestCotDate ? ' · report date ' + latestCotDate : ''} · Price: ${intervalLabel.toLowerCase()} (${esc(chartSource.symbol)}, yfinance ${priceSourceLabel})`;
-  // Card-Mode (nur Content-Bot via ?card=): 4/4-Perioden-Schattierung + Trigger-Marker
-  // aus window.__fourFourLog. Passiert AUSSCHLIESSLICH hier — normales Dashboard bleibt clean.
-  let cardShade = '', cardMarks = '';
+  const cotDotsLegend = showCot
+    ? `COT net: <span class="legend-dot" style="background:#0ea679"></span> net long &nbsp;
+       <span class="legend-dot" style="background:#e53e3e"></span> net short &nbsp;·&nbsp; ${hedgingLegend}`
+    : '';
+  const oiLegendText = showOi ? `${esc(oiLegend)} · ` : '';
+  const cotReportText = showCot ? `COT: ${cotReport}${latestCotDate ? ' · report date ' + latestCotDate : ''} · ` : '';
+  const priceLegendText = `Price: ${intervalLabel.toLowerCase()} (${esc(chartSource.symbol)}, yfinance ${priceSourceLabel})`;
+  const legend = (showOi || showCot)
+    ? `${cotDotsLegend}${volumeLegendText}${oiLegendText}${cotReportText}${priceLegendText}`
+    : `${volumeLegendText}${priceLegendText} · candlesticks aggregated from settled daily EoD`;
+  // Card-Mode (nur Content-Bot via ?card=): 4/4-Perioden-Schattierung aus
+  // window.__fourFourLog. Passiert AUSSCHLIESSLICH hier — normales Dashboard bleibt clean.
+  // (Entry- und Exit/Drop-Marker wurden bewusst entfernt — nur noch das Band bleibt.)
+  let cardShade = '';
   if (document.body.classList.contains('card-mode') && window.__fourFourLog) {
     const periods = ((window.__fourFourLog[chartState.key] || {}).periods) || [];
     const lastX = barXs[barXs.length - 1];
-    const winT0 = barTimes[0], winT1 = barTimes[n - 1];
     periods.forEach(p => {
-      const ps = new Date(p.start).getTime();
-      const pe = p.end ? new Date(p.end).getTime() : null;
       const x1 = xForDate(p.start), x2 = p.end ? xForDate(p.end) : lastX;
       if (x1 != null && x2 != null && x2 > x1) {
         const col = p.direction === 'bullish' ? '#16a34a' : '#dc2626';
         cardShade += `<rect x="${x1.toFixed(1)}" y="${padT}" width="${(x2 - x1).toFixed(1)}" height="${priceH}" fill="${col}" opacity="0.2"/>`;
-      }
-      // Drop-Marker am Ende einer GESCHLOSSENEN 4/4-Periode (Setup auf 3/4 gefallen):
-      // hohles, weiss umrandetes Amber-X am Fall-Punkt. Offene Perioden (end=null) bekommen keinen.
-      // Nur zeichnen, wenn der Fall-Tag im sichtbaren Fenster liegt — sonst klemmt
-      // nearestBarIndexByTime ihn an den Rand und setzt einen Phantom-Marker am Chart-Rand.
-      if (pe != null && pe >= winT0 && pe <= winT1) {
-        const eIdx = nearestBarIndexByTime(pe);
-        const eb = bars[eIdx], ex = barXs[eIdx];
-        if (eb != null && ex != null) {
-          const ey = p.direction === 'bullish' ? pY(eb.high) - 13 : pY(eb.low) + 13;
-          cardMarks += `<g fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round">`
-            + `<circle cx="${ex.toFixed(1)}" cy="${ey.toFixed(1)}" r="6.5" stroke="#fff" stroke-width="3.4"/>`
-            + `<circle cx="${ex.toFixed(1)}" cy="${ey.toFixed(1)}" r="6.5"/>`
-            + `<line x1="${(ex - 3).toFixed(1)}" y1="${(ey - 3).toFixed(1)}" x2="${(ex + 3).toFixed(1)}" y2="${(ey + 3).toFixed(1)}"/>`
-            + `<line x1="${(ex - 3).toFixed(1)}" y1="${(ey + 3).toFixed(1)}" x2="${(ex + 3).toFixed(1)}" y2="${(ey - 3).toFixed(1)}"/>`
-            + `</g>`;
-        }
-      }
-      // Entry-Marker nur, wenn der Einstiegs-Tag im sichtbaren Fenster liegt (sonst Phantom am Rand).
-      if (!(ps >= winT0 && ps <= winT1)) return;
-      const idx = nearestBarIndexByTime(ps);
-      const b = bars[idx], mx = barXs[idx];
-      if (b == null || mx == null) return;
-      if (p.direction === 'bullish') {
-        const y = pY(b.low) + 6;
-        cardMarks += `<path d="M ${mx.toFixed(1)},${y.toFixed(1)} L ${(mx - 6).toFixed(1)},${(y + 11).toFixed(1)} L ${(mx + 6).toFixed(1)},${(y + 11).toFixed(1)} Z" fill="${CHART_THEME.bull}" stroke="#fff" stroke-width="0.8"/>`;
-      } else {
-        const y = pY(b.high) - 6;
-        cardMarks += `<path d="M ${mx.toFixed(1)},${y.toFixed(1)} L ${(mx - 6).toFixed(1)},${(y - 11).toFixed(1)} L ${(mx + 6).toFixed(1)},${(y - 11).toFixed(1)} Z" fill="${CHART_THEME.bear}" stroke="#fff" stroke-width="0.8"/>`;
       }
     });
   }
@@ -1566,7 +2034,7 @@ function loadChart(cfg) {
   const chartBg = `<rect x="0" y="0" width="${W}" height="${totalH}" fill="${CHART_THEME.bg}" rx="7"/>`;
 
   // Height in px = totalH (1:1 to the viewBox so nothing is distorted)
-  body.innerHTML = renderChartControls() + `
+  body.innerHTML = (showControls ? renderChartControls() : '') + `
     <div class="chart-section-row">
       <div class="chart-section-label"><span class="legend-dot" style="background:${CHART_THEME.bull}"></span> ${sectionLabel}</div>
       <div class="chart-ohlc-readout" data-ohlc-readout></div>
@@ -1577,10 +2045,10 @@ function loadChart(cfg) {
         ${cardShade}
         ${roundLevels}
         ${rollLines}
-        ${candles}
+        ${candles}${taOverlaySvg}${priceLine}${liveDot}
         ${rollLabels}
-        ${cardMarks}
         ${panesSvg}
+        ${dividerLines}${dividerLabels}
         ${xLabels}
       </svg>
     </div>
@@ -1590,12 +2058,113 @@ function loadChart(cfg) {
     volumeTop, volumeH, oiTop, oiH, cotTop, cotH, spreadTop, spreadH,
     bars, barXs,
     pHi, pSpan, dec,
+    drawingsActive: !!opts.drawings,
     volumePoints: crosshairVolumePoints,
     oiPoints: crosshairOiPoints,
     cotPoints: crosshairCotPoints,
-    spreadPoints: crosshairSpreadPoints
+    spreadPoints: crosshairSpreadPoints,
+    taPanes: taCrosshairPanes
   });
-  bindChartControls(cfg);
+  if (opts.drawings && typeof renderChartDrawings === 'function') {
+    const wrapEl = body.querySelector('.chart-svg-wrap');
+    const svgForDraw = wrapEl && wrapEl.querySelector('svg');
+    // Continuous date<->x mapping (bars are evenly spaced by INDEX, not real time): interpolate
+    // between the two surrounding bars, extrapolate (nearest gap's slope) outside the range. This
+    // is what lets a line drawn on D1 land correctly on 3M or extend off-screen when scrolled.
+    const _xForTime = (t) => {
+      const m = barTimes.length;
+      if (!m) return padL;
+      if (m === 1) return barXs[0];
+      if (t <= barTimes[0]) return barXs[0] + (t - barTimes[0]) * ((barXs[1] - barXs[0]) / ((barTimes[1] - barTimes[0]) || 1));
+      if (t >= barTimes[m - 1]) return barXs[m - 1] + (t - barTimes[m - 1]) * ((barXs[m - 1] - barXs[m - 2]) / ((barTimes[m - 1] - barTimes[m - 2]) || 1));
+      let lo = 0, hi = m - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (barTimes[mid] <= t) lo = mid; else hi = mid; }
+      const f = (t - barTimes[lo]) / ((barTimes[hi] - barTimes[lo]) || 1);
+      return barXs[lo] + f * (barXs[hi] - barXs[lo]);
+    };
+    const _timeForX = (x) => {
+      const m = barXs.length;
+      if (!m) return 0;
+      if (m === 1) return barTimes[0];
+      if (x <= barXs[0]) return barTimes[0] + (x - barXs[0]) * ((barTimes[1] - barTimes[0]) / ((barXs[1] - barXs[0]) || 1));
+      if (x >= barXs[m - 1]) return barTimes[m - 1] + (x - barXs[m - 1]) * ((barTimes[m - 1] - barTimes[m - 2]) / ((barXs[m - 1] - barXs[m - 2]) || 1));
+      let lo = 0, hi = m - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (barXs[mid] <= x) lo = mid; else hi = mid; }
+      const f = (x - barXs[lo]) / ((barXs[hi] - barXs[lo]) || 1);
+      return barTimes[lo] + f * (barTimes[hi] - barTimes[lo]);
+    };
+    const _fullBarTimes = fullBars.map(b => new Date(b.date).getTime());
+    const drawCoord = {
+      padL, padR, padT, priceH, W, pHi, pSpan, dec,
+      plotLeft: padL, plotRight: W - padR, plotTop: padT, plotBottom: padT + priceH,
+      bars, barXs, barTimes,
+      yForPrice: (p) => padT + ((pHi - p) / pSpan) * priceH,
+      priceFromY: (y) => { const yc = Math.max(padT, Math.min(padT + priceH, y)); return pHi - ((yc - padT) / priceH) * pSpan; },
+      xForTime: _xForTime, timeForX: _timeForX,
+      snapDate: (x) => { const b = bars[nearestBarIndexByTime(_timeForX(x))]; return b ? b.date : null; },
+      snapDateAny: (t) => {
+        if (!_fullBarTimes.length) return null;
+        let best = 0, d = Math.abs(_fullBarTimes[0] - t);
+        for (let i = 1; i < _fullBarTimes.length; i++) { const e = Math.abs(_fullBarTimes[i] - t); if (e < d) { d = e; best = i; } }
+        return fullBars[best].date;
+      },
+    };
+    if (svgForDraw) renderChartDrawings(svgForDraw, drawCoord);
+    if (typeof bindChartDrawingInteractions === 'function' && wrapEl)
+      bindChartDrawingInteractions(wrapEl, drawCoord, opts.rerender || (() => loadChart(cfg, opts)));
+  }
+  if (wheelZoom) bindChartWheelZoom(body, { st, cfg, opts, fullBars, W, plotLeftX: padL + edgePad, plotW });
+  if (showControls) bindChartControls(cfg);
+}
+
+// Mouse-wheel zoom + double-click reset for the Charts tab. The zoom is anchored either at the
+// right edge (st.zoomAnchorRight — newest bar stays fixed, the chart doesn't shift; the default)
+// or at the bar under the cursor. Mutates st.[zoomStart,zoomEnd] (captured at render time, so it
+// targets bigChartState even after the global swap is restored) and repaints via opts.rerender.
+// preventDefault stops the page from scrolling under the chart.
+function bindChartWheelZoom(body, ctx) {
+  const { st, cfg, opts, fullBars, W, plotLeftX, plotW } = ctx;
+  const svgEl = body.querySelector('.chart-svg-wrap svg');
+  if (!svgEl) return;
+  const rerender = opts.rerender || (() => loadChart(cfg, opts));
+  const MIN_SPAN = 11;          // floor ≈ 12 candles
+  const STEP = 0.82;            // span multiplier per wheel notch
+
+  svgEl.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const N = fullBars.length;
+    if (N < 4) return;
+    const curS = Number.isFinite(st.zoomStart) ? st.zoomStart : 0;
+    const curE = Number.isFinite(st.zoomEnd) ? st.zoomEnd : N - 1;
+    const span = curE - curS;
+    // Anchor point that stays fixed while zooming: the right edge (chart doesn't shift) when
+    // st.zoomAnchorRight is on, else the bar under the cursor. f = its fraction across the plot.
+    let f, anchor;
+    if (st.zoomAnchorRight) {
+      f = 1; anchor = curE;
+    } else {
+      const rect = svgEl.getBoundingClientRect();
+      if (!rect.width) return;
+      const svgX = (ev.clientX - rect.left) * (W / rect.width);
+      f = Math.max(0, Math.min(1, (svgX - plotLeftX) / plotW));       // cursor position across the plot, 0..1
+      anchor = curS + f * span;                                       // full-set index under the cursor
+    }
+    let newSpan = Math.round(span * (ev.deltaY < 0 ? STEP : 1 / STEP));
+    newSpan = Math.max(MIN_SPAN, Math.min(N - 1, newSpan));
+    let newS = Math.round(anchor - f * newSpan);
+    newS = Math.max(0, Math.min(N - 1 - newSpan, newS));
+    const newE = newS + newSpan;
+    if (newS === curS && newE === curE) return;                       // already at a limit
+    st.zoomStart = newS; st.zoomEnd = newE;
+    rerender();
+  }, { passive: false });
+
+  svgEl.addEventListener('dblclick', (ev) => {
+    if (!Number.isFinite(st.zoomStart) && !Number.isFinite(st.zoomEnd)) return;
+    ev.preventDefault();
+    st.zoomStart = null; st.zoomEnd = null;
+    rerender();
+  });
 }
 
 // Render toggle buttons

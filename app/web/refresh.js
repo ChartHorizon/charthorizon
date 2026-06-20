@@ -5,7 +5,19 @@
 
 let _refreshPollTimer = null;
 let _refreshDoneFade = null;
-let _refreshWasRunning = false;   // only reload after a running -> done transition we saw
+let _refreshWasRunning = false;   // we saw this run go 'running' (manual button / caught it live)
+let liveRefreshRunning = false;   // read by live.js to pause live polling during a board refresh
+
+// Identity of the data this page is currently showing. Lets an open tab pick up a
+// completed refresh — the warm-start one or the once-a-day auto-update — even when it
+// never witnessed the run go 'running' (the fetch can finish before our first poll, and
+// a tab left open across the daily job may miss the brief 'running' window entirely).
+// genDate is the day-granular gen date; finished_at is the exact per-run stamp.
+let _appliedGenDate = (window.__CONFIG__ && window.__CONFIG__.genDate) || '';
+let _appliedFinishedAt = '';
+const REFRESH_POLL_RUNNING_MS = 1000;       // tight cadence while a refresh runs (progress bar)
+const REFRESH_POLL_IDLE_MS = 60 * 1000;     // cheap heartbeat to notice the next daily refresh
+                                            // (reads the small status JSON only — never POSTs a fetch)
 
 function _wlRefreshNodes() { return document.querySelectorAll('[data-watchlist-refresh]'); }
 
@@ -26,19 +38,19 @@ function renderRefreshProgress(status) {
     node.classList.toggle('indeterminate', running && total === 0);
     if (btn) btn.disabled = running;
     if (running) {
-      if (label) label.textContent = status.current ? `Aktualisiere ${status.current}…` : 'Aktualisiere…';
+      if (label) label.textContent = status.current ? `Updating ${status.current}…` : 'Updating…';
       if (fill) fill.style.width = pct + '%';
-      if (sub) sub.textContent = total > 0 ? `${done}/${total} · ${pct}%` : 'läuft…';
+      if (sub) sub.textContent = total > 0 ? `${done}/${total} · ${pct}%` : 'running…';
     } else if (state === 'done') {
-      if (label) label.textContent = 'Aktualisiert ✓';
+      if (label) label.textContent = 'Updated ✓';
       if (fill) fill.style.width = '100%';
       if (sub) sub.textContent = '';
     } else if (state === 'error') {
-      if (label) label.textContent = 'Aktualisierung fehlgeschlagen';
+      if (label) label.textContent = 'Update failed';
       if (fill) fill.style.width = '0%';
-      if (sub) sub.textContent = 'Erneut versuchen';
+      if (sub) sub.textContent = 'Try again';
     } else {
-      if (label) label.textContent = 'Aktualisieren';
+      if (label) label.textContent = 'Refresh';
       if (fill) fill.style.width = '0%';
       if (sub) sub.textContent = '';
     }
@@ -46,7 +58,9 @@ function renderRefreshProgress(status) {
 }
 
 function startRefreshPolling() {
-  if (_refreshPollTimer) return;
+  // Poll now, cancelling any pending slow heartbeat — boot and the manual Refresh
+  // button both want an immediate status read, not a wait of up to a minute.
+  if (_refreshPollTimer) { clearTimeout(_refreshPollTimer); _refreshPollTimer = null; }
   if (_refreshDoneFade) { clearTimeout(_refreshDoneFade); _refreshDoneFade = null; }
   _refreshPollTimer = setTimeout(pollRefreshStatus, 0);
 }
@@ -60,23 +74,41 @@ async function pollRefreshStatus() {
   } catch (e) {
     status = { state: 'idle' };
   }
-  renderRefreshProgress(status);
+  liveRefreshRunning = (status && status.state === 'running');
+
   if (status.state === 'running') {
+    renderRefreshProgress(status);
     _refreshWasRunning = true;
-    _refreshPollTimer = setTimeout(pollRefreshStatus, 1000);
+    _refreshPollTimer = setTimeout(pollRefreshStatus, REFRESH_POLL_RUNNING_MS);
     return;
   }
-  if (status.state === 'done' && _refreshWasRunning) {
+
+  // A refresh has finished. Reload the open page when its freshly generated data is
+  // newer than what we're showing — whether or not THIS tab saw the run go 'running'.
+  // That is what makes an open tab pick up the once-a-day auto-update. We act on each
+  // 'done' at most once, keyed by finished_at, so the slow heartbeat below can't
+  // re-trigger a reload (or re-flash "Updated ✓") on a 'done' we already consumed.
+  const consumed = status.finished_at && status.finished_at === _appliedFinishedAt;
+  const fresherDay = status.latest_eod && status.latest_eod !== _appliedGenDate;
+  if (status.state === 'done' && !consumed && (_refreshWasRunning || fresherDay)) {
     _refreshWasRunning = false;
-    await applyRefreshedData(status);
+    _appliedFinishedAt = status.finished_at || _appliedFinishedAt;
+    renderRefreshProgress(status);                       // "Updated ✓"
+    await applyRefreshedData(status);                    // refetch JSON + re-render heatmaps
+    if (_refreshDoneFade) clearTimeout(_refreshDoneFade);
     _refreshDoneFade = setTimeout(() => renderRefreshProgress({ state: 'idle' }), 2500);
-    return;   // stop polling; bar shows "Aktualisiert ✓" then fades
-  }
-  if (status.state === 'error' && _refreshWasRunning) {
+  } else if (status.state === 'error' && _refreshWasRunning) {
     _refreshWasRunning = false;
-    return;   // stop polling; bar stays in error state with a retry affordance
+    renderRefreshProgress(status);                        // error affordance (retry button)
+  } else if (!_refreshDoneFade) {
+    // Nothing new for us — keep the bar idle (don't surface a stale/old 'done').
+    renderRefreshProgress({ state: 'idle' });
   }
-  // idle, or a stale 'done'/'error' on the first poll (we never saw it running) -> do nothing
+
+  // Keep a cheap heartbeat alive so the NEXT daily refresh is noticed. This only reads
+  // the small status JSON; it never POSTs /api/refresh, so the page never triggers a
+  // fetch on its own — data moves once a day via warm-start + the auto-update job.
+  _refreshPollTimer = setTimeout(pollRefreshStatus, REFRESH_POLL_IDLE_MS);
 }
 
 async function triggerManualRefresh() {
@@ -131,8 +163,25 @@ async function applyRefreshedData(status) {
       const p = PAGES.find(x => x.id === page);
       if (p && p.load) await p.load();
     }
+    // The two strength heatmaps live on different tabs (Futures Strength at the bottom
+    // of the overview tab, FX Strength on the forex tab), but both read the freshly
+    // reloaded screenerData. The page branch above only repaints the ACTIVE tab, so the
+    // hidden tab's heatmap would keep showing pre-refresh signals. Re-render BOTH here
+    // (idempotent pure DOM writes; each self-bails if its section/data is missing) so
+    // neither goes stale after a refresh that completed while the other tab was open.
+    if (typeof renderFuturesHeat === 'function') { try { renderFuturesHeat(); } catch (e) {} }
+    if (typeof renderFxSection === 'function' && screenerData) { try { renderFxSection(); } catch (e) {} }
     if (typeof renderWatchlist === 'function') renderWatchlist();
+    // Remember what the page now shows so the heartbeat won't reload the same data again.
+    _appliedGenDate = (window.__CONFIG__ && window.__CONFIG__.genDate) || _appliedGenDate;
   } catch (e) {
     console.warn('in-place reload after refresh failed', e);
   }
 }
+
+// The page no longer re-triggers data refreshes on a timer. EoD data only moves once a
+// day, so a self-driven 15-min refetch was needless yfinance load (and fed the live-quote
+// rate-limit pressure). The only fetch triggers now are: the warm-start refresh on launch,
+// the daily auto-update job, and the manual ⟳ button. The slow heartbeat in
+// pollRefreshStatus still NOTICES the daily refresh and reloads the open page in place —
+// it just reads the tiny status JSON and never POSTs /api/refresh itself.

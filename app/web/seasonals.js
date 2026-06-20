@@ -127,10 +127,14 @@ function renderSeasonalChart(cfg, history) {
     return;
   }
 
+  // 5/10/15Y + a 'max' curve (full available history). Mirrors the screener seasonal
+  // signal's curves (SEASONAL_WINDOWS + SEASONAL_MAX_WINDOW in screener.py) so the chart
+  // shows exactly the curves the 3-of-4 vote is computed on. 100 = effectively "max".
   const curves = [
     { key: '5Y', color: '#1a56db', stroke: 2.2, data: buildSeasonalCurve(cleanHistory, 5) },
+    { key: '10Y', color: '#9333ea', stroke: 2.0, data: buildSeasonalCurve(cleanHistory, 10) },
     { key: '15Y', color: '#0ea679', stroke: 2.0, data: buildSeasonalCurve(cleanHistory, 15) },
-    { key: '40Y', color: '#e8853a', stroke: 2.0, data: buildSeasonalCurve(cleanHistory, 40) },
+    { key: 'Max', color: '#e8853a', stroke: 2.0, data: buildSeasonalCurve(cleanHistory, 100) },
   ].filter(curve => curve.data && curve.data.points.some(v => Number.isFinite(v)));
   curves.forEach(curve => {
     curve.labelKey = curve.data.yearsUsed < curve.data.yearsRequested
@@ -168,13 +172,13 @@ function renderSeasonalChart(cfg, history) {
   months.forEach(([label, idx]) => {
     const x = xAt(idx);
     grid += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="#9aa6b5" stroke-width="1.1" stroke-dasharray="3,4" opacity="0.88"/>`;
-    grid += `<text x="${x.toFixed(1)}" y="${H-16}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" text-anchor="middle">${label}</text>`;
+    grid += `<text x="${x.toFixed(1)}" y="${H-16}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${label}</text>`;
   });
   const yTicks = [yMin, 100, yMax];
   yTicks.forEach(val => {
     const y = yAt(val);
     grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="${val === 100 ? CHART_THEME.axis : CHART_THEME.grid}" stroke-dasharray="${val === 100 ? '4,3' : ''}"/>`;
-    grid += `<text x="${W-padR+8}" y="${(y+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${(val-100).toFixed(1)}%</text>`;
+    grid += `<text x="${W-padR+8}" y="${(y+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(val-100).toFixed(1)}%</text>`;
   });
 
   const paths = curves.map(curve => {
@@ -198,7 +202,7 @@ function renderSeasonalChart(cfg, history) {
     currentDateSvg = `<g class="seasonal-current-date"><title>${esc(title)}</title>
       <line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="#0f172a" stroke-width="1" stroke-dasharray="3,5" opacity="0.28"/>
       <rect x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" width="${labelW.toFixed(1)}" height="14" rx="3" fill="#fde68a" stroke="#f59e0b" opacity="1"/>
-      <text x="${(labelX + labelW / 2).toFixed(1)}" y="${(labelY + 10).toFixed(1)}" font-size="8.5" fill="#334155" font-family="Sora" font-weight="600" text-anchor="middle">${esc(label)}</text>
+      <text x="${(labelX + labelW / 2).toFixed(1)}" y="${(labelY + 10).toFixed(1)}" font-size="8.5" fill="#334155" font-family="Geist" font-weight="600" text-anchor="middle">${esc(label)}</text>
     </g>`;
   }
   const crosshairCurves = curves.map(curve => ({
@@ -217,7 +221,7 @@ function renderSeasonalChart(cfg, history) {
     const label = `${curve.labelKey || curve.key} (${curve.data.yearsUsed} yrs · ${curve.data.startYear}-${curve.data.endYear})`;
     const item = `<g transform="translate(${lx},${padT - 8})">
       <line x1="0" y1="0" x2="18" y2="0" stroke="${curve.color}" stroke-width="${curve.stroke}"/>
-      <text x="24" y="3" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${esc(label)}</text>
+      <text x="24" y="3" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${esc(label)}</text>
     </g>`;
     lx += 36 + label.length * 6.2;
     return item;
@@ -237,7 +241,7 @@ function renderSeasonalChart(cfg, history) {
       ${legend}
       ${paths}
       ${currentDateSvg}
-      <text x="${padL}" y="${H-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">Seasonal average performance from first trading day of year</text>
+      <text x="${padL}" y="${H-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">Seasonal average performance from first trading day of year</text>
     </svg>
   </div>`;
   bindSeasonalsCrosshair(body.querySelector('.seasonals-chart-wrap'), {

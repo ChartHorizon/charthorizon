@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ChartHorizon – Commodity Futures Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2048%2048%22%20fill%3D%22none%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22chSunFav%22%20x1%3D%2224%22%20y1%3D%229%22%20x2%3D%2224%22%20y2%3D%2234%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23fcd34d%22/%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23f97316%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Cline%20x1%3D%226%22%20y1%3D%2234%22%20x2%3D%2242%22%20y2%3D%2234%22%20stroke%3D%22%238896a8%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cpath%20d%3D%22M15%2034a9%209%200%200%201%2018%200%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2224%22%20y1%3D%2210%22%20x2%3D%2224%22%20y2%3D%2215%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2211.5%22%20y1%3D%2219%22%20x2%3D%2214.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2236.5%22%20y1%3D%2219%22%20x2%3D%2233.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3C/svg%3E">
 <script>
 /* Theme so frueh wie moeglich setzen (kein Flash). Card-Mode (Content-Bot) laeuft
@@ -12,40 +14,64 @@
    unabhaengig von der Nutzer-Einstellung. */
 (function(){try{
   if(new URLSearchParams(location.search).get('card')){document.documentElement.setAttribute('data-theme','dark');return;}
-  var t=localStorage.getItem('ch_theme');
-  document.documentElement.setAttribute('data-theme', t==='dark'?'dark':'light');
+  document.documentElement.classList.add('booting');  /* cold-start splash covers the app until boot.js reveals it (normal dashboard only; never in card-mode) */
+  var m=localStorage.getItem('ch_theme_mode')||localStorage.getItem('ch_theme')||'system';
+  var dark=(m==='dark')||(m!=='light'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.setAttribute('data-theme', dark?'dark':'light');
 }catch(e){document.documentElement.setAttribute('data-theme','light');}})();
 </script>
-<link rel="stylesheet" href="web/styles.css?v=11">
+<link rel="stylesheet" href="web/styles.css?v=44">
 </head>
 <body>
+<!-- Cold-start splash: kept up by html.booting (set in <head> before first paint, normal
+     dashboard only) until boot.js confirms every Weekly-Outlook 4/4 result has a live price. -->
+<div id="bootSplash" role="status" aria-live="polite">
+  <div class="boot-splash-inner">
+    <div class="boot-splash-title">ChartHorizon</div>
+    <div class="boot-splash-sub">Loading live prices<span id="bootSplashProgress"></span></div>
+    <div class="boot-splash-dots"><span></span><span></span><span></span></div>
+  </div>
+</div>
+<script>
+/* Safety net: if the boot JS never runs/errors, never trap the user behind the splash. */
+setTimeout(function(){var s=document.getElementById('bootSplash');if(s)s.classList.add('boot-splash-done');document.documentElement.classList.remove('booting');},15000);
+</script>
 <header>
-  <div class="logo">
+  <a class="logo" href="https://chart-horizon.com" target="_blank" rel="noopener" title="chart-horizon.com" aria-label="ChartHorizon — open chart-horizon.com">
     <svg class="logo-icon" viewBox="0 0 100 100" fill="none" aria-hidden="true"><defs><linearGradient id="hlSun" x1="50" y1="29" x2="50" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fde08a"/><stop offset="0.5" stop-color="#fcd34d"/><stop offset="1" stop-color="#f97316"/></linearGradient><radialGradient id="hlBloom" cx="50%" cy="55%" r="50%"><stop offset="0" stop-color="#f97316" style="stop-opacity:var(--glow-a)"/><stop offset="0.45" stop-color="#fcd34d" style="stop-opacity:var(--glow-b)"/><stop offset="1" stop-color="#fcd34d" stop-opacity="0"/></radialGradient><linearGradient id="hlHz" x1="14" y1="0" x2="86" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa7b8" stop-opacity="0"/><stop offset="0.2" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="0.5" stop-color="#c6cfdb"/><stop offset="0.8" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="1" stop-color="#9aa7b8" stop-opacity="0"/></linearGradient><filter id="hlGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><circle cx="50" cy="55" r="42" fill="url(#hlBloom)"/><g transform="translate(0,3)"><line x1="14" y1="64" x2="86" y2="64" stroke="url(#hlHz)" stroke-width="2.6" stroke-linecap="round"/><g stroke="url(#hlSun)" stroke-width="5.2" stroke-linecap="round" fill="none" filter="url(#hlGlow)"><path d="M33 64 a17 17 0 0 1 34 0"/><line x1="50" y1="19" x2="50" y2="28"/><line x1="26.4" y1="35.6" x2="32" y2="41.3"/><line x1="73.6" y1="35.6" x2="68" y2="41.3"/></g></g></svg>
     <span class="logo-mark">ChartHorizon</span>
-  </div>
+  </a>
   <!-- Tab buttons mirror the PAGES registry in the script below; keep both in sync. -->
   <nav class="top-nav" aria-label="Main navigation">
-    <button class="top-tab active" type="button" data-page-tab="overview" aria-current="page" onclick="switchPage('overview')">Futures</button>
-    <button class="top-tab" type="button" data-page-tab="forex" onclick="switchPage('forex')">Forex</button>
-    <button class="top-tab" type="button" data-page-tab="screener" onclick="switchPage('screener')">Screener</button>
-    <button class="top-tab" type="button" data-page-tab="seasonals" onclick="switchPage('seasonals')">Seasonals</button>
-    <button class="top-tab" type="button" data-page-tab="smt" onclick="switchPage('smt')">Macro Shift</button>
-    <button class="top-tab" type="button" data-page-tab="tools" onclick="switchPage('tools')">Tools</button>
+    <button class="top-tab active" type="button" data-page-tab="overview" aria-current="page" onclick="switchPage('overview')" title="Futures (press 1)">Futures</button>
+    <button class="top-tab" type="button" data-page-tab="forex" onclick="switchPage('forex')" title="Forex (press 2)">Forex</button>
+    <button class="top-tab" type="button" data-page-tab="screener" onclick="switchPage('screener')" title="Screener (press 3 · / to search)">Screener</button>
+    <button class="top-tab" type="button" data-page-tab="seasonals" onclick="switchPage('seasonals')" title="Seasonals (press 4)">Seasonals</button>
+    <button class="top-tab" type="button" data-page-tab="smt" onclick="switchPage('smt')" title="Macro Shift (press 5)">Macro Shift</button>
+    <button class="top-tab" type="button" data-page-tab="tools" onclick="switchPage('tools')" title="Tools (press 6)">Tools</button>
+    <button class="top-tab" type="button" data-page-tab="bigchart" onclick="switchPage('bigchart')" title="Charts (press 7)">Charts</button>
+    <button class="top-tab" type="button" data-page-tab="settings" onclick="switchPage('settings')" title="Settings (press 8)">Settings</button>
   </nav>
   <div class="header-right">
-    <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Theme wechseln" title="Hell / Dunkel umschalten">
+    <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle theme" title="Switch light / dark mode">
       <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7M18.4 18.4l-1.7-1.7M7.3 7.3 5.6 5.6"/></svg>
       <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8z"/></svg>
     </button>
-    <a class="x-link" href="https://x.com/charthorizon" target="_blank" rel="noopener" aria-label="ChartHorizon auf X" title="ChartHorizon auf X (@charthorizon)">
+    <a class="x-link" href="https://x.com/charthorizon" target="_blank" rel="noopener" aria-label="ChartHorizon on X" title="ChartHorizon on X (@charthorizon)">
       <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
     </a>
-    <a class="support-link" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener" aria-label="ChartHorizon unterstuetzen" title="ChartHorizon unterstuetzen — buy me a coffee">
+    <a class="support-link" href="https://buymeacoffee.com/charthorizon" target="_blank" rel="noopener" aria-label="Support ChartHorizon" title="Support ChartHorizon (buy me a coffee)">
       <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
       <span class="support-label">Support</span>
     </a>
-    <span class="status-pill"><span class="status-dot"></span>EOD · Futures + COT</span>
+    <div class="watchlist-refresh header-refresh" data-watchlist-refresh>
+      <div class="wlr-row">
+        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="Refresh EoD data now">⟳</button>
+        <span class="wlr-label" data-wlr-label>Refresh</span>
+      </div>
+      <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
+      <div class="wlr-sub" data-wlr-sub></div>
+    </div>
     <div class="header-time">
       <span class="hdr-date"></span>
       <span class="hdr-clock" id="clock">--:--:--</span>
@@ -74,9 +100,9 @@
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
             <span id="btnChartShareLabel">Share</span>
           </button>
-          <button class="chart-action-btn" id="btnChartX" type="button" onclick="shareToX()" title="Share on X — copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
+          <button class="chart-action-btn" id="btnChartX" type="button" onclick="shareToX()" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-            <span id="btnChartXLabel">X</span>
+            <span id="btnChartXLabel"></span>
           </button>
         </div>
       </div>
@@ -126,14 +152,6 @@
       <button class="watchlist-add" type="button" onclick="addCurrentToWatchlist('overview')" data-watchlist-add title="Add current market">+ Market</button>
     </div>
     <div class="watchlist-list" data-watchlist-body></div>
-    <div class="watchlist-refresh" data-watchlist-refresh>
-      <div class="wlr-row">
-        <span class="wlr-label" data-wlr-label>Aktualisieren</span>
-        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
-      </div>
-      <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
-      <div class="wlr-sub" data-wlr-sub></div>
-    </div>
   </aside>
 </div>
 
@@ -162,9 +180,9 @@
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
               <span id="btnSeasonalsShareLabel">Share</span>
             </button>
-            <button class="chart-action-btn" id="btnSeasonalsX" type="button" onclick="shareToX('seasonals')" title="Share on X — copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
+            <button class="chart-action-btn" id="btnSeasonalsX" type="button" onclick="shareToX('seasonals')" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-              <span id="btnSeasonalsXLabel">X</span>
+              <span id="btnSeasonalsXLabel"></span>
             </button>
           </div>
         </div>
@@ -184,14 +202,6 @@
         <button class="watchlist-add" type="button" onclick="addCurrentToWatchlist('seasonals')" data-watchlist-add title="Add current market">+ Market</button>
       </div>
       <div class="watchlist-list" data-watchlist-body></div>
-      <div class="watchlist-refresh" data-watchlist-refresh>
-        <div class="wlr-row">
-          <span class="wlr-label" data-wlr-label>Aktualisieren</span>
-          <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
-        </div>
-        <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
-        <div class="wlr-sub" data-wlr-sub></div>
-      </div>
     </aside>
   </div>
 </section>
@@ -223,7 +233,7 @@
         </div>
       </div>
       <div class="screener-body" id="screenerBody"></div>
-      <div class="screener-legend"><span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> — COT: net position (long/short) · COT Hedging: relative to the 12M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
+      <div class="screener-legend"><span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> · COT: net position (long/short) · COT Hedging: relative to the 12M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
     </div>
     <div id="screenerWeekly" hidden>
       <div class="screener-actions">
@@ -248,14 +258,6 @@
       </div>
     </div>
     <div class="watchlist-list" data-watchlist-body></div>
-    <div class="watchlist-refresh" data-watchlist-refresh>
-      <div class="wlr-row">
-        <span class="wlr-label" data-wlr-label>Aktualisieren</span>
-        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
-      </div>
-      <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
-      <div class="wlr-sub" data-wlr-sub></div>
-    </div>
   </aside>
   </div>
 </section>
@@ -298,14 +300,6 @@
         </div>
       </div>
       <div class="watchlist-list" data-watchlist-body></div>
-      <div class="watchlist-refresh" data-watchlist-refresh>
-        <div class="wlr-row">
-          <span class="wlr-label" data-wlr-label>Aktualisieren</span>
-          <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="EoD-Daten jetzt aktualisieren">⟳</button>
-        </div>
-        <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
-        <div class="wlr-sub" data-wlr-sub></div>
-      </div>
     </aside>
   </div>
 </section>
@@ -331,7 +325,7 @@
       <div class="fx-corr-head">
         <div>
           <div class="fx-corr-title">Correlation Calculator</div>
-          <div class="fx-corr-sub">Cross-asset correlation of daily returns — FX pairs, metals, energy, indices, bonds, crypto &amp; more</div>
+          <div class="fx-corr-sub">Cross-asset correlation of daily returns: FX pairs, metals, energy, indices, bonds, crypto &amp; more</div>
         </div>
         <div class="fx-timeframe-bar" id="fxCorrWin" aria-label="Correlation window"></div>
       </div>
@@ -342,7 +336,7 @@
       </div>
       <div class="fx-calc-result" id="fxCalcResult" aria-live="polite"></div>
       <div class="fx-calc-charts" id="fxCalcCharts"></div>
-      <div class="fx-corr-note"><strong>Disclaimer:</strong> Statistical correlation of past returns only — it is descriptive, not predictive, and not investment advice. Correlations shift over time; size positions accordingly.</div>
+      <div class="fx-corr-note"><strong>Disclaimer:</strong> Statistical correlation of past returns only; it is descriptive, not predictive, and not investment advice. Correlations shift over time; size positions accordingly.</div>
     </div>
   </div>
 </section>
@@ -366,7 +360,7 @@
         <span class="smt-controls-spacer"></span>
         <button class="smt-btn" id="smtDownloadBtn" type="button" onclick="downloadSmtCharts()">⤓ Download</button>
         <button class="smt-btn" id="smtShareBtn" type="button" onclick="shareSmtCharts()" title="Share the image (or copy it to the clipboard)">Share</button>
-        <button class="smt-btn" id="smtXBtn" type="button" onclick="shareSmtToX()" title="Share on X — copies the image so you can paste it into the post (Cmd/Ctrl+V)">X</button>
+        <button class="smt-btn" id="smtXBtn" type="button" onclick="shareSmtToX()" title="Share on X: copies the image so you can paste it into the post (Cmd/Ctrl+V)">X</button>
       </div>
       <div class="smt-controls-row">
         <div class="fx-timeframe-bar" id="smtRangeBar" aria-label="Time window"></div>
@@ -377,28 +371,88 @@
       </div>
     </div>
     <div class="smt-charts" id="smtCharts"></div>
-    <div class="fx-corr-note"><strong>Note:</strong> Compare two correlated markets and read the SMT-style divergence by eye — when one fails to confirm the other near a quarter boundary, it hints at the bias for the coming period. Macro/EoD view; lower-timeframe SMT would need intraday real-time data.</div>
+    <div class="fx-corr-note"><strong>Note:</strong> Compare two correlated markets and read the SMT-style divergence by eye: when one fails to confirm the other near a quarter boundary, it hints at the bias for the coming period. Macro/EoD view; lower-timeframe SMT would need intraday real-time data.</div>
+  </div>
+</section>
+
+<!-- Maximized multi-timeframe chart tab. Price-only candlesticks (D1/W1/1M/3M, all
+     aggregated client-side from settled daily EoD over ~20Y of history). No intraday:
+     the free yfinance feed is daily-only by design. -->
+<section class="bigchart-page page-view" id="bigchartPage" hidden>
+  <div class="bigchart-layout">
+    <aside id="bigchartSidebar" aria-label="Markets"></aside>
+    <main class="bigchart-main">
+      <div class="bigchart-head">
+        <button class="bigchart-sidebar-toggle" id="bigchartSidebarToggle" type="button" onclick="toggleBigChartSidebar()" title="Hide markets" aria-label="Toggle market sidebar" aria-expanded="true">«</button>
+        <div class="bigchart-titles">
+          <div class="bigchart-cat" id="bigchartCat">–</div>
+          <div class="bigchart-name" id="bigchartName">Select a market</div>
+        </div>
+        <span class="bigchart-sym" id="bigchartSym"></span>
+        <!-- One right-aligned toolbar; its groups wrap as whole units so the layout stays
+             structured at any width: [Contract] [Timeframe] [Indicators] [View controls]. -->
+        <div class="bigchart-toolbar">
+          <div class="fx-timeframe-bar bigchart-contractbar" id="bigchartContractBar" aria-label="Contract"></div>
+          <select class="mobile-select" id="bigchartMobileSelect" aria-label="Select market" onchange="selectBigChartMarket(this.value)"></select>
+          <div class="fx-timeframe-bar" id="bigchartTfBar" aria-label="Timeframe"></div>
+          <div class="chart-filter-group bigchart-indicators" id="bigchartIndicatorBar" aria-label="Indicators"></div>
+          <div class="bigchart-ta" id="bigchartTaBar" aria-label="Technical indicators"></div>
+          <div class="bigchart-viewctrls">
+            <label class="cot-filter-box bigchart-zoomanchor" title="When zooming, the right edge (newest candle) stays fixed — the chart doesn't shift">
+              <input type="checkbox" id="bigchartZoomAnchor" onchange="setBigChartZoomAnchor(this.checked)" checked>
+              <span>Anchor right</span>
+            </label>
+            <button class="bigchart-latest-btn" id="bigchartLatestBtn" type="button" onclick="jumpBigChartToLatest()" title="Jump to the newest candle (keeps the current zoom)" disabled>→| Latest</button>
+          </div>
+        </div>
+      </div>
+      <div class="bigchart-chartwrap">
+        <div class="bigchart-drawbar" id="bigchartDrawbar" aria-label="Drawing tools"></div>
+        <div class="chart-body" id="bigchartBody"></div>
+        <aside class="bigchart-objtree" id="bigchartObjTree" aria-label="Drawing objects" hidden></aside>
+      </div>
+    </main>
+  </div>
+</section>
+
+<section class="settings-page page-view" id="settingsPage" hidden>
+  <div class="settings-wrap">
+    <div class="screener-head">
+      <div>
+        <div class="screener-title">Settings</div>
+        <div class="screener-sub">Chart layouts (light/dark) and timezone</div>
+      </div>
+    </div>
+    <div class="set-card" id="settingsAppearance"></div>
+    <div class="set-card" id="settingsLayouts"></div>
+    <div class="set-card" id="settingsTimezone"></div>
+    <div class="set-card" id="settingsBackup"></div>
   </div>
 </section>
 
 <footer class="page-disclaimer">
-  <p><strong>Risk notice — please read.</strong> ChartHorizon is an independent, informational and educational tool. Nothing shown here is investment, financial, legal, or tax advice, and nothing is a recommendation, solicitation, or offer to buy or sell any futures contract, currency, security, or other financial instrument. Always do your own research and consult a licensed financial professional before making any trading decision.</p>
+  <p><strong>Risk notice. Please read.</strong> ChartHorizon is an independent, informational and educational tool. Nothing shown here is investment, financial, legal, or tax advice, and nothing is a recommendation, solicitation, or offer to buy or sell any futures contract, currency, security, or other financial instrument. Always do your own research and consult a licensed financial professional before making any trading decision.</p>
   <p><strong>Trading risk.</strong> Trading futures, forex, options, and other leveraged derivatives carries a substantial risk of loss and is not suitable for every investor. You can lose some or all of your capital, and because these products are leveraged you may lose more than your initial deposit. Only trade with money you can afford to lose.</p>
   <p><strong>No performance guarantee.</strong> Seasonal patterns, COT positioning, term-structure signals, screener scores, position-size estimates, and every other analytic shown here are statistical and historical in nature. Past performance and any hypothetical or backtested results are not indicative of, and do not guarantee, future results.</p>
-  <p><strong>Data &amp; warranty.</strong> Market data comes from free third-party sources (e.g. yfinance for prices and volume, the CFTC for COT and Open Interest). It is end-of-day rather than real-time, may be delayed, incomplete, or inaccurate, and is provided “as is” without warranty of any kind. Figures may differ from your broker’s live quotes and contract specifications. The authors accept no liability for any loss or damage arising from use of this tool — you use it entirely at your own risk.</p>
+  <p><strong>Data &amp; warranty.</strong> Market data comes from free third-party sources (e.g. yfinance for prices and volume, the CFTC for COT and Open Interest). It is end-of-day rather than real-time, may be delayed, incomplete, or inaccurate, and is provided “as is” without warranty of any kind. Figures may differ from your broker’s live quotes and contract specifications. The authors accept no liability for any loss or damage arising from use of this tool; you use it entirely at your own risk.</p>
 </footer>
 
 <script src="ff_data/config.js"></script>
-<script src="web/core.js?v=5"></script>
-<script src="web/chart.js?v=3"></script>
-<script src="web/futures.js?v=2"></script>
-<script src="web/seasonals.js?v=2"></script>
-<script src="web/screener.js?v=8"></script>
-<script src="web/forex.js?v=3"></script>
-<script src="web/smt.js?v=2"></script>
+<script src="web/core.js?v=18"></script>
+<script src="web/indicators.js?v=1"></script>
+<script src="web/chart.js?v=28"></script>
+<script src="web/futures.js?v=4"></script>
+<script src="web/seasonals.js?v=3"></script>
+<script src="web/screener.js?v=16"></script>
+<script src="web/forex.js?v=5"></script>
+<script src="web/smt.js?v=4"></script>
 <script src="web/tools.js?v=3"></script>
-<script src="web/refresh.js?v=1"></script>
-<script src="web/boot.js?v=2"></script>
+<script src="web/refresh.js?v=2"></script>
+<script src="web/live.js?v=7"></script>
+<script src="web/bigchart.js?v=14"></script>
+<script src="web/draw.js?v=25"></script>
+<script src="web/settings.js?v=14"></script>
+<script src="web/boot.js?v=11"></script>
 
 </body>
 </html>

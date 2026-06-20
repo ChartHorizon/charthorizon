@@ -142,8 +142,8 @@ function renderSmtControls() {
   }
 }
 
-function setSmtPreset(a, b, c) { if (!INDEX[a] || !INDEX[b] || !INDEX[c]) return; smtState.a = a; smtState.b = b; smtState.c = c; saveSmtState(); renderSmtControls(); renderSmtCharts(); }
-function setSmtMarket(slot, val) { if (!INDEX[val] || !['a', 'b', 'c'].includes(slot)) return; smtState[slot] = val; saveSmtState(); renderSmtControls(); renderSmtCharts(); }
+function setSmtPreset(a, b, c) { if (!INDEX[a] || !INDEX[b] || !INDEX[c]) return; smtState.a = a; smtState.b = b; smtState.c = c; saveSmtState(); renderSmtControls(); renderSmtCharts(); if (typeof restartLiveLayer === 'function') restartLiveLayer(); }
+function setSmtMarket(slot, val) { if (!INDEX[val] || !['a', 'b', 'c'].includes(slot)) return; smtState[slot] = val; saveSmtState(); renderSmtControls(); renderSmtCharts(); if (typeof restartLiveLayer === 'function') restartLiveLayer(); }
 function setSmtRange(d) { smtState.range = d; saveSmtState(); renderSmtControls(); renderSmtCharts(); }
 function setSmtInterval(v) {
   if (v !== 'daily' && v !== 'weekly') return;
@@ -158,6 +158,7 @@ function setSmtContractMode(v) {
   saveSmtState();
   renderSmtControls();
   renderSmtCharts();
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 function toggleSmtDraw() {
   smtDraw = !smtDraw;
@@ -177,6 +178,7 @@ async function openSmt() {
   loadSmtState();
   renderSmtControls();
   await renderSmtCharts();
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 
 async function smtLoadBars(key) {
@@ -212,6 +214,43 @@ async function smtLoadFrontContractBars(cfg, key) {
   } catch (e) {}
   markFallback();
   return getContinuousContract(cfg).history || [];
+}
+
+// The yfinance symbol currently shown for `key` in Macro Shift: the front contract in
+// front-month mode (mirrors smtLoadFrontContractBars), else the native continuous.
+function smtActiveSymbol(key) {
+  const meta = INDEX[key];
+  if (!meta) return null;
+  const cat = (typeof catCache === 'object') ? catCache[meta.slug] : null;
+  const cfg = cat && cat[key];
+  if (!cfg) return null;
+  if (smtState.contractMode === 'frontMonth' && smtActualMode[key] !== 'continuous') {
+    const front = (cfg.contracts || []).find(c => c && c.available && c.yf_symbol)
+      || (cfg.contracts || [])[0];
+    if (front && front.yf_symbol) return front.yf_symbol;
+  }
+  const cont = getContinuousContract(cfg);
+  return cont.yf_symbol || cont.tv_symbol || null;
+}
+
+// Display-only live overlay for one SMT chart's bars (copy; never the persisted series;
+// never in card-mode or weekly mode). `liveQuotes` is owned by live.js.
+function smtInjectLivePoint(bars, key) {
+  if (!bars || !bars.length) return bars;
+  if (document.body.classList.contains('card-mode')) return bars;
+  if (smtState.interval === 'weekly') return bars;
+  if (typeof liveQuotes !== 'object' || !liveQuotes) return bars;
+  const sym = smtActiveSymbol(key);
+  const lp = sym && liveQuotes[sym];
+  if (!lp || !Number.isFinite(lp.price) || !lp.day) return bars;
+  const out = bars.slice();
+  // Real live candle from the still-forming bar's intraday OHLC (shared with chart.js);
+  // falls back to a flat point when Yahoo omits open/high/low.
+  const pt = { date: lp.day, ...liveBarOHLC(lp), volume: null, __live: true };
+  const last = out[out.length - 1];
+  if (last && String(last.date).slice(0, 10) === String(lp.day).slice(0, 10)) out[out.length - 1] = pt;
+  else out.push(pt);
+  return out;
 }
 
 function smtFilterRange(bars, days) {
@@ -254,7 +293,7 @@ function smtFmtPrice(p) {
 
 // Candlesticks in the same visual style as the Futures-tab chart: CHART_THEME
 // bull/bear bodies + softer wicks, the light chart background, round-level price
-// gridlines, and YY-MM-DD date labels in Sora. Shared calendar-time domain keeps
+// gridlines, and YY-MM-DD date labels in Geist. Shared calendar-time domain keeps
 // both charts aligned by date for the synced crosshair.
 function smtRoundLevelStep(span) {
   const raw = span / 5;
@@ -266,14 +305,55 @@ function smtRoundLevelStep(span) {
   return step || raw || 1;
 }
 
+// Shared ORDINAL x-axis: candles are packed one-per-trading-day (like the Futures
+// tab) instead of placed by raw calendar time, so weekends/holidays don't punch
+// empty bands into the series. The axis is the sorted UNION of all bar dates across
+// the 3 charts, so a given slot still maps to the same calendar date in every chart
+// — the synced crosshair and the (date, price)-anchored trend lines keep working.
+const SMT_PADL = 12, SMT_PADR = 58, SMT_PADT = 12, SMT_PADB = 24;
+let smtAxis = null;   // { times:[ms…], idx:Map<ms,i>, n, padL, plotW, slot }
+
+function smtBuildAxis(barsList, plotW) {
+  const set = new Set();
+  for (const bars of barsList) for (const b of bars) {
+    const t = new Date(b.date).getTime();
+    if (!isNaN(t)) set.add(t);
+  }
+  const times = Array.from(set).sort((a, b) => a - b);
+  const idx = new Map();
+  times.forEach((t, i) => idx.set(t, i));
+  const n = Math.max(1, times.length);
+  return { times, idx, n, padL: SMT_PADL, plotW, slot: plotW / n };
+}
+function smtXAtFrac(ax, frac) { return ax.padL + ax.slot * (frac + 0.5); }
+// Continuous ordinal position of a timestamp within the union — interpolated between
+// neighbours for dates that fall between/outside bars (e.g. a weekend trend anchor).
+function smtFracAtTime(ax, t) {
+  const ts = ax.times;
+  if (!ts.length) return 0;
+  if (t <= ts[0]) return 0;
+  if (t >= ts[ts.length - 1]) return ts.length - 1;
+  let lo = 0, hi = ts.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (ts[m] <= t) lo = m; else hi = m; }
+  return lo + (t - ts[lo]) / ((ts[hi] - ts[lo]) || 1);
+}
+function smtXAtTime(ax, t) { return smtXAtFrac(ax, smtFracAtTime(ax, t)); }
+// Inverse maps for crosshair date readout + draw-mode anchoring.
+function smtTimeAtFrac(ax, frac) {
+  const ts = ax.times;
+  if (!ts.length) return NaN;
+  const f = Math.max(0, Math.min(ts.length - 1, frac));
+  const lo = Math.floor(f), hi = Math.min(ts.length - 1, lo + 1);
+  return ts[lo] + (ts[hi] - ts[lo]) * (f - lo);
+}
+function smtTimeAtX(ax, x) { return smtTimeAtFrac(ax, (x - ax.padL) / ax.slot - 0.5); }
+
 function renderSmtChart(bars, opts) {
   const W = Math.max(360, Math.round(opts.width || 900));
   const H = Math.max(200, Math.round(opts.height || 260));
-  const padL = 12, padR = 58, padT = 12, padB = 24;
+  const padL = SMT_PADL, padR = SMT_PADR, padT = SMT_PADT, padB = SMT_PADB;
   const plotW = W - padL - padR, priceH = H - padT - padB;
-  const [d0, d1] = opts.domain;
-  const span = Math.max(1, d1 - d0);
-  const xAt = t => padL + plotW * ((t - d0) / span);
+  const ax = opts.axis || smtAxis || smtBuildAxis([bars], plotW);
   const lows = bars.map(b => Number(b.low));
   const highs = bars.map(b => Number(b.high));
   const pMin = Math.min(...lows), pMax = Math.max(...highs);
@@ -281,25 +361,16 @@ function renderSmtChart(bars, opts) {
   const padP = pRng * 0.05;
   const pLo = pMin - padP, pHi = pMax + padP, pSpan = (pHi - pLo) || 1;
   const yAt = p => padT + (1 - (p - pLo) / pSpan) * priceH;
-  const slot = plotW / Math.max(1, bars.length);
-  // Candles are placed by calendar time (the 3 charts share one date->x domain so the
-  // crosshair lines up by date), so weekday runs sit closer than the average slot.
-  // Size the body from the SMALLEST real gap between adjacent bars — and never wider
-  // than that gap — so dense clusters never overlap; cap at 12px (Futures parity).
-  const sortedT = bars.map(b => new Date(b.date).getTime()).filter(t => !isNaN(t)).sort((a, b) => a - b);
-  let minGap = Infinity;
-  for (let i = 1; i < sortedT.length; i++) {
-    const g = xAt(sortedT[i]) - xAt(sortedT[i - 1]);
-    if (g > 0.01 && g < minGap) minGap = g;
-  }
-  if (!isFinite(minGap)) minGap = slot;
-  const candleW = Math.min(12, Math.min(minGap * 0.85, Math.max(1, minGap * 0.7)));
+  // Ordinal placement: candle bodies fill ~70% of one slot (Futures-tab parity), max 12px.
+  const candleW = Math.max(1, Math.min(12, ax.slot * 0.7));
 
   let candles = '';
   for (const b of bars) {
     const t = new Date(b.date).getTime();
     if (isNaN(t)) continue;
-    const x = xAt(t);
+    const i = ax.idx.get(t);
+    if (i === undefined) continue;
+    const x = smtXAtFrac(ax, i);
     const o = Number(b.open), c = Number(b.close), h = Number(b.high), l = Number(b.low);
     const up = c >= o;
     const col = up ? CHART_THEME.bull : CHART_THEME.bear;
@@ -308,6 +379,46 @@ function renderSmtChart(bars, opts) {
     const bodyTop = Math.min(yO, yC), bodyH = Math.max(1, Math.abs(yC - yO));
     candles += `<line x1="${x.toFixed(1)}" y1="${yH}" x2="${x.toFixed(1)}" y2="${yL}" stroke="${wickCol}" stroke-width="1"/>`;
     candles += `<rect x="${(x - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
+  }
+
+  // Live tick marker (display-only): pulsing hollow dot on the provisional last point.
+  let liveDot = '';
+  const _lb = bars[bars.length - 1];
+  if (_lb && _lb.__live) {
+    const _t = new Date(_lb.date).getTime();
+    const _i = ax.idx.get(_t);
+    if (_i !== undefined) {
+      const _x = smtXAtFrac(ax, _i).toFixed(1);
+      const _y = yAt(Number(_lb.close)).toFixed(1);
+      liveDot =
+        `<circle class="smt-live-dot" cx="${_x}" cy="${_y}" r="3" fill="none" stroke="${CHART_THEME.bull}" stroke-width="1.5">` +
+        `<animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite"/>` +
+        `<animate attributeName="opacity" values="1;0.2;1" dur="1.6s" repeatCount="indefinite"/></circle>`;
+    }
+  }
+
+  // Aktuelle-Preis-Linie + Preis-Tag RECHTSBUENDIG an der Achse (Futures-Tab-Parität): rechte
+  // Kante fix am Rand, Tag waechst nach links -> lange Zahlen werden nie abgeschnitten. Dezent,
+  // theme-aware; Preis = letzter Bar (Live-Tick wenn vorhanden, sonst letzter Close). `curY`
+  // dient unten dazu, das kollidierende Round-Level-Label wegzulassen.
+  let priceLine = '';
+  let curY = null;
+  if (_lb && Number.isFinite(Number(_lb.close))) {
+    const cp = Number(_lb.close);
+    const cy = yAt(cp);
+    if (Number.isFinite(cy)) {
+      curY = cy;
+      const tagY = Math.max(padT + 8, Math.min(padT + priceH - 8, cy));
+      const txt = smtFmtPrice(cp);
+      const tagW = Math.max(34, String(txt).length * 6.2 + 10);
+      const tagX = W - 2 - tagW;
+      priceLine =
+        `<line class="smt-price-line" x1="${padL}" y1="${cy.toFixed(1)}" x2="${tagX.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="5,4"/>` +
+        `<g class="smt-price-line">` +
+        `<rect x="${tagX.toFixed(1)}" y="${(tagY - 8).toFixed(1)}" width="${tagW.toFixed(1)}" height="16" rx="2.5" fill="${CHART_THEME.bg}" stroke="${CHART_THEME.axis}" stroke-width="1"/>` +
+        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist">${txt}</text>` +
+        `</g>`;
+    }
   }
 
   // Round-level price gridlines + right-edge price labels (Futures style)
@@ -319,28 +430,34 @@ function renderSmtChart(bars, opts) {
     if (lv < pLo || lv > pHi) continue;
     const y = yAt(lv).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${(W - padR).toFixed(1)}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    grid += `<text x="${(W - padR + 5)}" y="${(+y + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora">${smtFmtPrice(lv)}</text>`;
+    // Label weglassen, wenn es mit dem Aktuelle-Preis-Tag auf gleicher Hoehe kollidiert.
+    // Rechtsbuendig (text-anchor=end), damit lange Zahlen am Rand nicht abgeschnitten werden.
+    if (!(curY != null && Math.abs(+y - curY) < 9))
+      grid += `<text x="${(W - 4)}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${smtFmtPrice(lv)}</text>`;
   }
 
   let dlabels = '';
   for (let g = 0; g <= 5; g++) {
-    const t = d0 + span * (g / 5);
-    const x = xAt(t), dt = new Date(t);
-    const iso = isNaN(dt) ? '' : dt.toISOString().slice(2, 10);
-    dlabels += `<text x="${x.toFixed(1)}" y="${H - 6}" font-size="10" fill="${CHART_THEME.text}" font-family="Sora" text-anchor="middle">${iso}</text>`;
+    const frac = (ax.n - 1) * (g / 5);
+    const x = smtXAtFrac(ax, frac);
+    const t = smtTimeAtFrac(ax, frac);
+    const iso = isNaN(t) ? '' : new Date(t).toISOString().slice(2, 10);
+    dlabels += `<text x="${x.toFixed(1)}" y="${H - 6}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${iso}</text>`;
   }
 
-  // Quarter boundaries (Jan/Apr/Jul/Oct 1, UTC) as subtle vertical separators + labels
+  // Quarter boundaries (Jan/Apr/Jul/Oct 1, UTC) as subtle vertical separators + labels,
+  // snapped onto the ordinal axis (interpolated to the nearest trading-day slot).
   let qLines = '', qLabels = '';
-  {
+  if (ax.times.length) {
+    const d0 = ax.times[0], d1 = ax.times[ax.times.length - 1];
     const sd = new Date(d0);
     let qy = sd.getUTCFullYear(), qm = Math.floor(sd.getUTCMonth() / 3) * 3;
     let qt = Date.UTC(qy, qm, 1);
     while (qt < d0) { qm += 3; if (qm > 9) { qm -= 12; qy++; } qt = Date.UTC(qy, qm, 1); }
     while (qt <= d1) {
-      const x = xAt(qt), qn = Math.floor(qm / 3) + 1;
+      const x = smtXAtTime(ax, qt), qn = Math.floor(qm / 3) + 1;
       qLines += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(padT + priceH).toFixed(1)}" stroke="${CHART_THEME.grid}" stroke-width="1" opacity="0.85"/>`;
-      qLabels += `<text x="${(x + 3).toFixed(1)}" y="${(padT + 11)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Sora" opacity="0.55">Q${qn} '${String(qy).slice(2)}</text>`;
+      qLabels += `<text x="${(x + 3).toFixed(1)}" y="${(padT + 11)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" opacity="0.55">Q${qn} '${String(qy).slice(2)}</text>`;
       qm += 3; if (qm > 9) { qm -= 12; qy++; } qt = Date.UTC(qy, qm, 1);
     }
   }
@@ -350,24 +467,24 @@ function renderSmtChart(bars, opts) {
   const tlines = smtLinesFor(opts.key);
   for (let li = 0; li < tlines.length; li++) {
     const ln = tlines[li];
-    trend += `<line class="smt-trend" data-i="${li}" x1="${xAt(ln.a.t).toFixed(1)}" y1="${yAt(ln.a.p).toFixed(1)}" x2="${xAt(ln.b.t).toFixed(1)}" y2="${yAt(ln.b.p).toFixed(1)}" stroke="#4338ca" stroke-width="1.6" stroke-linecap="round"/>`;
+    trend += `<line class="smt-trend" data-i="${li}" x1="${smtXAtTime(ax, ln.a.t).toFixed(1)}" y1="${yAt(ln.a.p).toFixed(1)}" x2="${smtXAtTime(ax, ln.b.t).toFixed(1)}" y2="${yAt(ln.b.p).toFixed(1)}" stroke="${CHART_THEME.trend}" stroke-width="1.6" stroke-linecap="round"/>`;
   }
 
-  return `<svg class="smt-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet" data-key="${opts.key || ''}" data-d0="${d0}" data-d1="${d1}" data-padl="${padL}" data-plotw="${plotW}" data-plo="${pLo}" data-phi="${pHi}" data-padt="${padT}" data-ploth="${priceH}">`
+  return `<svg class="smt-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet" data-key="${opts.key || ''}" data-plo="${pLo}" data-phi="${pHi}" data-padt="${padT}" data-ploth="${priceH}">`
     + `<rect x="0" y="0" width="${W}" height="${H}" fill="${CHART_THEME.bg}" rx="7"/>`
     + grid + qLines
-    + `<g shape-rendering="crispEdges">${candles}</g>`
+    + `<g shape-rendering="crispEdges">${candles}</g>` + priceLine + liveDot
     + qLabels + dlabels + trend
     + `<line class="smt-cross-v" x1="0" y1="${padT}" x2="0" y2="${(padT + priceH).toFixed(1)}" stroke="#334155" stroke-width="1" stroke-dasharray="2,4" opacity="0" pointer-events="none"/>`
     + `<line class="smt-cross-h" x1="${padL}" y1="0" x2="${(W - padR).toFixed(1)}" y2="0" stroke="#64748b" stroke-width="1" stroke-dasharray="2,4" opacity="0" pointer-events="none"/>`
     + `<g class="smt-cross-date" opacity="0" pointer-events="none">`
     + `<rect class="smt-cross-date-bg" x="0" y="${(H - 15).toFixed(1)}" width="66" height="13" rx="3" fill="#0f172a"/>`
-    + `<text class="smt-cross-date-tx" x="0" y="${(H - 5).toFixed(1)}" font-size="9.5" font-family="Sora" fill="#ffffff" text-anchor="middle"></text>`
+    + `<text class="smt-cross-date-tx" x="0" y="${(H - 5).toFixed(1)}" font-size="9.5" font-family="Geist" fill="#ffffff" text-anchor="middle"></text>`
     + `</g>`
     + `</svg>`;
 }
 
-function smtChartSlot(key, bars, domain, width, height) {
+function smtChartSlot(key, bars, domain, width, height, axis) {
   const m = INDEX[key] || {};
   const title = esc(m.display_name || key);
   const intervalLabel = smtState.interval === 'weekly' ? 'Weekly' : 'Daily';
@@ -377,7 +494,7 @@ function smtChartSlot(key, bars, domain, width, height) {
   if (!bars.length || !domain) {
     return `<div class="smt-chart-slot">${head}<div class="smt-empty">No history for this market and window.</div></div>`;
   }
-  return `<div class="smt-chart-slot">${head}${renderSmtChart(bars, { domain, width, height, key })}</div>`;
+  return `<div class="smt-chart-slot">${head}${renderSmtChart(bars, { width, height, key, axis })}</div>`;
 }
 
 // Crosshair: the vertical guide is synced across BOTH charts (same date); the
@@ -414,19 +531,17 @@ function bindSmtCrosshair() {
           hline.setAttribute('opacity', '0');
         }
       }
-      // Date readout at the crosshair x (same calendar date on both charts).
+      // Date readout at the crosshair x (same calendar date on both charts, via the
+      // shared ordinal axis — the vertical guide is the same x-fraction everywhere).
       const lbl = s.querySelector('.smt-cross-date');
-      const d0 = parseFloat(s.dataset.d0), d1 = parseFloat(s.dataset.d1);
-      const padL = parseFloat(s.dataset.padl), plotw = parseFloat(s.dataset.plotw);
-      if (lbl && isFinite(d0) && isFinite(d1) && plotw > 0) {
+      if (lbl && smtAxis) {
         const xv = fracX * w;
-        const f = clamp((xv - padL) / plotw);
         let iso = '';
-        try { iso = new Date(d0 + f * (d1 - d0)).toISOString().slice(0, 10); } catch (e) {}
+        try { iso = new Date(smtTimeAtX(smtAxis, xv)).toISOString().slice(0, 10); } catch (e) {}
         const tx = lbl.querySelector('.smt-cross-date-tx');
         const bg = lbl.querySelector('.smt-cross-date-bg');
         const lw = 66;
-        const cx = Math.min(w - 6 - lw / 2, Math.max(padL + lw / 2, xv));
+        const cx = Math.min(w - 6 - lw / 2, Math.max(SMT_PADL + lw / 2, xv));
         if (tx) { tx.setAttribute('x', cx.toFixed(1)); tx.textContent = iso; }
         if (bg) { bg.setAttribute('x', (cx - lw / 2).toFixed(1)); }
         lbl.setAttribute('opacity', '1');
@@ -477,11 +592,13 @@ async function renderSmtCharts() {
   const days = smtState.range;
   let barsList = all.map(a => smtFilterRange(a, days));
   if (smtState.interval === 'weekly') barsList = barsList.map(smtToWeekly);
+  barsList = barsList.map((b, i) => smtInjectLivePoint(b, keys[i]));
   const times = barsList.flat().map(b => new Date(b.date).getTime()).filter(t => !isNaN(t));
   const domain = times.length ? [Math.min(...times), Math.max(...times)] : null;
   const chartW = Math.max(360, Math.round((host.clientWidth || 900) - 30));   // slot content box: -28 padding -2 border (border-box) => 1:1 px
   const chartH = Math.max(200, Math.min(320, Math.round(chartW * 0.24)));
-  host.innerHTML = keys.map((k, i) => smtChartSlot(k, barsList[i], domain, chartW, chartH)).join('');
+  smtAxis = smtBuildAxis(barsList, chartW - SMT_PADL - SMT_PADR);   // one shared ordinal axis for all 3 charts
+  host.innerHTML = keys.map((k, i) => smtChartSlot(k, barsList[i], domain, chartW, chartH, smtAxis)).join('');
   host.classList.toggle('smt-drawing', smtDraw);
   bindSmtCrosshair();
   bindSmtDraw();
@@ -492,24 +609,24 @@ async function renderSmtCharts() {
 // scale data-attributes that renderSmtChart stamps on the SVG.
 function smtSvgPoint(svg, clientX, clientY) {
   const rect = svg.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
+  if (!rect.width || !rect.height || !smtAxis) return null;
   const vb = svg.viewBox && svg.viewBox.baseVal;
   const W = (vb && vb.width) || rect.width, H = (vb && vb.height) || rect.height;
   const vbx = (clientX - rect.left) / rect.width * W;
   const vby = (clientY - rect.top) / rect.height * H;
   const d = svg.dataset;
-  const d0 = +d.d0, d1 = +d.d1, padL = +d.padl, plotw = +d.plotw;
   const plo = +d.plo, phi = +d.phi, padT = +d.padt, ploth = +d.ploth;
-  if (![d0, d1, padL, plotw, plo, phi, padT, ploth].every(Number.isFinite) || plotw <= 0 || ploth <= 0) return null;
-  const t = d0 + ((vbx - padL) / plotw) * (d1 - d0);
+  if (![plo, phi, padT, ploth].every(Number.isFinite) || ploth <= 0) return null;
+  // x maps through the shared ordinal axis; y is this chart's own price scale.
+  const t = smtTimeAtX(smtAxis, vbx);
   const p = plo + (1 - (vby - padT) / ploth) * (phi - plo);
-  return { vbx, vby, t, p, padL, plotw, padT, ploth, d0, d1, plo, phi };
+  return { vbx, vby, t, p, padT, ploth, plo, phi };
 }
 
 function smtProjLine(pt, ln) {
   return {
-    x1: pt.padL + ((ln.a.t - pt.d0) / (pt.d1 - pt.d0)) * pt.plotw,
-    x2: pt.padL + ((ln.b.t - pt.d0) / (pt.d1 - pt.d0)) * pt.plotw,
+    x1: smtXAtTime(smtAxis, ln.a.t),
+    x2: smtXAtTime(smtAxis, ln.b.t),
     y1: pt.padT + (1 - (ln.a.p - pt.plo) / (pt.phi - pt.plo)) * pt.ploth,
     y2: pt.padT + (1 - (ln.b.p - pt.plo) / (pt.phi - pt.plo)) * pt.ploth,
   };
@@ -568,7 +685,7 @@ function bindSmtDraw() {
       preview.setAttribute('class', 'smt-trend smt-trend-preview');
       preview.setAttribute('x1', pt.vbx.toFixed(1)); preview.setAttribute('y1', pt.vby.toFixed(1));
       preview.setAttribute('x2', pt.vbx.toFixed(1)); preview.setAttribute('y2', pt.vby.toFixed(1));
-      preview.setAttribute('stroke', '#4338ca'); preview.setAttribute('stroke-width', '1.6');
+      preview.setAttribute('stroke', CHART_THEME.trend); preview.setAttribute('stroke-width', '1.6');
       svg.appendChild(preview);
       window.addEventListener('mousemove', moveDoc);
       window.addEventListener('mouseup', up);
@@ -612,7 +729,7 @@ function smtSvgToCanvas(targetWidth) {
   // Hide the interactive crosshair/date overlays for the export, then restore.
   const stashed = [];
   for (const s of svgs) {
-    s.querySelectorAll('.smt-cross-v, .smt-cross-h, .smt-cross-date, .smt-trend-preview').forEach(el => {
+    s.querySelectorAll('.smt-cross-v, .smt-cross-h, .smt-cross-date, .smt-trend-preview, .smt-live-dot').forEach(el => {
       stashed.push([el, el.style.display]); el.style.display = 'none';
     });
   }
@@ -624,7 +741,7 @@ function smtSvgToCanvas(targetWidth) {
       const meta = `${smtInstrumentType(key)} · ${smtModeLabel(key)} · ${smtState.interval === 'weekly' ? 'Weekly' : 'Daily'} · ${(SMT_RANGES.find(r => r[0] === smtState.range) || [0, ''])[1]}`;
       cx.save();
       cx.fillStyle = '#0f172a';
-      cx.font = '600 13px Sora, system-ui, sans-serif';
+      cx.font = '600 13px Geist, system-ui, sans-serif';
       cx.textAlign = 'left';
       cx.fillText(`${name}  —  ${meta}`, 12, y + 15);
       cx.restore();
@@ -681,16 +798,18 @@ async function shareSmtCharts() {
   setSmtBtnStatus('smtShareBtn', 'Downloaded', 'Share');
 }
 
-// X's web intent can't attach an image, so copy the PNG to the clipboard first
-// and open the compose window — the user pastes it into the post with Cmd/Ctrl+V.
+// X's web intent can't attach an image, so copy the PNG to the clipboard and the user
+// pastes it into the post with Cmd/Ctrl+V. The write must be ISSUED inside the click
+// gesture — Safari/WebKit rejects a write made after `await` — so hand ClipboardItem a
+// Promise<Blob> instead of awaiting the blob first (Chrome/Firefox accept this too).
 async function shareSmtToX() {
   const text = `${smtExportContext().name} · ChartHorizon`;
   const intentUrl = `https://x.com/intent/post?text=${encodeURIComponent(text)}`;
   let copied = false;
-  try {
-    const blob = await smtPngBlob();
-    if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); copied = true; }
-  } catch (e) {}
+  if (navigator.clipboard && window.ClipboardItem) {
+    try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': smtPngBlob() })]); copied = true; }
+    catch (e) {}
+  }
   const win = window.open(intentUrl, '_blank');
   if (!win) { setSmtBtnStatus('smtXBtn', 'Allow popups', 'X'); return; }
   setSmtBtnStatus('smtXBtn', copied ? 'Copied · paste in X' : 'Opened X', 'X');

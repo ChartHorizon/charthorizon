@@ -38,9 +38,10 @@ except ImportError:
 from local_first_merge import _slug
 
 __all__ = [
-    'SEASONAL_LONG_WINDOWS',
+    'SEASONAL_MAX_WINDOW',
     'SEASONAL_MIN_RUN_DAYS',
-    'SEASONAL_SHORT_WINDOWS',
+    'SEASONAL_WINDOWS',
+    'SEASONAL_WINDOW_DAYS',
     '_cot_net',
     '_screener_cot_hedge_signal',
     '_screener_cot_signal',
@@ -49,6 +50,7 @@ __all__ = [
     '_screener_seasonal_signal',
     '_screener_structure_signal',
     '_seasonal_aggregate_dir',
+    '_seasonal_confirmed_votes',
     '_seasonal_curve_direction',
     '_seasonal_distinct_curves',
     '_seasonal_gated_sequence',
@@ -62,7 +64,7 @@ __all__ = [
 # ─────────────────────────────────────────────────────────────────────
 #  SCREENER SIGNALS  (lean per-market summary -> ff_data/screener.json)
 #  Signals are computed to match the on-chart logic exactly:
-#   - seasonal:  3-of-4 confirmation: of the four seasonal curves (5/10/20/40Y) at least three must share a direction and none may oppose it, else neutral
+#   - seasonal:  3-of-4 confirmation (of the four 5/10/15Y+max curves at least three share a direction, none opposes), read over a short trailing window [today-SEASONAL_WINDOW_DAYS, today] so a season active now OR within the last few days still counts; else neutral
 #   - cot:       latest net position sign (>=0 long = bullish)        [plain COT pane]
 #   - cot_hedge: latest net vs midpoint of the trailing 12M window    [COT Hedging Program]
 #   - structure: front contract last > next contract last = premium (backwardation)
@@ -83,18 +85,39 @@ def _cot_net(row):
     return row.get("comm_net") if net is None else net
 
 
-# The four seasonal lookback windows (two short, two long). The screener seasonal
-# signal applies a 3-of-4 confirmation rule across these curves (quality > quantity);
-# see _screener_seasonal_signal.
-SEASONAL_SHORT_WINDOWS = (5, 10)
-SEASONAL_LONG_WINDOWS = (20, 40)
+# The seasonal lookback windows: three fixed look-backs (5/10/15Y) plus a 'max' curve
+# built from the full available history. The screener seasonal signal applies a 3-of-4
+# confirmation rule across the resulting distinct curves (quality > quantity); see
+# _screener_seasonal_signal. The old (5,10,20,40) set masked the seasons of markets with
+# ~20-30y of history: the 40Y window capped at available data and ended up near-identical
+# to the 20Y curve (e.g. copper's ~27y produced twin 20Y/25Y curves, both flat right where
+# its 5/10/15Y curves were clearly bearish). Spacing the look-backs 5/10/15 and making the
+# fourth curve the genuine maximum keeps the four curves independent. This mirrors the
+# Seasonals tab chart, which draws the same 5/10/15/Max curves.
+SEASONAL_WINDOWS = (5, 10, 15)
+SEASONAL_MAX_WINDOW = 100   # 'max' curve: large enough to use every available year
 
-# Minimum-duration gate ("less is more"): the aligned 3-of-4 direction must hold for
-# at least this many consecutive days-of-year, otherwise it is treated as a neutral
-# blip. Without this gate the median seasonal window was ~9 days (88% under 21 days) --
-# far too short/noisy for a high-conviction setup. At 14 days the median window roughly
-# doubles and the count of seasonal windows drops ~73%, leaving only sustained seasons.
-SEASONAL_MIN_RUN_DAYS = 14
+# The seasonal direction is gated in TWO steps (see _seasonal_gated_sequence):
+#
+# (1) Flicker filter — SEASONAL_MIN_RUN_DAYS. The raw 3-of-4 day-of-year vote can
+#     briefly flicker directional a day or two BEFORE the genuine seasonal run begins
+#     (the forward 21-day window in _seasonal_curve_direction catches a tiny pre-move),
+#     then drop back to neutral, then the sustained run starts. A raw run shorter than
+#     SEASONAL_MIN_RUN_DAYS is treated as noise and dropped, so such a pre-flicker can
+#     never become the onset. This is what removes the "Vorlauf": the signal turns on
+#     on the day the genuine run begins, never a few days early. (NOT the old 14-day
+#     SEASONAL_MIN_RUN_DAYS hard gate, which dropped genuine short seasons — this is a
+#     short noise filter applied per raw run, the tail smear below keeps short seasons.)
+#
+# (2) Trailing-window smear — SEASONAL_WINDOW_DAYS. The surviving (confirmed) direction
+#     is carried FORWARD over this many days: a market still reads directional for a few
+#     days after its confirmed run goes neutral. Backward-looking window, so it only ever
+#     EXTENDS a run's tail (keeps a season "active now OR just rolled off within the last
+#     few days") and never pulls an onset earlier. It also bridges a one/two-day neutral
+#     dip inside a season. Soybean oil (3-of-4 run ends a day or two before today) is the
+#     motivating keep-alive case.
+SEASONAL_MIN_RUN_DAYS = 3   # a raw run must hold >= this many days to count as real (flicker filter)
+SEASONAL_WINDOW_DAYS = 3
 
 
 def _seasonal_window_curve(rows, years, latest_full):
@@ -181,11 +204,11 @@ def _seasonal_curve_direction(curve, cur):
 
 
 def _seasonal_distinct_curves(seasonal_history):
-    """Cleaned seasonal history -> list of the distinct 5/10/20/40-year curves. Curves
-    drawing on the same number of years are collapsed to one (a short-history market's
-    20Y and 40Y curves are identical), so a short-history market contributes fewer than
-    four. Returns None when there is no usable history; a list shorter than four means
-    too little history for a 3-of-4 vote."""
+    """Cleaned seasonal history -> list of the distinct 5/10/15Y + max-history curves.
+    Curves drawing on the same number of years are collapsed to one (a short-history
+    market's 15Y and max curves are identical), so a short-history market contributes
+    fewer than four. Returns None when there is no usable history; a list shorter than
+    four means too little history for a 3-of-4 vote."""
     rows = [(str(r["date"])[:10], float(r["close"]))
             for r in (seasonal_history or [])
             if r and r.get("date") and r.get("close") is not None]
@@ -213,7 +236,7 @@ def _seasonal_distinct_curves(seasonal_history):
     latest_full = last_year if last_md >= 1215 else last_year - 1
 
     distinct = {}                       # years_used -> curve
-    for w in (*SEASONAL_SHORT_WINDOWS, *SEASONAL_LONG_WINDOWS):
+    for w in (*SEASONAL_WINDOWS, SEASONAL_MAX_WINDOW):
         built = _seasonal_window_curve(rows, w, latest_full)
         if built is not None:
             curve, years_used = built
@@ -234,38 +257,65 @@ def _seasonal_aggregate_dir(curves, doy):
     return 0
 
 
-def _seasonal_gated_sequence(curves, min_run=None):
-    """365-day direction sequence (+1 / -1 / 0) after dropping any contiguous
-    same-direction window shorter than `min_run` days (evaluated circularly). This is
-    the 'less is more' duration filter: a brief seasonal blip no longer counts -- only a
-    sustained run does. All-zero when there are fewer than four distinct curves."""
-    if min_run is None:
-        min_run = SEASONAL_MIN_RUN_DAYS
+def _seasonal_confirmed_votes(raw, min_run=SEASONAL_MIN_RUN_DAYS):
+    """Flicker filter: zero out any circular run of identical nonzero votes shorter than
+    `min_run` days. The raw 3-of-4 vote can flicker directional for a day or two right
+    before the genuine seasonal run begins; those short runs are noise and must not seed
+    an onset (that brief flicker is the "Vorlauf" we remove). Runs are measured around
+    the year wrap (a December/January season counts as one run). Returns a new list."""
+    n = len(raw)
+    conf = list(raw)
+    if all(v == 0 for v in raw):
+        return conf
+    start = next((i for i in range(n) if raw[i] == 0), 0)   # a neutral day, so no run is split
+    k = 0
+    while k < n:
+        v = raw[(start + k) % n]
+        if v == 0:
+            k += 1
+            continue
+        length = 1
+        while k + length < n and raw[(start + k + length) % n] == v:
+            length += 1
+        if length < min_run:
+            for j in range(length):
+                conf[(start + k + j) % n] = 0
+        k += length
+    return conf
+
+
+def _seasonal_gated_sequence(curves):
+    """365-day direction sequence (+1 / -1 / 0) -- the canonical seasonal direction by
+    day-of-year, shared by the screener signal, the Weekly-Outlook event, and the
+    content-bot backfill. Two gates (see the SEASONAL_*_DAYS comment above):
+      1. Flicker filter -- raw 3-of-4 runs shorter than SEASONAL_MIN_RUN_DAYS are dropped,
+         so a one/two-day pre-run flicker never becomes the onset (no Vorlauf).
+      2. Trailing smear -- the surviving (confirmed) direction is carried forward over a
+         [d - SEASONAL_WINDOW_DAYS, d] window, so a season active now OR just rolled off
+         within the last few days still counts. The window is backward-looking, so it only
+         extends a confirmed run's tail and never pulls an onset earlier.
+    All-zero when there are fewer than four distinct curves."""
     n = 365
     if not curves or len(curves) < 4:
         return [0] * n
     raw = [_seasonal_aggregate_dir(curves, d) for d in range(n)]
-    if all(v == raw[0] for v in raw):       # all-neutral, or one uninterrupted year-run
-        return raw[:]
-    out = raw[:]
-    start = next(i for i in range(n) if raw[i] != raw[(i - 1) % n])
-    i, seen = start, 0
-    while seen < n:
-        v = raw[i]
-        ln = 0
-        while ln < n and raw[(i + ln) % n] == v:
-            ln += 1
-        if v != 0 and ln < min_run:         # too short -> neutralize the whole run
-            for k in range(i, i + ln):
-                out[k % n] = 0
-        i = (i + ln) % n
-        seen += ln
+    conf = _seasonal_confirmed_votes(raw)
+    win = SEASONAL_WINDOW_DAYS
+    out = [0] * n
+    for d in range(n):
+        seg = [conf[(d - off) % n] for off in range(0, win + 1)]
+        bull = seg.count(1)
+        bear = seg.count(-1)
+        if bull and not bear:
+            out[d] = 1
+        elif bear and not bull:
+            out[d] = -1
     return out
 
 
 def _seasonal_signal_at(curves, doy):
     """Gated seasonal direction at a day-of-year -> 'bullish' / 'bearish' / 'neutral'.
-    Needs four distinct curves (else neutral) and a sustained run (>= SEASONAL_MIN_RUN_DAYS)."""
+    Needs four distinct curves (else neutral); reads the trailing-window 3-of-4 sequence."""
     if not curves or len(curves) < 4:
         return "neutral"
     v = _seasonal_gated_sequence(curves)[doy % 365]
@@ -273,11 +323,12 @@ def _seasonal_signal_at(curves, doy):
 
 
 def _screener_seasonal_signal(seasonal_history, curves=None):
-    """Tightened seasonal filter (quality > quantity). Builds the distinct 5/10/20/40-year
-    seasonal curves and combines two gates: (1) the 3-of-4 rule -- at least three of the
-    four INDEPENDENT curves share a direction and none points the opposite way; and (2) a
-    minimum-duration gate (SEASONAL_MIN_RUN_DAYS) -- that aligned direction must hold for a
-    sustained run, not a brief blip. Fewer than four independent curves -> neutral. Returns
+    """Tightened seasonal filter (quality > quantity). Builds the distinct 5/10/15Y + max
+    seasonal curves and combines two gates (via _seasonal_gated_sequence): (1) the 3-of-4
+    rule -- at least three of the four INDEPENDENT curves share a direction and none points
+    the opposite way; and (2) the flicker filter (SEASONAL_MIN_RUN_DAYS) -- that aligned
+    direction must hold for a sustained run, not a one/two-day blip, so the signal never
+    fires a few days early. Fewer than four independent curves -> neutral. Returns
     'bullish' / 'bearish' / 'neutral', or None when there is no usable history.
 
     `curves` may be passed pre-built (by build_screener_summary) to avoid rebuilding the

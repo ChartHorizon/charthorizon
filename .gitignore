@@ -5,8 +5,51 @@
 __pycache__/
 *.py[cod]
 
-# Generierte/gecachte Marktdaten + lokales SQLite-Archiv (taeglich neu)
-app/ff_data/
+# Claude Code – lokale, maschinenspezifische Einstellungen
+.claude/settings.local.json
+# Claude Code – installierte Skills (Toolchain, nicht versionieren)
+.claude/skills/
+.github/skills/
 
 # Laufzeit-Logs (Auto-Update-Job)
 logs/
+
+# Generierte Frontend-Konfig (5 Werte) – wird vom Generator in ff_data/ erzeugt
+# und vor den web/*.js-Modulen geladen (window.__CONFIG__). Das statische Frontend
+# selbst (app/index.html, app/web/) ist hingegen versioniert.
+# (ff_data/ wird weiter unten komplett ignoriert; config.js faellt darunter.)
+
+# Generierte/gecachte Marktdaten + lokales SQLite-Archiv.
+# Wird von `start.py --refresh` neu erzeugt und aendert sich taeglich;
+# gehoert nicht in die Git-Historie (siehe Hinweis unten zur DB-Sicherung).
+app/ff_data/
+
+# Content-Bot: Secrets (Telegram-Token) + generierte Karten — nie versionieren.
+content_bot/config.json
+content_bot/out/
+
+# Content-Bot: lokales Schedule-Flag (per CONTENT_BOT_AKTIVIEREN gesetzt)
+content_bot/.schedule_enabled
+
+# Verworfener Public-Page-Prototyp (TradingView-Widget-Idee, empirisch gedroppt)
+prototype/
+
+# Clean-Export-Build (make_release.sh) — nie ins private Repo committen
+dist/
+
+# Arbeits-Klon des OEFFENTLICHEN Repos (publish_public.sh) — eigenes .git, eigener Remote
+publish/
+
+# Brainstorming-Mockups (Visual-Companion-Server) — lokale Design-Artefakte
+.superpowers/
+
+# PyInstaller build artifacts
+build/
+
+# packaging build artifacts (generated)
+/dist/
+/build/
+/packaging/icons/
+
+# Playwright MCP-Server Artefakte (Screenshots/Snapshots bei Browser-Checks)
+.playwright-mcp/

@@ -49,6 +49,7 @@ __all__ = [
     'YF_EOD_SETTLE_READY_ET',
     'YF_LIQUID_ACTIVE_DAYS_AFTER_EXPIRY',
     'YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY',
+    'REFRESH_FETCH_WORKERS',
     'YF_LIQUID_CONTINUOUS_EMPTY_STOP',
     'YF_LIQUID_CONTINUOUS_FORWARD_MONTHS',
     'YF_LIQUID_CONTINUOUS_LOOKBACK_MONTHS',
@@ -60,6 +61,7 @@ __all__ = [
     'YF_TOTAL_VOLUME_LOOKBACK_MONTHS',
     'YF_TOTAL_VOLUME_MAX_CONTRACTS',
     'YF_TOTAL_VOLUME_MAX_POINTS',
+    'YF_PRICE_HISTORY_MAX_POINTS',
     'YF_VOLUME_SUSPECT_LOOKBACK',
     'YF_VOLUME_SUSPECT_MIN_REFERENCE',
     'YF_VOLUME_SUSPECT_MIN_RUN',
@@ -83,6 +85,11 @@ YF_TOTAL_VOLUME_FORWARD_MONTHS = 18   # include actively traded deferred months
 YF_TOTAL_VOLUME_MAX_CONTRACTS = 64    # cap yfinance requests for dense monthly markets
 YF_TOTAL_VOLUME_EMPTY_STOP = 8
 YF_TOTAL_VOLUME_MAX_POINTS = 1300
+# Price (candlestick) history is capped separately and far deeper than the volume/spread
+# panes: the maximized "Charts" tab aggregates this daily series up to Quarterly over ~20
+# years, so it needs the full tail. ~5200 trading days ≈ 20 years (260/yr). The volume and
+# calendar-spread panes deliberately stay at the denser 1300-point (~5y) cap above.
+YF_PRICE_HISTORY_MAX_POINTS = 5200
 YF_VOLUME_SUSPECT_LOOKBACK = 20
 YF_VOLUME_SUSPECT_RATIO = 0.15
 YF_VOLUME_SUSPECT_MIN_REFERENCE = 10000
@@ -97,6 +104,8 @@ YF_LIQUID_CONTINUOUS_MAX_CONTRACTS = 72
 YF_LIQUID_CONTINUOUS_MIN_VOLUME = 1
 YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY = 180
 YF_LIQUID_ACTIVE_DAYS_AFTER_EXPIRY = 5
+REFRESH_FETCH_WORKERS = 4  # parallel yfinance fetches during a board refresh; conservative
+                           # margin under rate limits. Set to 1 to force the sequential path.
 SPREAD_SPIKE_REVERT_PCT = 0.02       # drop a one-day calendar-spread value that spikes >this fraction of the front price and reverts next day
 SPREAD_MAX_GAP_DAYS = 7              # keep only the most recent calendar-spread run without a gap larger than this (drops the sparse older backfill; Yahoo only serves the current contracts)
 

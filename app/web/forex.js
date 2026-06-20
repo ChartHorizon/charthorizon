@@ -209,16 +209,21 @@ async function openForex() {
 
 const FX_CURRENCIES = { USD: 'usdx', EUR: 'eur_fx', GBP: 'gbp_fx', CAD: 'cad_fx', JPY: 'jpy_fx', CHF: 'chf_fx', AUD: 'aud_fx', NZD: 'nzd_fx' };
 const FX_INTEREST_RATE_SCORE_RANGE = 2;
-const FX_INTEREST_RATES = {
+// Live policy rates come from the daily refresh (window.__CONFIG__.fxRates, fetched
+// from BIS WS_CBPOL — see dashboard/app/fx_rates.py). This built-in is the fallback
+// used offline / before the first refresh; keep it roughly current. The refresh
+// overwrites it, so don't hand-maintain it as the source of truth any more.
+const FX_INTEREST_RATES_FALLBACK = {
   AUD: { rate:4.35, display:'4.35%', centralBank:'Reserve Bank of Australia', label:'Cash Rate Target', asOf:'2026-05-06' },
   GBP: { rate:3.75, display:'3.75%', centralBank:'Bank of England', label:'Bank Rate', asOf:'2026-05-26' },
-  USD: { rate:3.625, display:'3.50-3.75%', centralBank:'Federal Reserve', label:'Fed Funds Target Midpoint', asOf:'2026-04-29' },
-  CAD: { rate:2.25, display:'2.25%', centralBank:'Bank of Canada', label:'Overnight Target', asOf:'2026-04-29' },
-  NZD: { rate:2.25, display:'2.25%', centralBank:'Reserve Bank of New Zealand', label:'Official Cash Rate', asOf:'2026-05-27' },
-  EUR: { rate:2.15, display:'2.15%', centralBank:'European Central Bank', label:'Main Refinancing Rate', asOf:'2025-06-11' },
-  JPY: { rate:0.75, display:'0.75%', centralBank:'Bank of Japan', label:'Overnight Call Rate', asOf:'2026-04-28' },
-  CHF: { rate:0.00, display:'0.00%', centralBank:'Swiss National Bank', label:'Policy Rate', asOf:'2026-06-01' },
+  USD: { rate:3.625, display:'3.50-3.75%', centralBank:'Federal Reserve', label:'Fed Funds Target Midpoint', asOf:'2025-12-11' },
+  CAD: { rate:2.25, display:'2.25%', centralBank:'Bank of Canada', label:'Overnight Target', asOf:'2026-04-24' },
+  NZD: { rate:2.25, display:'2.25%', centralBank:'Reserve Bank of New Zealand', label:'Official Cash Rate', asOf:'2026-05-18' },
+  EUR: { rate:2.00, display:'2.00%', centralBank:'European Central Bank', label:'Deposit Facility Rate', asOf:'2025-06-11' },
+  JPY: { rate:0.75, display:'0.75%', centralBank:'Bank of Japan', label:'Overnight Call Rate', asOf:'2025-12-22' },
+  CHF: { rate:0.00, display:'0.00%', centralBank:'Swiss National Bank', label:'Policy Rate', asOf:'2025-06-20' },
 };
+const FX_INTEREST_RATES = (window.__CONFIG__ && window.__CONFIG__.fxRates) || FX_INTEREST_RATES_FALLBACK;
 
 // ── Synthetic FX-pair watchlist entries (key form: fxpair:<baseFutureKey>|<quoteFutureKey>) ──
 const FX_CUR_BY_KEY = Object.fromEntries(Object.entries(FX_CURRENCIES).map(([cur, key]) => [key, cur]));
@@ -715,7 +720,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
     if (v < pLo || v > pHi) continue;
     const y = pY(v).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    grid += `<text x="${W - padR + 6}" y="${(+y + 3.5).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora">${v.toFixed(dec)}</text>`;
+    grid += `<text x="${W - padR + 6}" y="${(+y + 3.5).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist">${v.toFixed(dec)}</text>`;
   }
 
   let candles = '';
@@ -761,7 +766,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   let xLabels = '';
   for (let g = 0; g <= 5; g++) {
     const i = Math.round((n - 1) * g / 5);
-    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Sora" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
+    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
   }
   const chartBg = `<rect x="0" y="0" width="${W}" height="${totalH}" fill="${CHART_THEME.bg}" rx="7"/>`;
 
@@ -816,7 +821,7 @@ const FX_TV_INTERVALS = [
 ];
 
 function fxTradingViewSymbol(baseCur, quoteCur) {
-  return `FX:${String(baseCur || '').toUpperCase()}${String(quoteCur || '').toUpperCase()}`;
+  return `FOREXCOM:${String(baseCur || '').toUpperCase()}${String(quoteCur || '').toUpperCase()}`;
 }
 
 function fxTradingViewOverrides() {
@@ -920,5 +925,20 @@ function closeFxPairChart() {
   fxPairState = null;
   const wrap = document.getElementById('fxPairChart');
   if (wrap) { wrap.hidden = true; wrap.innerHTML = ''; }
+}
+
+// Theme toggle: the heatmap/tables rebuild from CHART_THEME via renderFxSection(), but
+// the open TradingView pair chart lives in a SEPARATE #fxPairChart element and bakes its
+// theme/colors in at creation (no runtime theme API) — so it must be re-created to follow
+// a light<->dark switch. Without this it keeps the theme it was opened with. Called from
+// core.js rerenderThemedCharts() when the Forex tab is visible.
+function repaintFxThemed() {
+  renderFxSection();        // may closeFxPairChart() (nulls fxPairState) if ranking < 2
+  remountFxPairChart();
+}
+// Re-create the currently open FX pair chart with the active theme (no-op if none open).
+function remountFxPairChart() {
+  if (!fxPairState) return;
+  openFxPairChart(fxPairState.baseKey, fxPairState.quoteKey, fxPairState.baseCur, fxPairState.quoteCur, fxPairState.interval);
 }
 

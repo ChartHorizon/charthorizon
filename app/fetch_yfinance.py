@@ -3,16 +3,20 @@
 Split out of commodity_dashboard.py — see CLAUDE.md "Architecture".
 """
 
+import logging
 import os
 import csv
 import contextlib
 import io
 import json
 import re
+import threading
 import urllib.request
 import urllib.parse
 from datetime import date, datetime, time, timedelta
 from dateutil.relativedelta import relativedelta
+
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)  # quiet without per-call stdout redirect
 
 try:
     from zoneinfo import ZoneInfo
@@ -50,6 +54,7 @@ from market_config import (
     YF_TOTAL_VOLUME_LOOKAHEAD,
     YF_TOTAL_VOLUME_MAX_CONTRACTS,
     YF_TOTAL_VOLUME_MAX_POINTS,
+    YF_PRICE_HISTORY_MAX_POINTS,
 )
 from series_utils import (
     BLANK,
@@ -111,12 +116,10 @@ class YahooFinanceClient:
         if ticker is None:
             return None
 
-        if quiet:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                hist = ticker.history(period=period, interval=interval)
-        else:
-            hist = ticker.history(period=period, interval=interval)
-
+        # yfinance noise is silenced via its logger (CRITICAL at import). We no longer
+        # redirect process-global stdout/stderr here — that is unsafe when markets are
+        # fetched concurrently (Task 8). `quiet` is kept for call-site compatibility.
+        hist = ticker.history(period=period, interval=interval)
         self._history_cache[cache_key] = hist
         return hist
 
@@ -200,20 +203,38 @@ class YahooFinanceClient:
             return []
 
 
-_yf_client = YahooFinanceClient()
+class _ThreadLocalYahooClient:
+    """Each thread gets its own YahooFinanceClient. The client's caches + yfinance
+    Ticker objects are not safe to share across the Task 8 fetch pool, so we never do."""
+    def __init__(self):
+        self._local = threading.local()
+
+    def _client(self):
+        c = getattr(self._local, "client", None)
+        if c is None:
+            c = YahooFinanceClient()
+            self._local.client = c
+        return c
+
+    def __getattr__(self, name):
+        return getattr(self._client(), name)
+
+_yf_client = _ThreadLocalYahooClient()
 
 
-def fetch_chart_history(yf_continuous, period="5y"):
+def fetch_chart_history(yf_continuous, period="20y"):
     """
     Fetches daily OHLC + volume history for a yfinance chart symbol.
-    Five years of daily data -> Weekly/Daily and all ranges can be derived client-side.
+    ~20 years of daily data -> Daily/Weekly/Monthly/Quarterly and all ranges can be
+    derived client-side (the maximized "Charts" tab needs the deep tail for its higher
+    timeframes; the Futures tab still only renders up to its 5Y range).
 
     Returns: list of {date, open, high, low, close, volume}
     """
     return _yf_client.chart_history(yf_continuous, period=period)
 
 
-def fetch_price_chart_history(cfg, period="5y"):
+def fetch_price_chart_history(cfg, period="20y"):
     """Loads the main chart history through the configured yfinance symbol."""
     symbol = cfg.get("yf_continuous")
     return symbol, fetch_chart_history(symbol, period=period)
@@ -477,17 +498,22 @@ def _trailing_contiguous_spread(rows, max_gap_days=SPREAD_MAX_GAP_DAYS):
 def build_calendar_spread_series(candidates_by_date):
     """Front-minus-next calendar spread per day (negative = contango).
 
-    Front = the nearest active expiry that day with a valid close; next = the
-    next-nearest expiry with a valid close. Spread = front_close - next_close.
+    Front = the LEAD contract that day — the one carrying the most reported volume —
+    next = the nearest expiry strictly after the front. Spread = front_close - next_close.
+    Anchoring the front leg to volume (not just nearest expiry) keeps the spread on the
+    actively-traded month: liquidity rolls forward before expiry, so the nearest calendar
+    month can be nearly dead (e.g. mid-June gold trades August, not June) and a
+    nearest-expiry front would measure an illiquid, stale leg.
 
-    The spread is computed for EVERY day on which both the current front month and
-    the following month exist — liquidity is deliberately NOT gated. Thinly-traded
-    deferred months on Yahoo (BTC monthly, USD Index) otherwise either stranded the
-    old volume-led roll selector on an illiquid far contract or were dropped by a
-    volume-ratio gate, leaving the current spread missing. Selecting strictly by
-    expiry also removes the roll flip/flop chatter the forward ratchet guarded against.
-    Real settled closes only (no synthetic fill); a spike-revert pass drops single bad
-    prints and a trailing-contiguity pass keeps the most recent gap-free run.
+    The spread is computed for EVERY day on which both the lead month and a following
+    month exist — liquidity is deliberately NOT gated past picking the lead. When no leg
+    reports positive volume (thinly-traded deferred months on Yahoo — BTC monthly, USD
+    Index), the front falls back to the nearest expiry so the spread never goes missing.
+    `legs` is expiry-sorted, so ties in volume break toward the nearer expiry, and a
+    spurious far-month volume print can at worst drop that one day (no "next" beyond it),
+    never strand the series on a far contract. Real settled closes only (no synthetic
+    fill); a spike-revert pass drops single bad prints and a trailing-contiguity pass
+    keeps the most recent gap-free run.
     """
     rows = []
     for day in sorted(candidates_by_date):
@@ -495,11 +521,20 @@ def build_calendar_spread_series(candidates_by_date):
                       key=_expiry_sort_value)
         if len(legs) < 2:
             continue
-        front = legs[0]
+        front = max(legs, key=lambda r: (r.get("roll_basis_volume") or 0))
+        if (front.get("roll_basis_volume") or 0) <= 0:
+            front = legs[0]   # no volume anywhere → nearest active expiry
         front_exp = _expiry_sort_value(front)
-        nxt = next((r for r in legs[1:] if _expiry_sort_value(r) > front_exp), None)
+        nxt = next((r for r in legs if _expiry_sort_value(r) > front_exp), None)
         if nxt is None:
-            continue
+            # Lead is the farthest available leg this day → nothing later to spread it
+            # against. Fall back to the nearest active pair so the series never goes
+            # missing (preserves the old nearest-expiry day-coverage on this edge).
+            front = legs[0]
+            front_exp = _expiry_sort_value(front)
+            nxt = next((r for r in legs if _expiry_sort_value(r) > front_exp), None)
+            if nxt is None:
+                continue
         rows.append({
             "date": day,
             "spread": round(float(front["close"]) - float(nxt["close"]), 6),
@@ -609,8 +644,9 @@ def fetch_yfinance_liquid_continuous_history(
             clean["source"] = "yfinance_continuous_fallback"
             fallback_by_date[clean["date"]] = clean
 
-    # Calendar spread (front-next), selected strictly by nearest expiry — see the
-    # helper. Computed whenever the current front month and the following month exist.
+    # Calendar spread (front-next): front = the lead (highest-volume) contract, next =
+    # the nearest expiry after it — see the helper. Computed whenever a lead month and a
+    # following month exist.
     calendar_spread_series = build_calendar_spread_series(candidates_by_date)
 
     if is_index_proxy:
@@ -624,7 +660,7 @@ def fetch_yfinance_liquid_continuous_history(
     # contracts are still fetched above for the volume pane and the calendar
     # spread below — just not used to stitch the price chart.
     history = [fallback_by_date[day] for day in sorted(fallback_by_date)]
-    history = history[-YF_TOTAL_VOLUME_MAX_POINTS:]
+    history = history[-YF_PRICE_HISTORY_MAX_POINTS:]
     history = _drop_spike_revert_outliers(history)
 
     contract_total_volume = _total_volume_rows_from_by_date(
