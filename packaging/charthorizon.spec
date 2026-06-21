@@ -35,6 +35,9 @@ datas += [
 
 if sys.platform == "darwin":
     icon = os.path.join(ROOT, "packaging", "icons", "icon.icns")
+    # Cocoa reopen-handler in start.py drives serving so a Dock click reopens the
+    # dashboard tab; the import is dynamic, so spell the frameworks out for PyInstaller.
+    hiddenimports += ["AppKit", "Foundation", "objc"]
 elif sys.platform.startswith("win"):
     icon = os.path.join(ROOT, "packaging", "icons", "icon.ico")
 else:
@@ -65,5 +68,12 @@ if sys.platform == "darwin":
         name="ChartHorizon.app",
         icon=os.path.join(ROOT, "packaging", "icons", "icon.icns"),
         bundle_identifier="com.charthorizon.dashboard",
-        info_plist={"NSHighResolutionCapable": True},
+        info_plist={
+            "NSHighResolutionCapable": True,
+            # console=True makes PyInstaller mark the bundle LSBackgroundOnly, turning
+            # it into a window-less resident agent that LaunchServices won't re-open on
+            # a second click. Force it off: start.py sets a Regular activation policy at
+            # runtime and handles the reopen event so every click reopens the tab.
+            "LSBackgroundOnly": False,
+        },
     )

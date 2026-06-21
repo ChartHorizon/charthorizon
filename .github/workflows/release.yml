@@ -28,6 +28,9 @@ jobs:
       - name: Install build deps
         shell: bash
         run: pip install pyinstaller pillow yfinance pandas numpy curl_cffi pypdf python-dateutil
+      - name: Install macOS app deps (Cocoa reopen-handler)
+        if: matrix.os == 'macos-latest'
+        run: pip install pyobjc-framework-Cocoa
       - name: Install Inno Setup (Windows)
         if: matrix.os == 'windows-latest'
         run: choco install innosetup -y

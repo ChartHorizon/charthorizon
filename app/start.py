@@ -731,6 +731,166 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
 
+_mac_app_delegate = None   # strong ref: NSApplication.setDelegate_ does not retain it
+
+
+def _should_run_mac_app():
+    """Whether to drive serving from a macOS Cocoa app loop (Dock icon + reopen
+    handler). Frozen .app on darwin only; CHARTHORIZON_MAC_APP=1 forces it on for a
+    dev-mode live test without rebuilding."""
+    return sys.platform == "darwin" and bool(FROZEN or os.environ.get("CHARTHORIZON_MAC_APP"))
+
+
+def _serve_with_mac_app(httpd, url):
+    """Serve in a background thread and run a Cocoa app on the main thread, so every
+    re-open of the .app reopens the dashboard tab. Degrades to plain serving if
+    PyObjC is unavailable, so the dashboard never fails to start."""
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        _run_mac_app(url, httpd)
+    except Exception as e:                       # PyObjC missing / Cocoa failed
+        warn(f"macOS-App-Loop nicht verfügbar ({e}) — einfacher Modus.")
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            httpd.shutdown()
+
+
+def _run_mac_app(url, httpd):
+    """Minimal Cocoa application: shows a Dock icon and reopens the browser tab on
+    launch and on every reopen (Dock click / re-launch of the running app). Cmd-Q
+    stops the server. Raises if PyObjC is unavailable — the caller falls back."""
+    from AppKit import (NSApplication, NSApplicationActivationPolicyRegular,
+                        NSMenu, NSMenuItem)
+    from Foundation import NSObject
+
+    def _open():
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    class _Delegate(NSObject):
+        def applicationDidFinishLaunching_(self, _note):
+            _open()
+
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _has):
+            _open()
+            return True
+
+        def applicationWillTerminate_(self, _note):
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)   # show in Dock
+
+    global _mac_app_delegate
+    _mac_app_delegate = _Delegate.alloc().init()
+    app.setDelegate_(_mac_app_delegate)
+
+    # Minimal main menu so Cmd-Q (terminate:) quits cleanly.
+    menubar = NSMenu.alloc().init()
+    app_item = NSMenuItem.alloc().init()
+    menubar.addItem_(app_item)
+    app.setMainMenu_(menubar)
+    app_menu = NSMenu.alloc().init()
+    app_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "ChartHorizon beenden", "terminate:", "q"))
+    app_item.setSubmenu_(app_menu)
+
+    app.activateIgnoringOtherApps_(True)
+    app.run()
+
+
+def _bundle_path():
+    """Path to the enclosing .app bundle when frozen (…/ChartHorizon.app), else None."""
+    exe = os.path.abspath(sys.executable)
+    bundle = os.path.dirname(os.path.dirname(os.path.dirname(exe)))  # MacOS -> Contents -> .app
+    return bundle if bundle.endswith(".app") else None
+
+
+def _running_from_unsafe_location():
+    """True when the frozen macOS app runs from a read-only / translocated / mounted
+    location (DMG double-click, or a quarantined Download). macOS App-Translocation
+    runs such apps from an ephemeral read-only mount; when it disappears mid-run the
+    mmap'd binary faults with SIGBUS. The app must run from /Applications instead."""
+    exe = os.path.abspath(sys.executable)
+    if "/AppTranslocation/" in exe or exe.startswith("/Volumes/"):
+        return True
+    try:
+        return bool(os.statvfs(exe).f_flag & os.ST_RDONLY)
+    except (OSError, AttributeError):
+        return False
+
+
+def _mac_alert(message, informative, buttons):
+    """Show a native modal alert; return the 0-based index of the clicked button.
+    Raises if PyObjC is unavailable (the caller decides the fallback)."""
+    from AppKit import (NSApplication, NSAlert, NSApplicationActivationPolicyRegular,
+                        NSAlertFirstButtonReturn)
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    app.activateIgnoringOtherApps_(True)
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(message)
+    alert.setInformativeText_(informative)
+    for title in buttons:
+        alert.addButtonWithTitle_(title)
+    return int(alert.runModal()) - int(NSAlertFirstButtonReturn)
+
+
+def _copy_bundle_to_applications(src, dest):
+    """Copy the .app to /Applications and strip quarantine so the copy is never
+    translocated again."""
+    import shutil
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(src, dest, symlinks=True)
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", dest],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def _relocate_from_unsafe_location():
+    """Offer to move the app into /Applications and relaunch it from there, so it
+    never runs translocated (which crashes with SIGBUS when the mount vanishes)."""
+    bundle = _bundle_path()
+    if not bundle:
+        return
+    dest = "/Applications/ChartHorizon.app"
+    already = os.path.isdir(dest)
+    if already:
+        info = ("ChartHorizon ist bereits im Programme-Ordner installiert und wird von "
+                "dort gestartet. Der Start aus dem temporären Ort kann abstürzen.")
+        primary = "Aus „Programme“ starten"
+    else:
+        info = ("ChartHorizon läuft gerade aus einem temporären Ort (DMG bzw. Download) "
+                "und kann dort abstürzen. Die App wird in den Programme-Ordner kopiert "
+                "und von dort neu gestartet.")
+        primary = "Verschieben & starten"
+    try:
+        choice = _mac_alert("ChartHorizon in den Programme-Ordner", info,
+                            [primary, "Abbrechen"])
+    except Exception:
+        return                       # no GUI available — bail instead of risking SIGBUS
+    if choice != 0:
+        return                       # cancelled
+    try:
+        if not already:
+            _copy_bundle_to_applications(bundle, dest)
+        subprocess.Popen(["open", dest])
+    except Exception as e:
+        try:
+            _mac_alert("Verschieben fehlgeschlagen",
+                       f"Bitte ziehe ChartHorizon manuell in den Programme-Ordner.\n\n{e}",
+                       ["OK"])
+        except Exception:
+            pass
+
+
 def serve(open_browser=True):
     """Startet den Webserver und öffnet den Browser (außer open_browser=False —
     für den nächtlichen Content-Bot-Lauf, der nur die HTTP-API headless braucht)."""
@@ -753,6 +913,14 @@ def serve(open_browser=True):
     print(f"  Dashboard geöffnet:  {url}")
     print("  Zum Beenden:  Strg + C  (Ctrl + C)")
     print("═" * 60 + "\n")
+
+    # The clickable macOS .app must serve from a Cocoa loop so re-opening it (Dock
+    # click or double-click) reopens the browser tab. Without it the .app is a
+    # window-less resident server: LaunchServices routes every later click to the
+    # already-running instance, which does nothing — so it "opens only once".
+    if open_browser and _should_run_mac_app():
+        _serve_with_mac_app(httpd, url)
+        return
 
     # Browser nach kurzer Verzögerung öffnen (nicht im headless/Bot-Modus).
     if open_browser:
@@ -799,6 +967,13 @@ def main():
         import commodity_dashboard as cd
         data = cd.gather_commodity_data(count=6)
         cd.generate_html(data)
+        return
+
+    # Quarantined DMG/Download launches run via macOS App-Translocation from a
+    # read-only ephemeral mount; when it disappears mid-run the mmap'd binary faults
+    # (SIGBUS). Offer to move into /Applications and relaunch from there first.
+    if FROZEN and sys.platform == "darwin" and _running_from_unsafe_location():
+        _relocate_from_unsafe_location()
         return
 
     check_python()

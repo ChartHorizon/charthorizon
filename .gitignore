@@ -53,3 +53,6 @@ build/
 
 # Playwright MCP-Server Artefakte (Screenshots/Snapshots bei Browser-Checks)
 .playwright-mcp/
+
+# Download-Zähler-Verlauf (lokale Statistik, wie logs/)
+tools/download-stats.csv
