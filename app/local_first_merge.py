@@ -51,6 +51,7 @@ __all__ = [
     '_OI_SOURCE_PRIORITY',
     '_VOLUME_SOURCE_PRIORITY',
     '_cached_contract_volume_series',
+    '_choose_fresh_or_previous_contracts',
     '_choose_fresh_or_previous_series',
     '_history_looks_worse',
     '_is_yfinance_volume_source',
@@ -218,6 +219,36 @@ def _choose_fresh_or_previous_series(fresh_rows, previous_rows, *, kind):
         "fresh": fresh_health,
         "previous": previous_health,
     }
+
+
+def _choose_fresh_or_previous_contracts(fresh_contracts, previous_contracts):
+    """Per-contract local-first merge: when a fresh Yahoo quote failed for a
+    contract (available=False), reuse that same yf_symbol's last known-good
+    quote (last/change/volume/open_interest) from the previous refresh instead
+    of leaving it null. Mirrors _choose_fresh_or_previous_series, which already
+    protects price/seasonal history the same way — a transient/partial yfinance
+    outage must not wipe contract volume, which frontContractIndex() (chart.js)
+    needs to keep the FRONT-month pick on the actively-traded contract instead
+    of falling back to the nearest-by-calendar contract.
+    """
+    previous_by_symbol = {
+        c.get("yf_symbol"): c for c in (previous_contracts or []) if c.get("yf_symbol")
+    }
+    merged = []
+    for c in fresh_contracts or []:
+        if c.get("available") or not c.get("yf_symbol"):
+            merged.append(c)
+            continue
+        prev = previous_by_symbol.get(c["yf_symbol"])
+        if not prev or not prev.get("available"):
+            merged.append(c)
+            continue
+        out = dict(c)
+        for field in ("last", "change", "change_pct", "volume", "open_interest", "available"):
+            out[field] = prev.get(field)
+        out["source"] = "previous_local_store"
+        merged.append(out)
+    return merged
 
 
 def _oi_series_from_cot(cot_series):

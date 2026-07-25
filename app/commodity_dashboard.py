@@ -248,6 +248,13 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         for private_key in SPEC_PRIVATE_KEYS:
             spec.pop(private_key, None)
         previous_payload = existing_payloads.get(key, {})
+        contracts = _choose_fresh_or_previous_contracts(
+            entry["contracts"], previous_payload.get("contracts"))
+        reused_contracts = sum(1 for c in contracts if c.get("source") == "previous_local_store")
+        if reused_contracts:
+            plural = "s" if reused_contracts != 1 else ""
+            print(f"   · {cfg['display_name']}: {reused_contracts} contract quote{plural} "
+                  f"reused from previous refresh (fresh Yahoo quote unavailable)")
         existing_series = [
             row for row in (previous_payload.get("daily_oi_series") or [])
             if row.get("source") == "cftc_cot"
@@ -383,7 +390,7 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
             "currency": cfg["currency"],
             "unit": cfg["unit"],
             "tick_decimals": cfg["tick_decimals"],
-            "contracts": entry["contracts"],
+            "contracts": contracts,
             "continuous_contract": continuous,
             "daily_oi_series": daily_oi_series,
             "calendar_spread_series": calendar_spread_series,

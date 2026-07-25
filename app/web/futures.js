@@ -185,6 +185,12 @@ async function switchCommodity(key) {
     if ((front.chart_history || []).length) {
       // Front history already cached → render the front month immediately.
       await selectCurveContract(frontIdx, true);
+    } else if (document.body.classList.contains('card-mode')) {
+      // Card-Mode (Bot-PNG-Export, ?card=): KEIN Instant-Paint + Hintergrund-Swap — das
+      // Chart-SVG darf erst existieren, wenn der Front-Month steht, sonst friert der
+      // Exporter-Screenshot die Continuous-Serie ein (Race). Fetch-Fehler → bestehender
+      // Continuous-Fallback via fallbackToContinuous=true (ehrlicher Degrade).
+      await selectCurveContract(frontIdx, true);
     } else {
       // Instant first paint from the continuous series (already in the category JSON, no
       // fetch); load the front contract in the background and swap to it when ready.
