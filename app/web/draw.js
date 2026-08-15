@@ -53,7 +53,10 @@ function fibLevelObjs(d) {
 
 // Active tool + current selection. Tool changes do NOT trigger a chart rebuild on their
 // own (setDrawTool repaints when needed); the mousedown handler reads drawState.tool live.
-let drawState = { tool: 'cursor', selectedId: null, magnet: true, objTree: false, symbol: { sym: 'arrowup' } };
+// toolBeforeCrosshair: the tool the middle-mouse crosshair toggle (chart.js) displaced, so
+// the next middle-click puts it back. It lives here, not in a render closure, because the
+// tool switch rebuilds the chart and takes any closure state with it.
+let drawState = { tool: 'cursor', selectedId: null, magnet: true, objTree: false, symbol: { sym: 'arrowup' }, toolBeforeCrosshair: null };
 
 // ── small helpers (make/clamp are local to chart.js's bindChartCrosshair, not global) ──
 function svgEl(name, attrs) {

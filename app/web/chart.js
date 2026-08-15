@@ -1056,11 +1056,11 @@ function bindChartCrosshair(wrap, cfg) {
     dot.setAttribute('cy', point.y.toFixed(1));
     if (color) dot.setAttribute('fill', color);
   }
-  // Middle-mouse toggle: the middle button flips the inspection crosshair on/off and the
-  // choice sticks as a manual override. Default (override null) follows the tool — off under
-  // the Charts-tab Cursor tool (a plain arrow for selecting/moving drawings), on for every
-  // other tool and on the Futures tab (no palette). The override wins over that default, so
-  // you can summon the crosshair even while the Cursor tool is active, and dismiss it again.
+  // Middle-mouse toggle. On the Charts tab it switches the actual Crosshair TOOL (see
+  // toggleCrosshair below) — a cosmetic-only override there would summon a crosshair you
+  // cannot measure with, since measureStart is gated on the tool. This override therefore
+  // only serves the Futures tab (no palette, drawingsActive false): null = follow the tool
+  // default (crosshair on), true/false = manual on/off.
   let crosshairOverride = null;   // null = follow tool default; true/false = manual on/off
   function crosshairShouldShow() {
     const cursorTool = cfg.drawingsActive && typeof drawState !== 'undefined' && drawState.tool === 'cursor';
@@ -1181,9 +1181,28 @@ function bindChartCrosshair(wrap, cfg) {
 
   // Middle mouse button toggles the crosshair on/off. preventDefault on the press
   // suppresses the browser's middle-click autoscroll; auxclick is muted for the same reason.
+  //
+  // Charts tab (palette present): flip the real Crosshair TOOL, remembering the tool it
+  // replaced so the next middle-click restores it. Toggling only the visual layer here would
+  // hand back a crosshair that cannot measure — measureStart requires tool === 'crosshair'.
+  // setDrawTool rebuilds the chart, so this closure's nodes die with it: re-arm the crosshair
+  // by replaying the pointer position onto the FRESH hit-zone, then get out.
+  // Futures tab (no palette): no tool to switch — keep the plain show/hide override.
   function toggleCrosshair(evt) {
     if (evt.button !== 1) return;   // middle button only
     evt.preventDefault();
+    if (cfg.drawingsActive && typeof drawState !== 'undefined' && typeof setDrawTool === 'function') {
+      const wasCrosshair = drawState.tool === 'crosshair';
+      const next = wasCrosshair ? (drawState.toolBeforeCrosshair || 'cursor') : 'crosshair';
+      drawState.toolBeforeCrosshair = wasCrosshair ? null : drawState.tool;
+      const host = wrap.parentElement;   // survives the repaint (only its innerHTML is swapped)
+      setDrawTool(next);
+      const fresh = host && host.querySelector('.chart-crosshair-hit');
+      if (fresh) fresh.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: evt.clientX, clientY: evt.clientY, bubbles: true,
+      }));
+      return;
+    }
     crosshairOverride = !crosshairShouldShow();   // flip the current effective state, then lock it
     if (crosshairOverride) update(evt); else hide();
   }

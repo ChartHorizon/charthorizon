@@ -4,6 +4,10 @@
 seasonality, a conviction screener, and an FX-strength heatmap — rendered in your
 browser, running entirely on your machine. No account. No cloud. Bring your own data.
 
+[Website](https://chart-horizon.com/dashboard/) ·
+[Weekly notes](https://chart-horizon.com/) ·
+[FX strength map](https://chart-horizon.com/fx/)
+
 ## Download
 
 Unsigned installers for the latest release:
@@ -39,6 +43,18 @@ The builds are **unsigned**, so the first launch takes one manual step:
 ChartHorizon ships with **no data**. On first launch it fetches end-of-day data to a
 per-user folder on your machine and renders it locally. It runs a small web server on
 `localhost` and opens your browser — nothing leaves your computer.
+
+## The same board, in writing
+
+The desk that builds this reads the board every evening and writes up the markets worth
+remarking on — same data, same signals, nothing to buy and no account to make.
+
+- **[The Weekly Tape](https://chart-horizon.com/)** — weekly futures positioning notes
+- **[The Hedgers' Ledger](https://chart-horizon.com/archive/)** — where the commercial
+  hedgers sit against their three-year range, from each week's CFTC Commitments of
+  Traders report
+- **[FX Strength Map](https://chart-horizon.com/fx/)** — the daily currency-strength
+  board this dashboard computes, published as it is computed
 
 ## License
 
