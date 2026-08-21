@@ -43,6 +43,8 @@ __all__ = [
     'MONTH_CODES',
     'MONTH_NAMES',
     'SPREAD_MAX_GAP_DAYS',
+    'SPREAD_MIN_PAIR_POINTS',
+    'SPREAD_ROLL_CONFIRM_DAYS',
     'SPREAD_SPIKE_REVERT_PCT',
     'YF_CONTRACT_LOOKAHEAD',
     'YF_EOD_BOARD_SETTLE_MIN_RATIO',
@@ -108,6 +110,8 @@ REFRESH_FETCH_WORKERS = 4  # parallel yfinance fetches during a board refresh; c
                            # margin under rate limits. Set to 1 to force the sequential path.
 SPREAD_SPIKE_REVERT_PCT = 0.02       # drop a one-day calendar-spread value that spikes >this fraction of the front price and reverts next day
 SPREAD_MAX_GAP_DAYS = 7              # keep only the most recent calendar-spread run without a gap larger than this (drops the sparse older backfill; Yahoo only serves the current contracts)
+SPREAD_MIN_PAIR_POINTS = 10   # below this many points the current front/next pair is a blank pane, so ONE preceding pair is kept for context (consumers break the line at the pair change)
+SPREAD_ROLL_CONFIRM_DAYS = 2  # a higher volume lead becomes the spread's front only after holding this many sessions; mid-roll the two nearest months flip back and forth daily
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -312,7 +316,7 @@ COMMODITIES = {
         "cftc_code": "111659",
         "yf_continuous": "RB=F",
     },
-    # ── Softs: Cotton, OJ, Cocoa, Lumber ──
+    # ── Softs: Cotton, OJ, Cocoa ──
     "cotton": {
         "display_name": "Cotton #2",
         "category": "Softs",
@@ -351,19 +355,6 @@ COMMODITIES = {
         "contract_months": [3, 5, 7, 9, 12],  # H K N U Z
         "cftc_code": "073732",
         "yf_continuous": "CC=F",
-    },
-    "lumber": {
-        "display_name": "Lumber",
-        "category": "Softs",
-        "tv_symbol": "CME:LBR1!",
-        "yf_root": "LBR",
-        "yf_exchange": "CME",
-        "currency": "USD",
-        "unit": "1000 board ft",
-        "tick_decimals": 2,
-        "contract_months": [1, 3, 5, 7, 9, 11],  # F H K N U X
-        "cftc_code": "058644",
-        "yf_continuous": "LBR=F",
     },
     # ── Livestock / Dairy ──
     "live_cattle": {
@@ -856,17 +847,6 @@ CONTRACT_SPECS = {
         "source_url": "https://www.ice.com/products/7/Cocoa-Futures",
         "expiry_rule": {"kind": "nth_last_bd_of_delivery", "params": {"n": 11}},
         "hours_session": {"start": "04:45", "end": "13:30", "tz": "America/New_York", "note": "ICE New York"},
-    },
-    "lumber": {
-        "exchange": "CME",
-        "tick": "$0.50 per 1000 bf = $55.00 per contract",
-        "contract_size": "27,500 board feet",
-        "expiration": "Business day before the 16th calendar day of the delivery month",
-        "trading_hours": "CME Globex: Mon-Fri 10:00-14:55 ET",
-        "source": "CME",
-        "source_url": "https://www.cmegroup.com/markets/agriculture/lumber-and-softs/lumber.contractSpecs.html",
-        "expiry_rule": {"kind": "bd_before_15th_of_delivery", "params": {}},
-        "hours_session": {"start": "09:00", "end": "13:55", "tz": "America/Chicago", "note": "CME Globex"},
     },
     "live_cattle": {
         "exchange": "CME",

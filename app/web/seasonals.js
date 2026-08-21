@@ -194,13 +194,17 @@ function renderSeasonalChart(cfg, history) {
   let currentDateSvg = '';
   if (today) {
     const x = xAt(today.dayIndex);
+    // Theme-aware: a near-black hairline vanished on the dark chart ground.
+    const markerDark = currentTheme() === 'dark';
+    const markerStroke = markerDark ? CHART_THEME.text : '#0f172a';
+    const markerOpacity = markerDark ? 0.55 : 0.28;
     const label = 'Today';
     const title = `Today · ${today.label}`;
     const labelW = Math.max(42, label.length * 5.2 + 10);
     const labelX = Math.max(padL, Math.min(W - padR - labelW, x - labelW / 2));
     const labelY = H - padB + 4;
     currentDateSvg = `<g class="seasonal-current-date"><title>${esc(title)}</title>
-      <line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="#0f172a" stroke-width="1" stroke-dasharray="3,5" opacity="0.28"/>
+      <line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="${markerStroke}" stroke-width="1" stroke-dasharray="3,5" opacity="${markerOpacity}"/>
       <rect x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" width="${labelW.toFixed(1)}" height="14" rx="3" fill="#fde68a" stroke="#f59e0b" opacity="1"/>
       <text x="${(labelX + labelW / 2).toFixed(1)}" y="${(labelY + 10).toFixed(1)}" font-size="8.5" fill="#334155" font-family="Geist" font-weight="600" text-anchor="middle">${esc(label)}</text>
     </g>`;

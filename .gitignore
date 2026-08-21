@@ -54,5 +54,7 @@ build/
 # Playwright MCP-Server Artefakte (Screenshots/Snapshots bei Browser-Checks)
 .playwright-mcp/
 
-# Download-Zähler-Verlauf (lokale Statistik, wie logs/)
+# Download-Zähler-Verlauf (lokale Statistik, wie logs/): download-stats.csv ist die
+# eingefrorene GitHub-Ära, download-hits.csv der laufende Cloudflare-Verlauf.
 tools/download-stats.csv
+tools/download-hits.csv

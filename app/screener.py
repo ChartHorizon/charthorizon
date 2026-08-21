@@ -35,6 +35,7 @@ except ImportError:
     PdfReader = None
 
 # ---- cross-module dependencies (from the lower layers) ----
+from series_utils import _coerce_iso_date
 from local_first_merge import _slug
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     'SEASONAL_MIN_RUN_DAYS',
     'SEASONAL_WINDOWS',
     'SEASONAL_WINDOW_DAYS',
+    'SPREAD_SIGNAL_MAX_LAG_DAYS',
     '_cot_net',
     '_screener_cot_hedge_signal',
     '_screener_cot_signal',
@@ -67,7 +69,9 @@ __all__ = [
 #   - seasonal:  3-of-4 confirmation (of the four 5/10/15Y+max curves at least three share a direction, none opposes), read over a short trailing window [today-SEASONAL_WINDOW_DAYS, today] so a season active now OR within the last few days still counts; else neutral
 #   - cot:       latest net position sign (>=0 long = bullish)        [plain COT pane]
 #   - cot_hedge: latest net vs midpoint of the trailing 12M window    [COT Hedging Program]
-#   - structure: front contract last > next contract last = premium (backwardation)
+#   - structure: front contract > next contract = premium (backwardation) — read off the
+#                same calendar_spread_series the chart pane draws (volume-led front),
+#                with the nearest priced contract pair as fallback
 # ─────────────────────────────────────────────────────────────────────
 def _screener_doy(dstr):
     """Day-of-year ignoring Feb 29 (mirrors the frontend dayOfYearNoLeap)."""
@@ -118,6 +122,13 @@ SEASONAL_MAX_WINDOW = 100   # 'max' curve: large enough to use every available y
 #     motivating keep-alive case.
 SEASONAL_MIN_RUN_DAYS = 3   # a raw run must hold >= this many days to count as real (flicker filter)
 SEASONAL_WINDOW_DAYS = 3
+
+# The structure signal reads the calendar spread only while it keeps pace with the price
+# history: at most this many days between the last spread point and the market's latest
+# bar. Wide enough for a holiday weekend plus a missed refresh, narrow enough that a
+# series which stopped (trimmed by the trailing-contiguity pass) hands over to the
+# nearest-contract fallback instead of freezing a stale reading.
+SPREAD_SIGNAL_MAX_LAG_DAYS = 7
 
 
 def _seasonal_window_curve(rows, years, latest_full):
@@ -430,16 +441,41 @@ def _screener_cot_hedge_signal(cot_series, days=182):
     return "bullish" if window[-1] >= midpoint else "bearish"
 
 
-def _screener_structure_signal(contracts):
-    """Term structure = the nearest two contracts that both carry a live `last`.
+def _screener_structure_signal(contracts, spread_series=None, as_of=None):
+    """Term structure: premium (backwardation) when the front trades over the next month.
 
-    Robustness fallback: Yahoo sometimes drops the quote for a thinly-traded deferred
-    contract (e.g. the US Dollar Index next month DXU…, which trades at a fraction of
-    the front's volume). Comparing only contracts[0] vs contracts[1] would then return
-    None and silently drop the market out of the 4/4 filter. Instead we compare the
-    first two contracts that actually have a `last`, so the signal degrades to the next
-    available deferred month rather than disappearing. Non-quoted far months carry
-    last=None and are skipped, so no stale far-deferred print can leak in."""
+    Primary source is the market's own `calendar_spread_series` — the very series the
+    calendar-spread pane draws, whose front leg is the volume-led lead contract. Reading
+    the signal off it keeps the screener, the chart and the chartbot's historical
+    reconstruction (`content/chartbot/backfill.py`) on ONE definition of "front"; the
+    nearest-expiry pair below disagrees with it whenever liquidity has rolled forward
+    (e.g. soybean oil / live cattle in Aug 2026).
+
+    `as_of` is the market's own latest price date: the spread only counts while it keeps
+    up with the price history (SPREAD_SIGNAL_MAX_LAG_DAYS), so a series that stopped —
+    trimmed by the trailing-contiguity pass, or missing entirely — hands over instead of
+    freezing an old reading.
+
+    Fallback = the nearest two contracts that both carry a live `last`. Yahoo sometimes
+    drops the quote for a thinly-traded deferred contract (e.g. the US Dollar Index next
+    month DXU…, which trades at a fraction of the front's volume). Comparing only
+    contracts[0] vs contracts[1] would then return None and silently drop the market out
+    of the 4/4 filter, so the signal degrades to the next available deferred month rather
+    than disappearing. Non-quoted far months carry last=None and are skipped, so no stale
+    far-deferred print can leak in."""
+    last_point = None
+    for row in reversed(spread_series or []):
+        if row and row.get("spread") is not None:
+            last_point = row
+            break
+    if last_point is not None:
+        spread_day = _coerce_iso_date(str(last_point.get("date"))[:10])
+        ref_day = _coerce_iso_date(str(as_of)[:10]) if as_of else None
+        fresh = (spread_day is not None and ref_day is not None
+                 and (ref_day - spread_day).days <= SPREAD_SIGNAL_MAX_LAG_DAYS)
+        if fresh:
+            return "premium" if float(last_point["spread"]) > 0 else "discount"
+
     if not contracts:
         return None
     priced = [c.get("last") for c in contracts if c.get("last") is not None]
@@ -461,6 +497,10 @@ def build_screener_summary(by_cat):
             # signal and the event (both otherwise rebuild them from scratch).
             seasonal_history = cc.get("seasonal_history") or []
             seasonal_curves = _seasonal_distinct_curves(seasonal_history)
+            # Latest settled bar of this market — the reference the structure signal
+            # measures the calendar spread's lag against (see _screener_structure_signal).
+            history = cc.get("history") or []
+            latest_bar_date = history[-1].get("date") if history else None
             out.append({
                 "key": key,
                 "display_name": mk.get("display_name"),
@@ -471,7 +511,11 @@ def build_screener_summary(by_cat):
                 "seasonal": _screener_seasonal_signal(seasonal_history, curves=seasonal_curves),
                 "cot": _screener_cot_signal(mk.get("cot_series") or []),
                 "cot_hedge": _screener_cot_hedge_signal(mk.get("cot_series") or []),
-                "structure": _screener_structure_signal(contracts),
+                "structure": _screener_structure_signal(
+                    contracts,
+                    spread_series=mk.get("calendar_spread_series") or [],
+                    as_of=latest_bar_date,
+                ),
                 "seasonal_event": _screener_seasonal_event(seasonal_history, curves=seasonal_curves),
             })
     return out

@@ -965,13 +965,18 @@ function wkDrawChart(el) {
     const zeroYraw = spreadY(0);
     const zeroY = Math.max(spreadTop, Math.min(spreadTop + spreadH, zeroYraw));
     const zeroPinned = zeroYraw !== zeroY;
-    const pts = spreadSeries.map(d => ({ date: d.date, x: xForDate(d.date), y: spreadY(d.spread) })).sort((a, b) => a.x - b.x);
-    let spPath = '', prevTime = null;
+    const pts = spreadSeries.map(d => ({
+      date: d.date, x: xForDate(d.date), y: spreadY(d.spread),
+      pair: `${d.front_contract || ''}-${d.next_contract || ''}`
+    })).sort((a, b) => a.x - b.x);
+    // Same two breaks as the Futures pane (chart.js): a >7-day gap, and a change of
+    // contract pair — the step across a roll is not a move in the spread.
+    let spPath = '', prevTime = null, prevPair = null;
     pts.forEach((p, i) => {
       const t = new Date(p.date).getTime();
-      const brk = prevTime !== null && (t - prevTime) > 7 * 864e5;
+      const brk = prevTime !== null && ((t - prevTime) > 7 * 864e5 || p.pair !== prevPair);
       spPath += (i === 0 || brk ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ' ';
-      prevTime = t;
+      prevTime = t; prevPair = p.pair;
     });
     const spDots = pts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.6" fill="${CHART_THEME.spread}" opacity="0.5"/>`).join('');
     spreadSvg = `<line x1="${padL}" y1="${spreadTop}" x2="${W - padR}" y2="${spreadTop}" stroke="${CHART_THEME.grid}"/>`

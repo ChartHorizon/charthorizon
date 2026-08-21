@@ -89,12 +89,21 @@ class CircuitBreakerTest(unittest.TestCase):
         self.assertEqual(br.retry_after(), 90)
 
 
+# The cache's public quote shape (`LiveQuoteCache._QUOTE_FIELDS`): `day`/`price` are
+# always present, `open`/`high`/`low` carry the still-forming bar's intraday OHLC so the
+# overlay can draw a real live candle. Every get() returns exactly these five keys —
+# short rows are padded with None, unknown keys are dropped — which is why the tests
+# below compare whole dicts instead of picking fields out.
+QUOTE = {"day": "2026-06-10", "price": 100.0, "open": 98.5, "high": 100.75, "low": 98.25}
+EMPTY = {"day": None, "price": None, "open": None, "high": None, "low": None}
+
+
 class RecordingFetch:
     """fetch_fn double: returns a canned row and records calls. mode switches behavior:
     'ok' | 'ratelimit' (raise RateLimitedError) | 'error' (raise RuntimeError) |
     'empty' (return a None row)."""
     def __init__(self, row=None):
-        self.row = row if row is not None else {"day": "2026-06-10", "price": 100.0}
+        self.row = dict(row) if row is not None else dict(QUOTE)
         self.calls = []
         self.mode = "ok"
     def __call__(self, symbol):
@@ -118,15 +127,32 @@ class LiveQuoteCacheTest(unittest.TestCase):
     def test_cold_triggers_one_fetch(self):
         clk = FakeClock(); fetch = RecordingFetch()
         c = self._cache(fetch, clk)
-        self.assertEqual(c.get("CL=F"), {"day": "2026-06-10", "price": 100.0})
+        self.assertEqual(c.get("CL=F"), QUOTE)
         self.assertEqual(fetch.calls, ["CL=F"])
+
+    def test_short_row_is_padded_to_the_quote_shape(self):
+        # A fetch_fn that reports no intraday OHLC (or an older two-field one) must still
+        # produce the full quote shape, so callers can read q["open"] without a guard.
+        clk = FakeClock(); fetch = RecordingFetch({"day": "2026-06-10", "price": 100.0})
+        c = self._cache(fetch, clk)
+        self.assertEqual(c.get("CL=F"),
+                         {"day": "2026-06-10", "price": 100.0,
+                          "open": None, "high": None, "low": None})
+
+    def test_unknown_fetch_keys_are_dropped(self):
+        # The quote is a fixed contract, not a passthrough: whatever else a fetch_fn
+        # carries (here the entry's internal `ts` twin) must not reach the client.
+        clk = FakeClock()
+        fetch = RecordingFetch(dict(QUOTE, volume=12345, ts=999.0))
+        c = self._cache(fetch, clk)
+        self.assertEqual(c.get("CL=F"), QUOTE)
 
     def test_within_ttl_served_from_cache(self):
         clk = FakeClock(); fetch = RecordingFetch()
         c = self._cache(fetch, clk)
         c.get("CL=F")
         clk.advance(19.0)
-        c.get("CL=F")
+        self.assertEqual(c.get("CL=F"), QUOTE)           # cached view keeps the OHLC
         self.assertEqual(fetch.calls, ["CL=F"])          # only one fetch within the TTL
 
     def test_after_ttl_refetches(self):
@@ -144,14 +170,14 @@ class LiveQuoteCacheTest(unittest.TestCase):
         clk.advance(21.0)
         fetch.mode = "ratelimit"
         out = c.get("CL=F")
-        self.assertEqual(out, {"day": "2026-06-10", "price": 100.0})   # last-known
+        self.assertEqual(out, QUOTE)                     # last-known, OHLC included
         self.assertTrue(c.cooldown_active())
         self.assertGreater(c.retry_after(), 0)
 
     def test_cold_rate_limit_returns_empty(self):
         clk = FakeClock(); fetch = RecordingFetch(); fetch.mode = "ratelimit"
         c = self._cache(fetch, clk)
-        self.assertEqual(c.get("CL=F"), {"day": None, "price": None})
+        self.assertEqual(c.get("CL=F"), EMPTY)
 
     def test_no_fetch_while_breaker_open(self):
         clk = FakeClock(); fetch = RecordingFetch()
@@ -171,7 +197,7 @@ class LiveQuoteCacheTest(unittest.TestCase):
         c.get("CL=F")                                    # consumes the only token, warms cache
         clk.advance(21.0)                                # cache stale; bucket never refills
         out = c.get("CL=F")
-        self.assertEqual(out, {"day": "2026-06-10", "price": 100.0})   # last-known, no fetch
+        self.assertEqual(out, QUOTE)                     # last-known, no fetch
         self.assertEqual(len(fetch.calls), 1)
 
     def test_empty_row_serves_last_known(self):
@@ -179,7 +205,7 @@ class LiveQuoteCacheTest(unittest.TestCase):
         c = self._cache(fetch, clk)
         c.get("CL=F"); clk.advance(21.0)
         fetch.mode = "empty"
-        self.assertEqual(c.get("CL=F"), {"day": "2026-06-10", "price": 100.0})
+        self.assertEqual(c.get("CL=F"), QUOTE)
 
     def test_get_many(self):
         clk = FakeClock(); fetch = RecordingFetch()
@@ -193,7 +219,7 @@ class LiveQuoteCacheTest(unittest.TestCase):
         gate = _th.Event()
         started = _th.Semaphore(0)
         calls, calls_lock = [], _th.Lock()
-        row = {"day": "2026-06-10", "price": 100.0}
+        row = dict(QUOTE)
         def slow_fetch(symbol):
             with calls_lock:
                 calls.append(symbol)
@@ -216,7 +242,7 @@ class LiveQuoteCacheTest(unittest.TestCase):
             t.join(2.0)
         self.assertEqual(len(calls), 1)                  # single-flight: one fetch for five callers
         self.assertEqual(len(results), 5)
-        self.assertTrue(all(r == row for r in results))
+        self.assertTrue(all(r == QUOTE for r in results))
 
 
 if __name__ == "__main__":

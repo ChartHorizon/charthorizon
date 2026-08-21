@@ -1908,15 +1908,19 @@ function loadChart(cfg, opts = {}) {
       const zeroY = Math.max(spreadTop, Math.min(spreadTop + spreadH, zeroYraw));
       const zeroPinned = zeroYraw !== zeroY;
       crosshairSpreadPoints = spreadSeries.map(d => ({
-        date: d.date, x: xForDate(d.date), y: spreadY(d.spread), value: d.spread
+        date: d.date, x: xForDate(d.date), y: spreadY(d.spread), value: d.spread,
+        pair: `${d.front_contract || ''}-${d.next_contract || ''}`
       })).sort((a, b) => a.x - b.x);
-      // Break the line across gaps (>7 days) so missing days aren't bridged.
-      let spPath = '', prevTime = null;
+      // Break the line across gaps (>7 days) so missing days aren't bridged, and at a
+      // change of contract pair: right after a roll the generator keeps one preceding
+      // pair for context (SPREAD_MIN_PAIR_POINTS), and connecting the two would draw
+      // the step between two different horizons as a move in the spread.
+      let spPath = '', prevTime = null, prevPair = null;
       crosshairSpreadPoints.forEach((p, i) => {
         const t = new Date(p.date).getTime();
-        const brk = prevTime !== null && (t - prevTime) > 7 * 864e5;
+        const brk = prevTime !== null && ((t - prevTime) > 7 * 864e5 || p.pair !== prevPair);
         spPath += (i === 0 || brk ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ' ';
-        prevTime = t;
+        prevTime = t; prevPair = p.pair;
       });
       const spDots = crosshairSpreadPoints.map(p =>
         `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.6" fill="${CHART_THEME.spread}" opacity="0.5"/>`).join('');

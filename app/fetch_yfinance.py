@@ -3,6 +3,7 @@
 Split out of commodity_dashboard.py — see CLAUDE.md "Architecture".
 """
 
+import bisect
 import logging
 import os
 import csv
@@ -41,6 +42,8 @@ except ImportError:
 # ---- cross-module dependencies (from the lower layers) ----
 from market_config import (
     SPREAD_MAX_GAP_DAYS,
+    SPREAD_MIN_PAIR_POINTS,
+    SPREAD_ROLL_CONFIRM_DAYS,
     SPREAD_SPIKE_REVERT_PCT,
     YF_CONTRACT_LOOKAHEAD,
     YF_LIQUID_ACTIVE_DAYS_AFTER_EXPIRY,
@@ -71,14 +74,18 @@ __all__ = [
     '_cached_seasonal_last_year',
     '_clean_contract_history_row',
     '_contract_is_active_for_day',
+    '_contract_is_pre_active_for_day',
     '_drop_spike_revert_outliers',
     '_drop_spread_spike_reverts',
     '_existing_seasonal_years',
     '_expiry_sort_value',
     '_history_row_looks_tradable',
     '_should_refresh_seasonal',
+    '_spread_pair',
+    '_stabilised_front_chain',
     '_total_volume_rows_from_by_date',
     '_trailing_contiguous_spread',
+    '_trailing_same_pair_spread',
     '_yf_client',
     'build_calendar_spread_series',
     'build_continuous_contract',
@@ -437,6 +444,24 @@ def _contract_is_active_for_day(contract, day):
     return True
 
 
+def _contract_is_pre_active_for_day(contract, day):
+    """True for a row that is only *too early* for the activity window (not expired).
+
+    These deferred rows are deliberately kept out of the volume-led selection (see
+    `_contract_is_active_for_day`), but the calendar spread needs them as a possible
+    NEXT leg: the month following the lead contract is regularly more than
+    `YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY` away from its own expiry (e.g. with gold's
+    lead at GCZ26, the next tradable month GCG27 only enters the window a week before
+    GCQ26 dies). Without them the spread has nothing to pair the lead against and falls
+    back to the nearest, dying expiry.
+    """
+    exp = _coerce_iso_date(contract.get("expiry"))
+    row_day = _coerce_iso_date(day)
+    if not exp or not row_day:
+        return False
+    return row_day < exp - timedelta(days=YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY)
+
+
 def _total_volume_rows_from_by_date(by_date, method):
     out = []
     for day in sorted(by_date):
@@ -495,7 +520,71 @@ def _trailing_contiguous_spread(rows, max_gap_days=SPREAD_MAX_GAP_DAYS):
     return rows[start:]
 
 
-def build_calendar_spread_series(candidates_by_date):
+def _stabilised_front_chain(day_leads, confirm_days=SPREAD_ROLL_CONFIRM_DAYS):
+    """Turn the raw per-day volume lead into a front that rolls once, forward only.
+
+    Mid-roll the two nearest months trade almost equally, and the lead flips back and
+    forth between them on consecutive sessions — brent printed
+    X26 / V26x8 / X26 / V26x2 / X26 over two weeks. Taken literally that is five front
+    changes, which chops the pane (which shows one contract pair) into one- and two-day
+    slivers. So a higher lead is adopted only when it HOLDS for `confirm_days` sessions,
+    and the front never moves back to an earlier month: a real roll is one-way.
+
+    `day_leads` is [(day, chain_index), …] in date order; returns {day: chain_index}.
+    A lone forward print therefore costs nothing, where a plain ratchet would have
+    latched onto brent's stray 2026-08-05 X26 print and held it for the next eight
+    sessions in which V26 was clearly the traded month.
+    """
+    out, current = {}, None
+    for i, (day, lead) in enumerate(day_leads):
+        if current is None:
+            current = lead
+        elif lead > current:
+            window = [l for _, l in day_leads[i:i + confirm_days]]
+            if len(window) == confirm_days and all(l >= lead for l in window):
+                current = lead
+        out[day] = current
+    return out
+
+
+def _spread_pair(row):
+    return (row.get("front_contract"), row.get("next_contract"))
+
+
+def _trailing_same_pair_spread(rows, min_points=SPREAD_MIN_PAIR_POINTS):
+    """Keep the trailing run that measures the CURRENT front/next pair.
+
+    A spliced series is not one indicator: each roll swaps in a different pair, and with
+    it a different horizon, so the line steps to a new level for reasons that have
+    nothing to do with the market (euro's Mar-Sep pair sat near -0.011 while the
+    current Sep-Dec pair trades near -0.004). Plotted together the older segments own
+    the y-axis and flatten the spread the reader is actually looking at. So the pane
+    shows the spread of the pair that trades TODAY, starting on the day that pair
+    became front/next.
+
+    The day after a roll that pair has one point, which is a blank pane rather than an
+    honest one — on 2026-08-21 four markets sat there at once. So while the current run
+    is shorter than `min_points`, ONE preceding pair comes along for context (never
+    more: the point is a readable pane, not a spliced history). Consumers must break
+    the line where the pair changes — `chart.js` and `screener.js` start a new path
+    segment there — so the roll step is never drawn as a move in the spread.
+    """
+    if not rows:
+        return rows
+    pair = _spread_pair(rows[-1])
+    start = len(rows) - 1
+    while start > 0 and _spread_pair(rows[start - 1]) == pair:
+        start -= 1
+    if len(rows) - start >= min_points or start == 0:
+        return rows[start:]
+    prev_pair = _spread_pair(rows[start - 1])
+    prev_start = start - 1
+    while prev_start > 0 and _spread_pair(rows[prev_start - 1]) == prev_pair:
+        prev_start -= 1
+    return rows[prev_start:]
+
+
+def build_calendar_spread_series(candidates_by_date, deferred_by_date=None):
     """Front-minus-next calendar spread per day (negative = contango).
 
     Front = the LEAD contract that day — the one carrying the most reported volume —
@@ -505,36 +594,95 @@ def build_calendar_spread_series(candidates_by_date):
     month can be nearly dead (e.g. mid-June gold trades August, not June) and a
     nearest-expiry front would measure an illiquid, stale leg.
 
-    The spread is computed for EVERY day on which both the lead month and a following
-    month exist — liquidity is deliberately NOT gated past picking the lead. When no leg
-    reports positive volume (thinly-traded deferred months on Yahoo — BTC monthly, USD
-    Index), the front falls back to the nearest expiry so the spread never goes missing.
-    `legs` is expiry-sorted, so ties in volume break toward the nearer expiry, and a
-    spurious far-month volume print can at worst drop that one day (no "next" beyond it),
-    never strand the series on a far contract. Real settled closes only (no synthetic
-    fill); a spike-revert pass drops single bad prints and a trailing-contiguity pass
-    keeps the most recent gap-free run.
+    `deferred_by_date` maps a day to its NEAREST month still outside the volume-led
+    activity window (`_contract_is_pre_active_for_day`) and supplies the NEXT leg when the
+    lead is the farthest *active* month. That is the normal case, not an edge case: with gold's
+    lead at GCZ26 the following month GCG27 sits ~190 days from its own expiry and is not
+    an active candidate yet, so without the deferred pool the spread used to drop back
+    onto the dying GCQ26 (1.3k lots) instead of the 250k-lot lead. Deferred rows are only
+    ever the next leg — never the front — so the volume-led front stands unchanged.
+
+    ONE active leg is therefore enough. Widely spaced contract months can put every other
+    month outside the window permanently: sugar trades Mar/May/Jul/Oct, so the step from
+    SBV26 (expiry Sep 30) to SBH27 (Feb 26) is five months and the market never has two
+    active legs on the same day — it had no spread series AT ALL until the deferred month
+    was allowed to be the partner. The spread then spans the real gap to the next LISTED
+    month, which for such a market is exactly what a calendar spread is.
+
+    The spread is computed for EVERY day on which the lead month and its immediate
+    successor both print — liquidity is deliberately NOT gated past picking the lead.
+    When no leg reports positive volume (thinly-traded deferred months on Yahoo — BTC
+    monthly, USD Index), the front falls back to the nearest expiry so the spread never
+    goes missing. `legs` is expiry-sorted, so ties in volume break toward the nearer
+    expiry, and a spurious far-month volume print can at worst cost that one day, never
+    strand the series on a far contract. Real settled closes only (no synthetic fill); a
+    spike-revert pass drops single bad prints and a trailing-contiguity pass keeps the
+    most recent gap-free run.
     """
     rows = []
+    deferred_by_date = deferred_by_date or {}
+    # Which chain positions this market actually lists, over the whole window. The next
+    # leg is picked from THIS set, so the pairing is a property of the market and not of
+    # whatever printed on a given day — see `_chain_successor`.
+    listed_chain = sorted({r.get("chain_index")
+                           for rows_ in candidates_by_date.values() for r in rows_
+                           if r.get("chain_index") is not None and r.get("close") is not None}
+                          | {r.get("chain_index") for r in deferred_by_date.values()
+                             if r.get("chain_index") is not None and r.get("close") is not None})
+
+    def _chain_successor(c):
+        i = bisect.bisect_right(listed_chain, c)
+        return listed_chain[i] if i < len(listed_chain) else None
+
+    # Pass 1: the raw volume lead per day, then stabilised into a roll that only ever
+    # moves forward and only once confirmed (see `_stabilised_front_chain`).
+    legs_by_day, day_leads = {}, []
     for day in sorted(candidates_by_date):
         legs = sorted((r for r in candidates_by_date[day] if r.get("close") is not None),
                       key=_expiry_sort_value)
-        if len(legs) < 2:
+        if not legs:
             continue
-        front = max(legs, key=lambda r: (r.get("roll_basis_volume") or 0))
-        if (front.get("roll_basis_volume") or 0) <= 0:
-            front = legs[0]   # no volume anywhere → nearest active expiry
-        front_exp = _expiry_sort_value(front)
-        nxt = next((r for r in legs if _expiry_sort_value(r) > front_exp), None)
+        lead = max(legs, key=lambda r: (r.get("roll_basis_volume") or 0))
+        if (lead.get("roll_basis_volume") or 0) <= 0:
+            lead = legs[0]   # no volume anywhere → nearest active expiry
+        chain = lead.get("chain_index")
+        if chain is None:
+            continue
+        legs_by_day[day] = legs
+        day_leads.append((day, chain))
+    front_by_day = _stabilised_front_chain(day_leads)
+
+    for day, _raw_lead in day_leads:
+        legs = legs_by_day[day]
+        chain = front_by_day[day]
+        front = next((r for r in legs if r.get("chain_index") == chain), None)
+        if front is None:
+            continue   # the settled front did not print today
+        # NEXT is the month that follows the front in the chain THIS MARKET LISTS — active
+        # if it is one, otherwise the deferred row for that day. Never a month further out
+        # than that: Yahoo leaves thin deferred months dark on individual days, and
+        # substituting the next-but-one there made the pane alternate between two
+        # different horizons from day to day (6EH26-6EU26 at -0.0088 against
+        # 6EH26-6EZ26 at -0.0125, flipping on consecutive sessions). A day whose successor
+        # has no print is dropped instead; the trailing-contiguity pass then decides how
+        # far back the clean run reaches.
+        #
+        # The successor comes from `listed_chain` rather than being chain+1, so a month
+        # Yahoo never serves does not silently cost the market its whole series — with a
+        # hard chain+1 a single thin month going dark for one run (ETHV26, ~13 print days)
+        # emptied Ethereum's spread completely. Pairing stays stable either way because
+        # the choice is made once per market, not per day.
+        target = _chain_successor(chain)
+        if target is None:
+            continue
+        nxt = next((r for r in legs if r.get("chain_index") == target), None)
         if nxt is None:
-            # Lead is the farthest available leg this day → nothing later to spread it
-            # against. Fall back to the nearest active pair so the series never goes
-            # missing (preserves the old nearest-expiry day-coverage on this edge).
-            front = legs[0]
-            front_exp = _expiry_sort_value(front)
-            nxt = next((r for r in legs if _expiry_sort_value(r) > front_exp), None)
-            if nxt is None:
-                continue
+            deferred = deferred_by_date.get(day)
+            if (deferred is not None and deferred.get("close") is not None
+                    and deferred.get("chain_index") == target):
+                nxt = deferred
+        if nxt is None:
+            continue
         rows.append({
             "date": day,
             "spread": round(float(front["close"]) - float(nxt["close"]), 6),
@@ -545,8 +693,10 @@ def build_calendar_spread_series(candidates_by_date):
             "source": "yfinance_liquid_contracts",
         })
     rows = _drop_spread_spike_reverts(rows)
-    # Only the most recent contiguous block: the currently-traded contracts. Older
-    # dates were measured with what is now a deferred contract and come out gappy.
+    # ONE pair only — the one trading today (see `_trailing_same_pair_spread`); then the
+    # most recent contiguous block within it, since even a single pair comes out gappy
+    # once Yahoo stops serving one of its legs on individual days.
+    rows = _trailing_same_pair_spread(rows)
     return _trailing_contiguous_spread(rows)[-YF_TOTAL_VOLUME_MAX_POINTS:]
 
 
@@ -583,6 +733,7 @@ def fetch_yfinance_liquid_continuous_history(
         return fallback_history or [], [], []
 
     candidates_by_date = {}
+    deferred_by_date = {}    # not-yet-active months; next-leg pool for the calendar spread
     total_by_date = {}
     active_contracts = 0
     empty_streak = 0
@@ -606,10 +757,13 @@ def fetch_yfinance_liquid_continuous_history(
 
             if not _history_row_looks_tradable(clean):
                 continue
-            if not _contract_is_active_for_day(contract, day):
+            is_active = _contract_is_active_for_day(contract, day)
+            # Not active yet (only too early, not expired) → keep it aside as a possible
+            # NEXT leg for the calendar spread; it stays out of the volume-led selection.
+            if not is_active and not _contract_is_pre_active_for_day(contract, day):
                 continue
 
-            found_tradable = True
+            found_tradable = found_tradable or is_active
             enriched = dict(clean)
             enriched.update({
                 "source": "yfinance_liquid_contract",
@@ -622,7 +776,17 @@ def fetch_yfinance_liquid_continuous_history(
                 "roll_basis": "highest_volume",
                 "roll_basis_volume": int(volume),
             })
-            candidates_by_date.setdefault(day, []).append(enriched)
+            if is_active:
+                candidates_by_date.setdefault(day, []).append(enriched)
+            else:
+                # Only the NEAREST deferred month per day is ever needed as a next leg,
+                # and every deferred expiry lies beyond every active one that day (active
+                # = within YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY of expiry, deferred = past
+                # it), so this row always sits after the front. Keeping one instead of the
+                # whole far chain saves ~8k rows per market on monthly-expiry contracts.
+                prev = deferred_by_date.get(day)
+                if prev is None or _expiry_sort_value(enriched) < _expiry_sort_value(prev):
+                    deferred_by_date[day] = enriched
 
         if found_tradable:
             active_contracts += 1
@@ -647,7 +811,7 @@ def fetch_yfinance_liquid_continuous_history(
     # Calendar spread (front-next): front = the lead (highest-volume) contract, next =
     # the nearest expiry after it — see the helper. Computed whenever a lead month and a
     # following month exist.
-    calendar_spread_series = build_calendar_spread_series(candidates_by_date)
+    calendar_spread_series = build_calendar_spread_series(candidates_by_date, deferred_by_date)
 
     if is_index_proxy:
         # Price stays the cash/index proxy (raw fallback); no stitched continuous and
