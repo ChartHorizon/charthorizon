@@ -148,20 +148,14 @@ async function applyRefreshedData(status) {
 
     const page = (typeof activePage === 'function') ? activePage() : 'overview';
     if (page === 'overview') {
-      if (typeof repaintOverviewThemed === 'function') repaintOverviewThemed();
-      // repaintOverviewThemed keeps chartState (the chart view is preserved), but the
-      // forward-curve table + spec card are rendered from cfg — refresh them from the
-      // freshly-reloaded category so they don't keep showing stale contract prices.
-      const _cfg = (typeof currentKey !== 'undefined' && typeof INDEX === 'object' &&
-                    INDEX[currentKey] && catCache[INDEX[currentKey].slug])
-                   ? catCache[INDEX[currentKey].slug][currentKey] : null;
-      if (_cfg) {
-        if (typeof renderTable === 'function') renderTable(_cfg);
-        if (typeof renderSpecs === 'function') renderSpecs(_cfg);
-      }
+      if (typeof refreshOverviewChart === 'function') await refreshOverviewChart();
     } else if (typeof PAGES !== 'undefined') {
       const p = PAGES.find(x => x.id === page);
       if (p && p.load) await p.load();
+      // Nothing above touched the hidden Futures tab, whose chart is now drawn from contract
+      // objects this reload discarded. Flag it so switchPage() re-establishes it on return
+      // instead of silently showing pre-refresh bars.
+      _overviewDataDirty = true;
     }
     // The two strength heatmaps live on different tabs (Futures Strength at the bottom
     // of the overview tab, FX Strength on the forex tab), but both read the freshly

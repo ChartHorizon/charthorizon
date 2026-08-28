@@ -58,6 +58,9 @@ from market_config import (
     YF_TOTAL_VOLUME_MAX_CONTRACTS,
     YF_TOTAL_VOLUME_MAX_POINTS,
     YF_PRICE_HISTORY_MAX_POINTS,
+    YF_QUOTE_MAX_STALE_DAYS,
+    YF_QUOTE_PERIOD,
+    YF_QUOTE_TAIL_BARS,
 )
 from series_utils import (
     BLANK,
@@ -68,6 +71,8 @@ from series_utils import (
 )
 from contracts import build_contract_candidates, build_total_volume_contract_candidates
 from local_first_merge import _merge_volume_series
+import yahoo_gateway
+import dead_symbols
 
 __all__ = [
     'YahooFinanceClient',
@@ -99,6 +104,15 @@ __all__ = [
 
 
 
+# Approximate calendar span of each yfinance `period` string, for the run cache's
+# superset lookup. Only the ORDER matters — a request is served from any cached frame
+# that covers at least as much ground, sliced back to the requested window.
+_PERIOD_DAYS = {
+    "1d": 1, "5d": 5, "10d": 10, "1mo": 31, "3mo": 93, "6mo": 186,
+    "1y": 366, "2y": 731, "5y": 1827, "10y": 3653, "20y": 7305, "max": 10 ** 7,
+}
+
+
 class YahooFinanceClient:
     """Small adapter layer: caching, quiet failures and a consistent result format."""
 
@@ -111,13 +125,46 @@ class YahooFinanceClient:
         if yf is None:
             return None
         if symbol not in self._ticker_cache:
-            self._ticker_cache[symbol] = yf.Ticker(symbol)
+            # The shared impersonating session — the generator ran on a bare Ticker
+            # until 2026-08-22 and took 89 rate-limit rejections in one night.
+            session = yahoo_gateway.gateway().session()
+            self._ticker_cache[symbol] = (
+                yf.Ticker(symbol, session=session) if session is not None
+                else yf.Ticker(symbol))
         return self._ticker_cache[symbol]
+
+    def _cached_superset(self, symbol, period, interval):
+        """A frame already cached for this symbol that covers at least `period`, sliced
+        back to the requested window. Returns None when nothing qualifies.
+
+        This is what stops the same contract being pulled twice per refresh: quote()
+        and the liquid-continuous scan ask for different periods on 254 shared symbols,
+        and the exact-key cache can never bridge that."""
+        want = _PERIOD_DAYS.get(period)
+        if want is None:
+            return None
+        best_span, best_frame = None, None
+        for (sym, per, iv), frame in self._history_cache.items():
+            if sym != symbol or iv != interval:
+                continue
+            have = _PERIOD_DAYS.get(per)
+            if have is None or have < want:
+                continue
+            if best_span is None or have < best_span:    # tightest qualifying frame
+                best_span, best_frame = have, frame
+        if best_frame is None or getattr(best_frame, "empty", True):
+            return best_frame
+        cutoff = best_frame.index.max() - timedelta(days=want)
+        return best_frame[best_frame.index >= cutoff]
 
     def _history(self, symbol, period, interval="1d", quiet=False):
         cache_key = (symbol, period, interval)
         if cache_key in self._history_cache:
             return self._history_cache[cache_key]
+
+        superset = self._cached_superset(symbol, period, interval)
+        if superset is not None:
+            return superset            # derived; not re-cached (it would duplicate memory)
 
         ticker = self._ticker(symbol)
         if ticker is None:
@@ -126,8 +173,19 @@ class YahooFinanceClient:
         # yfinance noise is silenced via its logger (CRITICAL at import). We no longer
         # redirect process-global stdout/stderr here — that is unsafe when markets are
         # fetched concurrently (Task 8). `quiet` is kept for call-site compatibility.
-        hist = ticker.history(period=period, interval=interval)
-        self._history_cache[cache_key] = hist
+        # Through the gateway: rate-capped, and a 429 backs off and retries instead of
+        # surfacing as an empty result the caller silently accepts. A declined call
+        # (bucket exhausted or breaker open) returns None with no exception — that
+        # None is deliberately NOT cached below, so the next call retries once the
+        # budget recovers instead of permanently memoising the miss. ticker.history()
+        # itself returns a DataFrame, possibly empty but never None, so None here
+        # unambiguously means "the gateway declined", not "Yahoo had no data".
+        hist = yahoo_gateway.gateway().call(
+            lambda: ticker.history(period=period, interval=interval),
+            priority=yahoo_gateway.PRIORITY_BULK,
+        )
+        if hist is not None:
+            self._history_cache[cache_key] = hist
         return hist
 
     def quote(self, yf_symbol, quiet=False):
@@ -137,10 +195,24 @@ class YahooFinanceClient:
             return dict(BLANK)
 
         try:
-            hist = self._history(yf_symbol, period="10d", interval="1d", quiet=quiet)
-            if hist is None or hist.empty:
+            hist = self._history(yf_symbol, period=YF_QUOTE_PERIOD,
+                                 interval="1d", quiet=quiet)
+            if hist is None:
+                # None means the GATEWAY DECLINED (bucket below the priority floor, or
+                # the breaker open) — it is not an answer about this symbol, so it must
+                # not be memoised as one. Same rule _history already applies to its own
+                # cache: the breaker stays open for 90 s after an exhausted retry, and
+                # caching BLANK here would drop every contract first quoted inside that
+                # window (available: False) for the whole run, long after the budget
+                # recovered.
+                return dict(BLANK)
+            if hist.empty:
+                # A real, empty answer from Yahoo — cache it, as before.
                 self._quote_cache[yf_symbol] = dict(BLANK)
                 return dict(BLANK)
+            # Only the tail is needed (last two settled bars). Without this we would
+            # iterate ~1250 rows per contract in Python for a two-row answer.
+            hist = hist.tail(YF_QUOTE_TAIL_BARS)
 
             # Build settled-EoD rows, then quote off the last *settled* bar — never a
             # still-forming pre-settle print (same rule as chart_history).
@@ -157,6 +229,17 @@ class YahooFinanceClient:
                 })
             rows = _drop_unsettled_tail(rows)
             if not rows:
+                self._quote_cache[yf_symbol] = dict(BLANK)
+                return dict(BLANK)
+            # Delisted/dark contract gate (see YF_QUOTE_MAX_STALE_DAYS). While the quote
+            # period was "10d", a contract Yahoo no longer prints simply came back empty
+            # and fell out above; at "5y" it returns its whole history and would quote
+            # off its last print — reported as available with a months-old change, in the
+            # running for the FRONT badge on stale volume, and suppressing
+            # _choose_fresh_or_previous_contracts (which only fires on available: False).
+            # _drop_unsettled_tail strips bars that are too new; this strips too old.
+            last_bar = _coerce_iso_date(rows[-1]["date"])
+            if last_bar is None or (date.today() - last_bar).days > YF_QUOTE_MAX_STALE_DAYS:
                 self._quote_cache[yf_symbol] = dict(BLANK)
                 return dict(BLANK)
 
@@ -177,20 +260,64 @@ class YahooFinanceClient:
             }
             self._quote_cache[yf_symbol] = out
             return dict(out)
+        except yahoo_gateway.RateLimitedError as e:
+            # Same reasoning as the `hist is None` decline above: a 429 says nothing
+            # about this symbol, so it is never memoised as an answer about it.
+            if not quiet:
+                print(f"   ⚠  yfinance {yf_symbol}: {e}")
+            return dict(BLANK)
         except Exception as e:
             if not quiet:
                 print(f"   ⚠  yfinance {yf_symbol}: {e}")
             self._quote_cache[yf_symbol] = dict(BLANK)
             return dict(BLANK)
 
-    def chart_history(self, yf_continuous, period="5y", quiet=False):
+    def chart_history(self, yf_continuous, period="5y", quiet=False, raise_errors=False):
+        """`raise_errors` (default False, keyword-only in spirit — always pass it by
+        name): when True, ANY failure — a rate limit, a gateway decline, or a plain
+        transient error (DNS blip, connection reset, a parse crash) — is raised
+        instead of swallowed into `[]`. The dead-symbol scan (the only caller that
+        passes True) needs this: `_note_contract_result` may only run after a request
+        that genuinely SUCCEEDED and genuinely returned zero rows, per
+        dead_symbols.record_empty's contract. Silently returning `[]` on ANY error
+        would let a transient failure on an expired contract get memoized as purged
+        for REPROBE_DAYS, exactly like the rate-limit case this whole file is built
+        around avoiding. The other three callers (main chart, seasonal history, total
+        volume) never touch the memo, so they keep the old default: degrade to `[]`
+        and move on."""
         if yf is None:
             return []
         try:
             hist = self._history(yf_continuous, period=period, interval="1d", quiet=quiet)
-            if hist is None or hist.empty:
-                return []
+        except yahoo_gateway.RateLimitedError:
+            # A throttled fetch is NOT an empty contract. Let it surface so the caller
+            # (the dead-symbol scan, in particular) never memoizes it as purged.
+            raise
+        except Exception as e:
+            if raise_errors:
+                raise
+            if not quiet:
+                print(f"   ⚠  chart history {yf_continuous}: {e}")
+            return []
 
+        # `hist is None` and `hist.empty` look identical to a caller that only checks
+        # truthiness, but they are NOT the same thing — resist the urge to fold this
+        # back into one check. `_history` returns None specifically when the gateway
+        # DECLINED the call outright (token bucket exhausted or circuit breaker open):
+        # ordinary steady-state throttling under load, raised as no exception at all.
+        # `hist.empty` is Yahoo's own answer that this contract genuinely has no rows.
+        # Collapsing "declined" into `[]` here would let the dead-symbol memo
+        # (dead_symbols.py, wired in via _note_contract_result below) record a
+        # merely-throttled contract as permanently purged — the one mistake the whole
+        # memo exists to prevent. So a decline is raised, matching the RateLimitedError
+        # path above, and only a genuinely empty DataFrame takes the `return []` path.
+        if hist is None:
+            raise yahoo_gateway.RateLimitedError(
+                f"{yf_continuous}: gateway declined the request (bucket exhausted or breaker open)")
+        if hist.empty:
+            return []
+
+        try:
             out = []
             for idx, row in hist.iterrows():
                 o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
@@ -206,7 +333,10 @@ class YahooFinanceClient:
                 })
             return _drop_unsettled_tail(_trim_leading_flat(out))
         except Exception as e:
-            print(f"   ⚠  chart history {yf_continuous}: {e}")
+            if raise_errors:
+                raise
+            if not quiet:
+                print(f"   ⚠  chart history {yf_continuous}: {e}")
             return []
 
 
@@ -229,6 +359,49 @@ class _ThreadLocalYahooClient:
 _yf_client = _ThreadLocalYahooClient()
 
 
+DEAD_SYMBOLS_PATH = os.path.join("ff_data", "yf_dead_symbols.json")
+
+# Loaded once per generator run (gather_commodity_data), saved once at the end. A plain
+# dict shared by the refresh's worker threads: every write here is a single-key dict
+# assignment or pop, atomic under CPython's GIL, so two threads racing the same symbol
+# can only ever interleave into "last write wins" — never a torn/partial entry. The
+# worst case is one thread's record_empty or pop being clobbered by another's, which
+# costs one extra request on the *next* refresh, never a wrong result on this one.
+_dead_memo = {}
+
+
+def load_dead_memo(path=DEAD_SYMBOLS_PATH):
+    _dead_memo.clear()
+    _dead_memo.update(dead_symbols.load(path))
+    return _dead_memo
+
+
+def save_dead_memo(path=DEAD_SYMBOLS_PATH):
+    dead_symbols.save(path, _dead_memo)
+
+
+def _skip_dead_contract(contract, today=None):
+    """True if this candidate is a symbol Yahoo has purged — skip it without a request."""
+    symbol = contract.get("yf_symbol")
+    if not symbol:
+        return False
+    return dead_symbols.is_dead(_dead_memo, symbol, today or date.today())
+
+
+def _note_contract_result(contract, rows, today=None):
+    """Record the outcome of a SUCCESSFUL contract-history request. Must never be called
+    from an exception handler, and never for a RateLimitedError decline — see
+    dead_symbols.record_empty and the `hist is None` branch in chart_history for why."""
+    symbol = contract.get("yf_symbol")
+    if not symbol:
+        return
+    today = today or date.today()
+    if rows:
+        _dead_memo.pop(symbol, None)          # it is serving again; forget the memo
+        return
+    dead_symbols.record_empty(_dead_memo, symbol, contract.get("expiry"), today)
+
+
 def fetch_chart_history(yf_continuous, period="20y"):
     """
     Fetches daily OHLC + volume history for a yfinance chart symbol.
@@ -238,7 +411,14 @@ def fetch_chart_history(yf_continuous, period="20y"):
 
     Returns: list of {date, open, high, low, close, volume}
     """
-    return _yf_client.chart_history(yf_continuous, period=period)
+    try:
+        return _yf_client.chart_history(yf_continuous, period=period)
+    except yahoo_gateway.RateLimitedError:
+        # This is the single main-chart fetch, not a dead-symbol scan candidate — a
+        # decline here has nothing to memoize. Local-first merge (commodity_dashboard.py)
+        # already treats an empty fresh fetch as "keep the stored history", same as any
+        # other failed fetch, so returning [] is the pre-existing safe behaviour.
+        return []
 
 
 def fetch_price_chart_history(cfg, period="20y"):
@@ -284,9 +464,14 @@ def fetch_seasonal_price_history(cfg, fallback_history=None):
     symbol = cfg.get("yf_continuous")
     if not symbol:
         return fallback_history or []
-    history = _drop_spike_revert_outliers(
-        _yf_client.chart_history(symbol, period="max", quiet=True)
-    )
+    try:
+        raw = _yf_client.chart_history(symbol, period="max", quiet=True)
+    except yahoo_gateway.RateLimitedError:
+        # A single continuous symbol, not a dead-symbol scan candidate — nothing to
+        # memoize on a decline. Fall back to whatever was already stored, same as a
+        # too-short fresh fetch does below.
+        raw = []
+    history = _drop_spike_revert_outliers(raw)
     if len(history) >= max(260, len(fallback_history or [])):
         return history
     return fallback_history or history or []
@@ -344,7 +529,12 @@ def fetch_yfinance_total_volume_series(cfg, period="5y", count=YF_TOTAL_VOLUME_M
         symbol = contract.get("yf_symbol")
         if not symbol:
             continue
-        rows = _yf_client.chart_history(symbol, period=period, quiet=True)
+        try:
+            rows = _yf_client.chart_history(symbol, period=period, quiet=True)
+        except yahoo_gateway.RateLimitedError:
+            # Not the dead-symbol scan (that's fetch_yfinance_liquid_continuous_history)
+            # — this loop never touches the memo, so a decline is just a skip.
+            continue
         found_volume = False
         for row in rows:
             day = str(row.get("date") or "")[:10]
@@ -742,7 +932,28 @@ def fetch_yfinance_liquid_continuous_history(
         symbol = contract.get("yf_symbol")
         if not symbol:
             continue
-        rows = _yf_client.chart_history(symbol, period=period, quiet=True)
+        if _skip_dead_contract(contract):
+            continue                       # Yahoo purged this one; no request
+        try:
+            rows = _yf_client.chart_history(symbol, period=period, quiet=True, raise_errors=True)
+        except Exception:
+            # A RateLimitedError (real 429 or gateway decline), or any other
+            # transient fetch/parse error on this one contract: no rows, and
+            # deliberately NOT memoized. record_empty's contract requires a request
+            # that genuinely SUCCEEDED with zero rows — an error proves nothing about
+            # whether the contract still exists, so widen the catch from just
+            # RateLimitedError to Exception rather than let a DNS blip or a parse
+            # crash on an expired contract get memoized for REPROBE_DAYS same as a
+            # real purge.
+            continue
+        # Second layer, because no exception-type classification can catch every
+        # shape of a 429: if Yahoo ever answers an empty-but-successful frame DURING
+        # an outage instead of erroring, `rows` looks like a legitimate empty result.
+        # Gate the memo write on the breaker being closed — a night with a rate-limit
+        # outage then records nothing, costing one extra scan next run, which is
+        # exactly the conservative trade dead_symbols.py's own header asks for.
+        if not yahoo_gateway.gateway().cooldown_active():
+            _note_contract_result(contract, rows)
         found_tradable = False
         for row in rows:
             clean = _clean_contract_history_row(row)

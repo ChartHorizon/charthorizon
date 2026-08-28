@@ -7,10 +7,14 @@ echo "Starting ChartHorizon..."
 echo
 
 python3 start.py
-status=$?
+# Not `status=$?`: in zsh `status` is a read-only synonym for `$?`, and assigning to
+# it is a FATAL error in a non-interactive script. Everything below this line —
+# the diagnostic help text and the "Press Enter to close" prompt — was never
+# reached, so a failed start showed a raw zsh error instead of the hint.
+rc=$?
 
 echo
-if [ $status -ne 0 ]; then
+if [ $rc -ne 0 ]; then
   echo "ChartHorizon could not be started."
   echo "Please check that Python 3 is installed: https://www.python.org/downloads/"
 else

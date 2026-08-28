@@ -94,27 +94,36 @@ class CircuitBreakerTest(unittest.TestCase):
 # overlay can draw a real live candle. Every get() returns exactly these five keys —
 # short rows are padded with None, unknown keys are dropped — which is why the tests
 # below compare whole dicts instead of picking fields out.
-QUOTE = {"day": "2026-06-10", "price": 100.0, "open": 98.5, "high": 100.75, "low": 98.25}
-EMPTY = {"day": None, "price": None, "open": None, "high": None, "low": None}
+QUOTE = {"day": "2026-06-10", "price": 100.0, "open": 98.5, "high": 100.75,
+         "low": 98.25, "state": "REGULAR"}
+EMPTY = {"day": None, "price": None, "open": None, "high": None, "low": None,
+         "state": None}
 
 
 class RecordingFetch:
-    """fetch_fn double: returns a canned row and records calls. mode switches behavior:
-    'ok' | 'ratelimit' (raise RateLimitedError) | 'error' (raise RuntimeError) |
-    'empty' (return a None row)."""
+    """fetch_many double: returns a canned row per symbol and records each BATCH.
+    mode switches behavior: 'ok' | 'ratelimit' (raise RateLimitedError) |
+    'error' (raise RuntimeError) | 'empty' (serve nothing)."""
     def __init__(self, row=None):
         self.row = dict(row) if row is not None else dict(QUOTE)
-        self.calls = []
+        self.batches = []
         self.mode = "ok"
-    def __call__(self, symbol):
-        self.calls.append(symbol)
+
+    @property
+    def calls(self):
+        """Flat symbol list, so the pre-batch assertions still read naturally."""
+        return [s for batch in self.batches for s in batch]
+
+    def __call__(self, symbols, priority=None):
+        symbols = list(symbols)
+        self.batches.append(symbols)
         if self.mode == "ratelimit":
             raise lc.RateLimitedError("429 Too Many Requests")
         if self.mode == "error":
             raise RuntimeError("boom")
         if self.mode == "empty":
-            return {"day": None, "price": None}
-        return dict(self.row)
+            return {}
+        return {s: dict(self.row) for s in symbols}
 
 
 class LiveQuoteCacheTest(unittest.TestCase):
@@ -131,13 +140,14 @@ class LiveQuoteCacheTest(unittest.TestCase):
         self.assertEqual(fetch.calls, ["CL=F"])
 
     def test_short_row_is_padded_to_the_quote_shape(self):
-        # A fetch_fn that reports no intraday OHLC (or an older two-field one) must still
-        # produce the full quote shape, so callers can read q["open"] without a guard.
+        # A fetcher that reports no intraday OHLC (or an older two-field row) must still
+        # produce the full quote shape, so callers can read q["open"] or q["state"]
+        # without a guard.
         clk = FakeClock(); fetch = RecordingFetch({"day": "2026-06-10", "price": 100.0})
         c = self._cache(fetch, clk)
         self.assertEqual(c.get("CL=F"),
-                         {"day": "2026-06-10", "price": 100.0,
-                          "open": None, "high": None, "low": None})
+                         {"day": "2026-06-10", "price": 100.0, "open": None,
+                          "high": None, "low": None, "state": None})
 
     def test_unknown_fetch_keys_are_dropped(self):
         # The quote is a fixed contract, not a passthrough: whatever else a fetch_fn
@@ -220,12 +230,12 @@ class LiveQuoteCacheTest(unittest.TestCase):
         started = _th.Semaphore(0)
         calls, calls_lock = [], _th.Lock()
         row = dict(QUOTE)
-        def slow_fetch(symbol):
+        def slow_fetch(symbols, priority=None):
             with calls_lock:
-                calls.append(symbol)
+                calls.append(list(symbols))
             started.release()
-            gate.wait(2.0)                               # hold the per-symbol lock
-            return dict(row)
+            gate.wait(2.0)                               # hold the batch lock
+            return {s: dict(row) for s in symbols}
         c = self._cache(slow_fetch, clk)
         results, res_lock = [], _th.Lock()
         def worker():
@@ -236,13 +246,263 @@ class LiveQuoteCacheTest(unittest.TestCase):
         for t in threads:
             t.start()
         started.acquire(timeout=2.0)                     # first fetch is now in flight
-        _time.sleep(0.05)                                # let the other 4 queue on the lock
+        _time.sleep(0.05)                                # the other 4 meet a held lock
         gate.set()                                       # release the in-flight fetch
         for t in threads:
             t.join(2.0)
-        self.assertEqual(len(calls), 1)                  # single-flight: one fetch for five callers
+        self.assertEqual(len(calls), 1)                  # single-flight: one BATCH for five callers
         self.assertEqual(len(results), 5)
-        self.assertTrue(all(r == QUOTE for r in results))
+        # The four that lost the lock do NOT queue behind the in-flight batch (see
+        # test_a_held_batch_lock_never_blocks_a_caller): on a cold cache they serve blank.
+        self.assertIn(QUOTE, results)
+
+    def test_a_held_batch_lock_never_blocks_a_caller(self):
+        """I2: single-flight is non-blocking. A preload batch can sit in the gateway's
+        2/6/18 s backoff; an interactive caller must serve last-known and return, not
+        park a request thread behind it on a process-wide lock."""
+        import threading as _th
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get("CL=F")                                    # warm, so there IS a last-known
+        clk.advance(21.0)                                # ...and it is now stale
+        fetch.batches.clear()
+
+        c._batch_lock.acquire()                          # stand in for a batch in flight
+        try:
+            done = _th.Event()
+            out = {}
+            def worker():
+                out["q"] = c.get("CL=F")
+                done.set()
+            _th.Thread(target=worker).start()
+            self.assertTrue(done.wait(1.0), "get() blocked on the batch lock")
+        finally:
+            c._batch_lock.release()
+        self.assertEqual(out["q"], QUOTE)                # last-known, served immediately
+        self.assertEqual(fetch.batches, [])              # and no second request
+
+    def test_a_batch_that_serves_nothing_does_not_reset_the_breaker(self):
+        """I3: record_success() is gated on rows actually coming back. An empty batch
+        says nothing about Yahoo's health, and closing the breaker on one let a
+        silently-failing fetcher hold the breaker shut forever."""
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c._breaker.record_failure(rate_limited=False)
+        c._breaker.record_failure(rate_limited=False)    # 2 of 3 towards tripping
+        fetch.mode = "empty"
+        c.get_many(["CL=F"])
+        self.assertEqual(c._breaker._errors, 2)          # not reset by the empty batch
+        fetch.mode = "ok"
+        clk.advance(21.0)
+        c.get_many(["CL=F"])
+        self.assertEqual(c._breaker._errors, 0)          # a batch WITH rows still closes it
+
+    def test_an_empty_half_open_probe_does_not_wedge_the_breaker(self):
+        """The other half of I3. Gating record_success() on rows left a third outcome
+        unhandled: a half-open PROBE that returns empty without raising (what a pure
+        budget decline does). Nothing then called record_success() or record_failure(),
+        so the breaker sat in half_open with the probe in flight forever — allow() said
+        no to every later fetch, while is_open() (state must be "open") said there was
+        no cooldown, so /api/live-quote never answered 429 and the frontend polled
+        nulls for good. The assertion that matters is the last one: it recovers."""
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+
+        fetch.mode = "ratelimit"
+        c.get_many(["CL=F"])
+        self.assertTrue(c.cooldown_active())             # open, cooling down
+        self.assertEqual(c.retry_after(), 90)
+
+        clk.advance(90.0)                                # cooldown elapsed -> probe due
+        fetch.mode = "empty"                             # ...and the probe serves nothing
+        fetch.batches.clear()
+        self.assertEqual(c.get_many(["CL=F"])["CL=F"], EMPTY)
+        self.assertEqual(fetch.batches, [["CL=F"]])      # the probe really did run
+        self.assertNotEqual(c._breaker._state, "half_open")   # not stranded
+        self.assertFalse(c._breaker._probe_in_flight)
+        self.assertTrue(c.cooldown_active())             # and it tells the truth again
+        self.assertEqual(c.retry_after(), 90)            # cooldown restarted from here
+        self.assertEqual(c._breaker._errors, 0)          # empty is not an error either
+
+        clk.advance(89.0)                                # still inside the new cooldown
+        fetch.mode = "ok"
+        fetch.batches.clear()
+        c.get_many(["CL=F"])
+        self.assertEqual(fetch.batches, [])              # breaker still holding it shut
+
+        clk.advance(1.0)                                 # cooldown elapsed again
+        self.assertEqual(c.get_many(["CL=F"])["CL=F"], QUOTE)   # a real quote, at last
+        self.assertEqual(fetch.batches, [["CL=F"]])      # the fetcher was actually reached
+        self.assertFalse(c.cooldown_active())
+        self.assertEqual(c._breaker._state, "closed")
+
+
+class BatchTest(unittest.TestCase):
+    """The batch contract itself: one request for the stale symbols, never for the fresh."""
+
+    def _cache(self, fetch, clk):
+        return lc.LiveQuoteCache(fetch, ttl=20.0, clock=clk,
+                                 bucket=lc._TokenBucket(1000, 1000, clk),
+                                 breaker=lc._CircuitBreaker(90, 3, clk))
+
+    def test_get_many_issues_one_batch(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F", "GC=F", "SI=F"])
+        self.assertEqual(len(fetch.batches), 1)
+        self.assertEqual(fetch.batches[0], ["CL=F", "GC=F", "SI=F"])
+
+    def test_only_the_stale_symbols_go_into_the_batch(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F", "GC=F"])
+        clk.advance(5.0)                                  # still inside the TTL
+        fetch.batches.clear()
+        c.get_many(["CL=F", "GC=F", "SI=F"])
+        self.assertEqual(fetch.batches, [["SI=F"]])
+
+    def test_an_all_fresh_batch_issues_no_request(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F"])
+        fetch.batches.clear()
+        c.get_many(["CL=F"])
+        self.assertEqual(fetch.batches, [])
+
+    def test_a_duplicate_symbol_is_requested_once(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        out = c.get_many(["CL=F", "CL=F"])
+        self.assertEqual(fetch.batches, [["CL=F"]])
+        self.assertEqual(out["CL=F"], QUOTE)
+
+    def test_a_symbol_missing_from_the_response_serves_last_known(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F"])
+        clk.advance(21.0)
+        fetch.mode = "empty"                              # batch comes back with nothing
+        self.assertEqual(c.get("CL=F"), QUOTE)            # last known, not blank
+
+    def test_a_rate_limited_batch_opens_the_breaker_and_serves_last_known(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F"])
+        clk.advance(21.0)
+        fetch.mode = "ratelimit"
+        self.assertEqual(c.get_many(["CL=F"])["CL=F"], QUOTE)
+        self.assertTrue(c.cooldown_active())
+
+    def test_a_cold_symbol_the_batch_cannot_serve_is_blank_not_missing(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        fetch.mode = "empty"
+        c = self._cache(fetch, clk)
+        out = c.get_many(["CL=F"])
+        self.assertEqual(out["CL=F"], EMPTY)               # present and blank, never a KeyError
+
+    def test_state_is_carried_through(self):
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = self._cache(fetch, clk)
+        self.assertEqual(c.get("CL=F")["state"], "REGULAR")
+
+    def test_priority_reaches_the_fetcher(self):
+        clk = FakeClock(); seen = []
+        def fetch(symbols, priority=None):
+            seen.append(priority)
+            return {s: dict(QUOTE) for s in symbols}
+        c = self._cache(fetch, clk)
+        c.get_many(["CL=F"], priority=lc.PRIORITY_INTERACTIVE)
+        self.assertEqual(seen, [lc.PRIORITY_INTERACTIVE])
+
+
+class LiveFetchManyTest(unittest.TestCase):
+    """start.py's injected fetcher (`_live_fetch_many`) — the layer between this cache
+    and the gateway. Covers I1 (the continuous per-symbol fallback must go THROUGH the
+    budget) and the caller half of I3 (a rate-limited batch must surface as an exception,
+    which is the only thing that arms the client cooldown).
+
+    No network: the gateway is replaced with one whose HTTP is an injected fetcher, and
+    the per-symbol chart path (`start._live_quote_row`) is stubbed out."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import start
+        except Exception as exc:                        # pragma: no cover
+            raise unittest.SkipTest("start.py not importable here: %s" % exc)
+        cls.start = start
+        import yahoo_gateway
+        cls.yg = yahoo_gateway
+        cls._saved_gateway = yahoo_gateway._instance    # start.py configures one on import
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.yg._instance = cls._saved_gateway
+
+    def setUp(self):
+        self._saved_quote_row = self.start._live_quote_row
+        self.per_symbol = []
+        def probe(symbol, session=None):
+            self.per_symbol.append(symbol)
+            return {"day": "2026-08-21", "price": 1.0, "open": None, "high": None,
+                    "low": None}
+        self.start._live_quote_row = probe
+
+    def tearDown(self):
+        self.start._live_quote_row = self._saved_quote_row
+        self.yg._instance = self._saved_gateway
+
+    def _gateway(self, capacity=100, raw=None, fail=False):
+        def fetch_json(url, params):
+            if fail:
+                raise self.yg.RateLimitedError("429 Too Many Requests")
+            return raw if raw is not None else {"quoteResponse": {"result": []}}
+        return self.yg.configure(capacity=capacity, refill_per_sec=capacity,
+                                 clock=FakeClock(), sleep_fn=lambda s: None,
+                                 rng=lambda: 0.5, json_fetcher=fetch_json)
+
+    def test_a_rate_limited_batch_raises_instead_of_returning_empty(self):
+        self._gateway(fail=True)
+        with self.assertRaises(lc.RateLimitedError):
+            self.start._live_fetch_many(["GCZ26.CMX"])
+
+    def test_an_open_gateway_breaker_reaches_the_client_as_well(self):
+        gw = self._gateway()
+        gw._breaker.record_failure(rate_limited=True)   # gateway already in cooldown
+        with self.assertRaises(lc.RateLimitedError):
+            self.start._live_fetch_many(["GCZ26.CMX"])
+
+    def test_a_batch_the_budget_refused_is_not_a_rate_limit(self):
+        # capacity=0: the bucket refuses, the breaker never trips. That is a "come back
+        # later", not a 429 — it must NOT arm the client cooldown, and it must not fan
+        # out to one request per symbol either.
+        self._gateway(capacity=0)
+        self.assertEqual(self.start._live_fetch_many(["GCZ26.CMX"]), {})
+        self.assertEqual(self.per_symbol, [])
+
+    def test_a_continuous_symbol_is_rationed_by_the_gateway(self):
+        # =F never batches, so it always takes the per-symbol chart path. Unwrapped, one
+        # /api/live-quote of 96 continuous symbols could fire 96 unrationed requests.
+        self._gateway(capacity=0)
+        self.assertEqual(self.start._live_fetch_many(["GC=F"]), {})
+        self.assertEqual(self.per_symbol, [])           # refused before the fetch ran
+
+    def test_a_continuous_symbol_is_still_served_when_the_budget_allows(self):
+        self._gateway()
+        out = self.start._live_fetch_many(["GC=F"])
+        self.assertEqual(self.per_symbol, ["GC=F"])
+        self.assertEqual(out["GC=F"]["price"], 1.0)
+        self.assertIsNone(out["GC=F"]["state"])         # padded to the quote shape
+
+    def test_a_batch_that_ran_and_omitted_a_symbol_still_falls_back(self):
+        raw = {"quoteResponse": {"result": [
+            {"symbol": "GCZ26.CMX", "regularMarketPrice": 4680.6,
+             "regularMarketTime": 1787345998, "gmtOffSetMilliseconds": -14400000,
+             "marketState": "CLOSED"}]}}
+        self._gateway(raw=raw)
+        out = self.start._live_fetch_many(["GCZ26.CMX", "ZCZ26.CBT"])
+        self.assertEqual(self.per_symbol, ["ZCZ26.CBT"])  # the one the batch omitted
+        self.assertEqual(set(out), {"GCZ26.CMX", "ZCZ26.CBT"})
 
 
 if __name__ == "__main__":

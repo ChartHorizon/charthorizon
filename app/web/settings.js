@@ -132,6 +132,10 @@ function openSettings() {
   if (typeof renderSettingsLayouts === 'function') renderSettingsLayouts();
   if (typeof renderSettingsTimezone === 'function') renderSettingsTimezone();
   if (typeof renderSettingsBackup === 'function') renderSettingsBackup();
+  if (typeof renderSettingsAbout === 'function') {
+    renderSettingsAbout();                                    // sofort zeichnen (Version evtl. noch offen)
+    loadSettingsVersion().then(() => renderSettingsAbout());  // und nachziehen, sobald der Server geantwortet hat
+  }
 }
 
 function renderSettingsLayouts() {
@@ -382,4 +386,51 @@ function importSettings() {
   document.body.appendChild(input);
   input.click();
   input.remove();
+}
+
+// ── About: welche Version hier tatsaechlich laeuft ──
+// Die Version kommt vom laufenden Server (/api/version), NICHT aus config.js: config.js
+// schreibt der Generator, und nach einem Update steht dort so lange die alte Version,
+// bis der erste Refresh durch ist. Eine Versionsanzeige darf nicht luegen.
+let _settingsVersionInfo = null;      // gecacht — aendert sich zur Laufzeit nicht
+let _settingsVersionTried = false;    // ein Fehlschlag wird nicht bei jedem Tab-Wechsel wiederholt
+
+async function loadSettingsVersion() {
+  if (_settingsVersionInfo || _settingsVersionTried) return _settingsVersionInfo;
+  _settingsVersionTried = true;
+  try {
+    const res = await fetch('/api/version', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.version) _settingsVersionInfo = data;
+  } catch (e) { /* Server weg / Seite als file:// geoeffnet — Karte zeigt dann "unavailable" */ }
+  return _settingsVersionInfo;
+}
+
+function renderSettingsAbout() {
+  const host = document.getElementById('settingsAbout');
+  if (!host) return;
+  const info = _settingsVersionInfo;
+  // genDate haelt refresh.js nach einem Hintergrund-Refresh aktuell.
+  const asOf = (window.__CONFIG__ && window.__CONFIG__.genDate) || '';
+
+  const rows = [];
+  if (info) {
+    rows.push(['Build', info.build === 'installer'
+      ? `Installer${info.platform ? ' · ' + info.platform : ''}`
+      : `Source${info.platform ? ' · ' + info.platform : ''}`]);
+    if (info.python) rows.push(['Python', info.python]);
+  }
+  if (asOf) rows.push(['Data as of', asOf]);
+
+  host.innerHTML =
+    `<div class="set-card-h"><div class="set-card-title">About</div><div class="set-card-sub">Which ChartHorizon version is running here</div></div>` +
+    `<div class="set-about-v">ChartHorizon <strong>${info ? esc(info.version) : '—'}</strong></div>` +
+    (info
+      ? `<div class="set-kv">${rows.map(([k, v]) => `<div class="set-kv-k">${esc(k)}</div><div class="set-kv-v">${esc(v)}</div>`).join('')}</div>`
+      : `<div class="set-hint">Version unavailable — the local server did not answer. Restart ChartHorizon.</div>`) +
+    `<div class="set-hint">Latest release and release notes: ` +
+      // Bewusst der nackte Link, nicht /from-dashboard: der zaehlt die Logo-Klicks im
+      // Banner und soll nicht durch einen zweiten Einstieg verwaessert werden.
+      `<a class="set-about-link" href="https://chart-horizon.com/dashboard" target="_blank" rel="noopener">chart-horizon.com/dashboard</a></div>`;
 }

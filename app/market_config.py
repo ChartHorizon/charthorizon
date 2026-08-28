@@ -52,6 +52,8 @@ __all__ = [
     'YF_LIQUID_ACTIVE_DAYS_AFTER_EXPIRY',
     'YF_LIQUID_ACTIVE_DAYS_BEFORE_EXPIRY',
     'REFRESH_FETCH_WORKERS',
+    'YF_GATEWAY_CAPACITY',
+    'YF_GATEWAY_REFILL_PER_SEC',
     'YF_LIQUID_CONTINUOUS_EMPTY_STOP',
     'YF_LIQUID_CONTINUOUS_FORWARD_MONTHS',
     'YF_LIQUID_CONTINUOUS_LOOKBACK_MONTHS',
@@ -64,6 +66,9 @@ __all__ = [
     'YF_TOTAL_VOLUME_MAX_CONTRACTS',
     'YF_TOTAL_VOLUME_MAX_POINTS',
     'YF_PRICE_HISTORY_MAX_POINTS',
+    'YF_QUOTE_MAX_STALE_DAYS',
+    'YF_QUOTE_PERIOD',
+    'YF_QUOTE_TAIL_BARS',
     'YF_VOLUME_SUSPECT_LOOKBACK',
     'YF_VOLUME_SUSPECT_MIN_REFERENCE',
     'YF_VOLUME_SUSPECT_MIN_RUN',
@@ -92,6 +97,23 @@ YF_TOTAL_VOLUME_MAX_POINTS = 1300
 # years, so it needs the full tail. ~5200 trading days ≈ 20 years (260/yr). The volume and
 # calendar-spread panes deliberately stay at the denser 1300-point (~5y) cap above.
 YF_PRICE_HISTORY_MAX_POINTS = 5200
+# quote() used to ask for "10d" while the liquid-continuous scan asked the same
+# symbols for "5y" — different run-cache keys, so 254 contracts per refresh were
+# fetched from Yahoo twice. Asking for the scan's period makes the second call free.
+# The 19 quote-only symbols cost one request either way, just a larger payload;
+# Yahoo throttles requests, not bytes.
+YF_QUOTE_PERIOD = "5y"
+# The 10-day window "5y" replaced was also the DELISTED-contract filter: a contract Yahoo
+# has stopped printing returned an empty frame -> BLANK -> available: False. Over 5y it
+# returns its whole history and would quote off a months-old print. _drop_unsettled_tail
+# only strips bars that are too NEW, so the too-OLD half is this explicit gate (10 days =
+# the old window, so the pre-branch semantics are reproduced exactly).
+YF_QUOTE_MAX_STALE_DAYS = 10
+# quote() reads the last two SETTLED bars, but _drop_unsettled_tail() decides what counts
+# as settled from a volume median over the preceding YF_VOLUME_SUSPECT_LOOKBACK (20) bars
+# (rows[-21:-1]). At 15 that median saw 14 bars, not 20 — so the tail must be at least
+# YF_VOLUME_SUSPECT_LOOKBACK + 1 = 21. 24 leaves room for rows dropped as NaN.
+YF_QUOTE_TAIL_BARS = 24
 YF_VOLUME_SUSPECT_LOOKBACK = 20
 YF_VOLUME_SUSPECT_RATIO = 0.15
 YF_VOLUME_SUSPECT_MIN_REFERENCE = 10000
@@ -112,6 +134,13 @@ SPREAD_SPIKE_REVERT_PCT = 0.02       # drop a one-day calendar-spread value that
 SPREAD_MAX_GAP_DAYS = 7              # keep only the most recent calendar-spread run without a gap larger than this (drops the sparse older backfill; Yahoo only serves the current contracts)
 SPREAD_MIN_PAIR_POINTS = 10   # below this many points the current front/next pair is a blank pane, so ONE preceding pair is kept for context (consumers break the line at the pair change)
 SPREAD_ROLL_CONFIRM_DAYS = 2  # a higher volume lead becomes the spread's front only after holding this many sessions; mid-roll the two nearest months flip back and forth daily
+
+# Generator gateway profile. Deliberately looser than the server's live profile
+# (LIVE_RATE_* in live_cache.py): the nightly refresh is ~880 requests and would
+# take 7 minutes at the live path's 2/s. Backoff self-tunes this down whenever
+# Yahoo pushes back, so the ceiling only has to be sane, not timid.
+YF_GATEWAY_CAPACITY = 30
+YF_GATEWAY_REFILL_PER_SEC = 6.0
 
 
 # ─────────────────────────────────────────────────────────────────────

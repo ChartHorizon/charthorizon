@@ -1,8 +1,12 @@
-async function fetchContractHistory(contract) {
+// `opts.priority === 'preload'` marks the request as cold-start warm-up rather than a user
+// action. The server cannot infer that, and without it the boot preload would compete with
+// on-screen charts as interactive — see the gateway's priority floors in yahoo_gateway.py.
+async function fetchContractHistory(contract, opts) {
   if ((contract.chart_history || []).length) return contract.chart_history;
   if (!contract.yf_symbol) throw new Error('No Yahoo symbol is available for this contract.');
 
-  const url = `/api/contract-history?symbol=${encodeURIComponent(contract.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}`;
+  const priority = (opts && opts.priority === 'preload') ? '&priority=preload' : '';
+  const url = `/api/contract-history?symbol=${encodeURIComponent(contract.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}${priority}`;
   const res = await fetch(url);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -28,7 +32,13 @@ function renderContractError(cfg, contract, message) {
   bindChartControls(cfg);
 }
 
-async function activateSelectedContract(cfg) {
+// Re-establish chartState's selected contract on `cfg`, fetching its history if the
+// contract doesn't carry any (the chart-controls button, and the in-place reload after a
+// board refresh, which hands out contract objects with an empty chart_history).
+// `fallbackToContinuous` is for the non-interactive caller: after a background refresh a
+// failed fetch should degrade to the continuous series (which always has data) rather than
+// leave an error box on a chart the user never asked to reload.
+async function activateSelectedContract(cfg, fallbackToContinuous = false) {
   const idx = (cfg.contracts || []).findIndex(c => c.yf_symbol === chartState.contractSymbol);
   if (idx < 0) {
     chartState.chartMode = 'continuous';
@@ -37,8 +47,33 @@ async function activateSelectedContract(cfg) {
     if (typeof restartLiveLayer === 'function') restartLiveLayer();
     return;
   }
-  await selectCurveContract(idx);
+  await selectCurveContract(idx, fallbackToContinuous);
 }
+// Re-establish the Futures tab's chart, forward curve and spec card against the CURRENT
+// catCache. This is the after-a-board-refresh path: that reload replaces every contract
+// object, and the fresh front month carries no chart_history at all (it lives behind
+// /api/contract-history — a cache `--refresh` clears too). repaintOverviewThemed() is a
+// THEME repaint and only DRAWS, so it painted "No chart history available for <symbol>"
+// over the single-contract view this tab opens in, and the user had to click the market
+// again to get a chart back. In contract mode we fetch first — the same path that click
+// takes — and degrade to the continuous series if the fetch fails or the contract is gone
+// from the refreshed chain.
+async function refreshOverviewChart() {
+  const cfg = (typeof getCurrentCfg === 'function') ? getCurrentCfg() : null;
+  if (cfg && chartState.chartMode === 'contract') {
+    await activateSelectedContract(cfg, true);    // fetch-then-draw; re-renders the curve too
+  } else if (typeof repaintOverviewThemed === 'function') {
+    repaintOverviewThemed();                      // continuous history ships in the category JSON
+  }
+  // The chart view is preserved, but the forward-curve table + spec card are rendered
+  // straight from cfg — refresh them from the reloaded category so they don't keep showing
+  // stale contract prices.
+  if (cfg) {
+    if (typeof renderTable === 'function') renderTable(cfg);
+    if (typeof renderSpecs === 'function') renderSpecs(cfg);
+  }
+}
+
 
 async function selectCurveContract(index, fallbackToContinuous = false) {
   const cfg = getCurrentCfg();

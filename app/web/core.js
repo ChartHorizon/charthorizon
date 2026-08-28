@@ -269,6 +269,12 @@ function repaintOverviewThemed() {
 // self-heals via its PAGES `load`, but overview has `load: null`, so switchPage()
 // consumes this flag to repaint the chart when the Futures tab is shown again.
 let _overviewThemeDirty = false;
+// Set when a board refresh lands while the Futures tab is hidden. That reload replaces every
+// contract object — including the lazily-fetched chart_history hanging off them — so the
+// chart left standing on the hidden tab is drawn from data the cache no longer holds, and it
+// kept showing pre-refresh bars until the user clicked a market. switchPage() consumes this
+// on the way back and re-establishes the chart from the refreshed category.
+let _overviewDataDirty = false;
 // Same idea for the Forex tab's TradingView pair chart: its theme is baked in at
 // creation, so a theme switch while Forex is hidden must re-mount it on return.
 let _fxThemeDirty = false;
@@ -361,7 +367,15 @@ function switchPage(page) {
   }
   const activeP = PAGES.find(p => p.id === target);
   if (activeP && activeP.load) activeP.load();
-  if (target === 'overview' && _overviewThemeDirty) { _overviewThemeDirty = false; repaintOverviewThemed(); }
+  if (target === 'overview' && (_overviewDataDirty || _overviewThemeDirty)) {
+    // Data wins over theme: refreshOverviewChart() repaints in the new theme either way,
+    // and unlike a bare repaint it re-fetches a contract history the refresh threw away.
+    const _needsData = _overviewDataDirty;
+    _overviewDataDirty = false;
+    _overviewThemeDirty = false;
+    if (_needsData && typeof refreshOverviewChart === 'function') refreshOverviewChart();
+    else repaintOverviewThemed();
+  }
   // openForex() already rebuilt the heatmap with the current theme; just re-mount the
   // open TradingView pair chart so it follows the theme switched while Forex was hidden.
   if (target === 'forex' && _fxThemeDirty) { _fxThemeDirty = false; if (typeof remountFxPairChart === 'function') remountFxPairChart(); }

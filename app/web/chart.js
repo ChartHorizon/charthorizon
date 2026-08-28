@@ -547,16 +547,22 @@ function setBtnStatus(buttonId, labelId, text, restore, ms = 2400) {
   setTimeout(() => { label.textContent = restore; btn.classList.remove('copied'); }, ms);
 }
 
-// Share the current chart on X (Twitter). X's web intent cannot attach an image, so
-// we copy the chart PNG to the clipboard and the user pastes it into the post with
-// Cmd/Ctrl+V. The clipboard write must be ISSUED inside the click gesture: Safari/
-// WebKit rejects a write made after `await`, so we hand ClipboardItem a Promise<Blob>
-// (the blob renders lazily) instead of awaiting the blob first. Chrome/Firefox accept
-// the promise form too. Awaiting the blob first silently failed on Safari (no image).
+// Share the current chart on X (Twitter). X attaches no image via URL, so we copy the
+// chart PNG to the clipboard and the user pastes it into the post with Cmd/Ctrl+V.
+//
+// Open the FULL composer (`/compose/post`), NOT the web intent (`/intent/post`): the
+// intent dialog accepts no media at all — no upload button, no paste target — so it
+// silently swallowed the pasted image and posted text only, in every browser. Both
+// routes take the same `?text=` prefill. Do not "simplify" this back to /intent/post.
+//
+// The clipboard write must be ISSUED inside the click gesture: Safari/WebKit rejects a
+// write made after `await`, so we hand ClipboardItem a Promise<Blob> (the blob renders
+// lazily) instead of awaiting the blob first. Chrome/Firefox accept the promise form
+// too. Awaiting the blob first silently failed on Safari (no image).
 async function shareToX(kind = 'overview') {
   const ctx = getChartExportContext(kind);
   const text = `${ctx.name || 'Chart'} · ChartHorizon`;
-  const intentUrl = `https://x.com/intent/post?text=${encodeURIComponent(text)}`;
+  const composeUrl = `https://x.com/compose/post?text=${encodeURIComponent(text)}`;
 
   let copied = false;
   if (navigator.clipboard && window.ClipboardItem) {
@@ -570,7 +576,7 @@ async function shareToX(kind = 'overview') {
     }
   }
 
-  const win = window.open(intentUrl, '_blank');
+  const win = window.open(composeUrl, '_blank');
   if (!win) {
     setBtnStatus(ctx.xButtonId, ctx.xLabelId, 'Allow popups', '', 3000);
     return;

@@ -40,7 +40,29 @@ let smtSeq = 0;          // guards against out-of-order async renders
 let smtActualMode = {};   // marketKey -> 'frontMonth' | 'continuous'
 function smtModeLabel(key) {
   if (smtState.contractMode !== 'frontMonth') return 'Continuous';
-  return smtActualMode[key] === 'continuous' ? 'Continuous (no front month)' : 'Front Month';
+  if (smtActualMode[key] === 'continuous') return 'Continuous (no front month)';
+  const front = smtFrontContract(smtCfg(key));
+  const code = front && (front.contract_symbol || front.yf_symbol);
+  return code ? `Front Month · ${code}` : 'Front Month';
+}
+
+// The market's config as already loaded (pure read, never fetches).
+function smtCfg(key) {
+  const meta = INDEX[key];
+  if (!meta) return null;
+  const cat = (typeof catCache === 'object') ? catCache[meta.slug] : null;
+  return (cat && cat[key]) || null;
+}
+
+// The front month is the LEAD contract by volume — the same definition the Futures tab
+// badges (frontContractIndex) and the calendar-spread pane uses. Taking contracts[0]
+// (nearest expiry) instead put Macro Shift on the dying month whenever liquidity had
+// already rolled forward: corn in August traded Dec (409k lots) while Sep (193k) was
+// drawn; gold was worse (GCZ26 186k vs GCQ26 478).
+function smtFrontContract(cfg) {
+  const cs = (cfg && cfg.contracts) || [];
+  const idx = frontContractIndex(cs);
+  return (idx >= 0 ? cs[idx] : null) || cs.find(c => c && c.available && c.yf_symbol) || cs[0] || null;
 }
 
 // ── Trend-line annotations: drawn into each chart's SVG (so the PNG export
@@ -198,8 +220,7 @@ async function smtLoadBars(key) {
 async function smtLoadFrontContractBars(cfg, key) {
   const markFront = () => { if (key) smtActualMode[key] = 'frontMonth'; };
   const markFallback = () => { if (key) smtActualMode[key] = 'continuous'; };
-  const front = (cfg.contracts || []).find(c => c && c.available && c.yf_symbol)
-    || (cfg.contracts || [])[0];
+  const front = smtFrontContract(cfg);
   if (!front || !front.yf_symbol) { markFallback(); return getContinuousContract(cfg).history || []; }
   if (front.chart_history && front.chart_history.length) { markFront(); return front.chart_history; }
   try {
@@ -219,14 +240,10 @@ async function smtLoadFrontContractBars(cfg, key) {
 // The yfinance symbol currently shown for `key` in Macro Shift: the front contract in
 // front-month mode (mirrors smtLoadFrontContractBars), else the native continuous.
 function smtActiveSymbol(key) {
-  const meta = INDEX[key];
-  if (!meta) return null;
-  const cat = (typeof catCache === 'object') ? catCache[meta.slug] : null;
-  const cfg = cat && cat[key];
+  const cfg = smtCfg(key);
   if (!cfg) return null;
   if (smtState.contractMode === 'frontMonth' && smtActualMode[key] !== 'continuous') {
-    const front = (cfg.contracts || []).find(c => c && c.available && c.yf_symbol)
-      || (cfg.contracts || [])[0];
+    const front = smtFrontContract(cfg);
     if (front && front.yf_symbol) return front.yf_symbol;
   }
   const cont = getContinuousContract(cfg);
@@ -723,7 +740,11 @@ function smtSvgToCanvas(targetWidth) {
   canvas.height = Math.round(totalH * scale);
   const cx = canvas.getContext('2d');
   cx.setTransform(scale, 0, 0, scale, 0, 0);
-  cx.fillStyle = '#ffffff';
+  // Canvas ground + per-chart labels come from the shared export palette, not literals:
+  // the SVG panes are painted with CHART_THEME.bg, so a hardcoded white left the header
+  // band, the label strips and the gaps light in dark mode (title unreadable on white).
+  const pal = exportPalette();
+  cx.fillStyle = pal.bg;
   cx.fillRect(0, 0, w, totalH);
   drawExportHeader(cx, w, smtExportContext());
   // Hide the interactive crosshair/date overlays for the export, then restore.
@@ -740,7 +761,7 @@ function smtSvgToCanvas(targetWidth) {
       const name = (INDEX[key] && INDEX[key].display_name) || key || '';
       const meta = `${smtInstrumentType(key)} · ${smtModeLabel(key)} · ${smtState.interval === 'weekly' ? 'Weekly' : 'Daily'} · ${(SMT_RANGES.find(r => r[0] === smtState.range) || [0, ''])[1]}`;
       cx.save();
-      cx.fillStyle = '#0f172a';
+      cx.fillStyle = pal.name;
       cx.font = '600 13px Geist, system-ui, sans-serif';
       cx.textAlign = 'left';
       cx.fillText(`${name}  —  ${meta}`, 12, y + 15);
@@ -798,19 +819,22 @@ async function shareSmtCharts() {
   setSmtBtnStatus('smtShareBtn', 'Downloaded', 'Share');
 }
 
-// X's web intent can't attach an image, so copy the PNG to the clipboard and the user
-// pastes it into the post with Cmd/Ctrl+V. The write must be ISSUED inside the click
-// gesture — Safari/WebKit rejects a write made after `await` — so hand ClipboardItem a
-// Promise<Blob> instead of awaiting the blob first (Chrome/Firefox accept this too).
+// X attaches no image via URL, so copy the PNG to the clipboard and the user pastes it
+// into the post with Cmd/Ctrl+V. Open the FULL composer (`/compose/post`), NOT the web
+// intent (`/intent/post`): the intent dialog accepts no media at all, so it silently
+// swallowed the paste and posted text only. Same `?text=` prefill on both routes.
+// The write must be ISSUED inside the click gesture — Safari/WebKit rejects a write made
+// after `await` — so hand ClipboardItem a Promise<Blob> instead of awaiting the blob
+// first (Chrome/Firefox accept this too).
 async function shareSmtToX() {
   const text = `${smtExportContext().name} · ChartHorizon`;
-  const intentUrl = `https://x.com/intent/post?text=${encodeURIComponent(text)}`;
+  const composeUrl = `https://x.com/compose/post?text=${encodeURIComponent(text)}`;
   let copied = false;
   if (navigator.clipboard && window.ClipboardItem) {
     try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': smtPngBlob() })]); copied = true; }
     catch (e) {}
   }
-  const win = window.open(intentUrl, '_blank');
+  const win = window.open(composeUrl, '_blank');
   if (!win) { setSmtBtnStatus('smtXBtn', 'Allow popups', 'X'); return; }
   setSmtBtnStatus('smtXBtn', copied ? 'Copied · paste in X' : 'Opened X', 'X');
 }

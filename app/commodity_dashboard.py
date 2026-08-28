@@ -66,6 +66,31 @@ from local_first_merge import *  # noqa: F401,F403
 from fetch_yfinance import *  # noqa: F401,F403
 from screener import *  # noqa: F401,F403
 import fx_rates
+import fetch_yfinance
+
+import yahoo_gateway
+from market_config import YF_GATEWAY_CAPACITY, YF_GATEWAY_REFILL_PER_SEC
+
+
+def _build_generator_session():
+    """Browser-impersonating session for the generator, mirroring start.py's live one."""
+    if curl_requests is None:
+        return None
+    try:
+        return curl_requests.Session(impersonate="chrome")
+    except Exception:
+        return None
+
+
+# The generator profile. Must be installed before fetch_yfinance issues its first
+# request, so this sits at import time, not inside gather_commodity_data(). Deliberately
+# omits lock_path: the generator is the process that HOLDS ff_data/refresh.lock, so
+# giving it lock_path would make it stand itself down and fetch nothing.
+yahoo_gateway.configure(
+    capacity=YF_GATEWAY_CAPACITY,
+    refill_per_sec=YF_GATEWAY_REFILL_PER_SEC,
+    session_factory=_build_generator_session,
+)
 
 
 # Background-refresh progress (read by start.py's /api/refresh-status). cwd is the
@@ -132,6 +157,7 @@ def gather_commodity_data(count=6):
     """
     Collects yfinance contracts, continuous charts and CFTC data for each market.
     """
+    fetch_yfinance.load_dead_memo()
     print("   Data sources: yfinance (OHLCV/prices/charts/contracts) · CFTC (weekly OI + COT)")
 
     # CFTC publishes COT weekly at 15:30 ET (holiday delays possible). Only fetch
@@ -192,6 +218,7 @@ def gather_commodity_data(count=6):
                 dataset[k] = entry
 
     _write_refresh_progress(done=_total, current=None, category=None)
+    fetch_yfinance.save_dead_memo()
     return dataset
 
 
@@ -266,8 +293,18 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         )
         # No accumulation: the spread is just the current contiguous block (the
         # currently-traded contracts), recomputed fresh each refresh — this avoids
-        # the gappy backfill that older accumulation produced.
-        calendar_spread_series = _cap_series_to_date(entry.get("calendar_spread_series") or [], board_settled)
+        # the gappy backfill that older accumulation produced. Recomputed-from-scratch
+        # is NOT the same as "an empty recomputation is the answer", though: the local
+        # store stands in when the fresh pass reaches no further than it does (see
+        # _choose_fresh_or_previous_spread), so a throttled night can no longer blank
+        # the pane — in the JSON or, via purge_calendar_spread, in the archive.
+        calendar_spread_series = _choose_fresh_or_previous_spread(
+            _cap_series_to_date(entry.get("calendar_spread_series") or [], board_settled),
+            previous_payload.get("calendar_spread_series"),
+        )
+        if calendar_spread_series and calendar_spread_series[0].get("source") == "previous_local_store":
+            print(f"   · {cfg['display_name']}: calendar spread reused from previous refresh "
+                  f"(fresh scan reached no further)")
         # COT: keep the fresh series, but fall back to the previously stored COT
         # when the fresh fetch is empty (mirrors the OI handling above), so a
         # blank/partial CFTC response never wipes a market's COT from the JSON.

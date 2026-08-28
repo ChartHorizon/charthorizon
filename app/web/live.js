@@ -11,6 +11,9 @@ const PREWARM_QUOTE_INTERVAL_MS = 60000;  // the Futures priority set minus the 
 const DEFERRED_WARM_INTERVAL_MS = 60 * 60 * 1000;  // deferred curve tail — low priority
 const DEFERRED_WARM_DELAY_MS = 1500;               // throttle between deferred fetches
 const LIVE_KICK_DEBOUNCE_MS = 180;                 // collapse rapid market-hopping into one fetch (the market you land on)
+const LIVE_CLOSED_INTERVAL_MS = 5 * 60 * 1000;     // every symbol on screen reports CLOSED —
+                                                   // the still-forming bar cannot move, so stop
+                                                   // paying 15s for an unchanged number
 
 // symbol -> { day: 'YYYY-MM-DD', price: Number }
 const liveQuotes = {};
@@ -62,11 +65,14 @@ function _liveSuspended() {
 
 // Batch fetch: one request for many symbols. Updates `liveQuotes` in place and arms
 // the cooldown if the server reports a 429 + retry_after. Returns the raw quotes map.
-async function _liveFetchQuotes(symbols) {
+async function _liveFetchQuotes(symbols, opts) {
   const list = (symbols || []).filter(Boolean);
   if (!list.length) return {};
   try {
-    const url = `/api/live-quote?symbols=${encodeURIComponent(list.join(','))}`;
+    // `preload` marks cold-start warm-up so the server's gateway ranks it below an
+    // on-screen chart; absent the flag the request counts as interactive (see start.py).
+    const pri = (opts && opts.priority === 'preload') ? '&priority=preload' : '';
+    const url = `/api/live-quote?symbols=${encodeURIComponent(list.join(','))}${pri}`;
     const res = await fetch(url, { cache: 'no-store' });
     const body = await res.json().catch(() => ({}));
     if (res.status === 429 && Number(body && body.retry_after) > 0) {
@@ -82,13 +88,27 @@ async function _liveFetchQuotes(symbols) {
         const num = v => (Number.isFinite(v) ? v : undefined);
         liveQuotes[sym] = {
           day: q.day, price: q.price,
-          open: num(q.open), high: num(q.high), low: num(q.low)
+          open: num(q.open), high: num(q.high), low: num(q.low),
+          state: q.state || null       // Yahoo marketState; null on the chart-path fallback
         };
         _liveConfirmed.add(sym);   // this session now has a live quote for `sym` -> hint can clear
       }
     }
     return quotes;
   } catch (e) { return {}; }
+}
+
+// True when every symbol currently on screen reports a closed session. Unknown state (an
+// older cached quote, or a continuous symbol served by the chart fallback, which carries no
+// marketState) counts as OPEN — the slow pulse must never latch on missing data.
+function liveAllClosed(symbols) {
+  const list = (symbols || []).filter(Boolean);
+  if (!list.length) return false;
+  return list.every(s => {
+    const q = liveQuotes[s];
+    if (!q || !q.state) return false;
+    return q.state !== 'REGULAR' && q.state !== 'PRE' && q.state !== 'POST';
+  });
 }
 
 // Futures-tab: resolve the on-screen symbol + the priority set (continuous, front, next).
@@ -151,19 +171,21 @@ function liveActiveTargets() {
   return { page: null, symbols: [], repaint: () => {} };
 }
 
-// Pre-warm targets (Futures): the priority set {continuous, front} minus the on-screen
-// symbol. Front carries its contract so its chart_history warms too (instant toggle);
-// continuous (history in the JSON) is quote-only — fewer requests. SMT pre-warm is out
-// of scope.
+// Pre-warm targets (Futures): the FRONT contract only. It carries its contract so its
+// chart_history warms too (instant toggle). The continuous symbol is deliberately NOT
+// prewarmed any more: it cannot use the batch quote endpoint (yahoo_gateway.is_batchable
+// — Yahoo prices `=F` from a different contract there than its own chart series uses), so
+// warming it would cost a full chart request per cycle for a chart nobody is looking at.
+// It is fetched on toggle instead: one interactive request, effectively instant.
 function livePrewarmTargets() {
   if (_liveLayerPage() !== 'overview') return [];
   const cfg = getCurrentCfg();
   const v = cfg ? liveResolveVariants(cfg) : null;
   if (!v) return [];
   const out = [];
-  const seen = new Set(v.activeSym ? [v.activeSym] : []);
-  if (v.frontSym && !seen.has(v.frontSym)) { out.push({ symbol: v.frontSym, contract: v.frontContract }); seen.add(v.frontSym); }
-  if (v.contSym  && !seen.has(v.contSym))  { out.push({ symbol: v.contSym }); seen.add(v.contSym); }
+  if (v.frontSym && v.frontSym !== v.activeSym) {
+    out.push({ symbol: v.frontSym, contract: v.frontContract });
+  }
   return out;
 }
 
@@ -175,17 +197,20 @@ async function _liveFetchQuote(symbol) {
   return liveQuotes[symbol] || null;
 }
 
-// Boot-time warm-up: fetch live quotes for many symbols up front, split into a few PARALLEL
-// requests (each /api/live-quote runs on its own server thread — ThreadingTCPServer — so the
-// per-request sequential get_many doesn't serialize the whole set). Fills `liveQuotes`, which
-// the cold-start boot splash polls so every Weekly-Outlook 4/4 chart is live before reveal.
-// Returns the symbols that now carry a usable live price.
-async function livePrefetch(symbols) {
+// Boot-time warm-up: fetch live quotes for many symbols up front, in ONE request. The
+// server batches every single-contract symbol into a single Yahoo call (see
+// yahoo_gateway.quotes), so splitting the list here would buy nothing and cost one Yahoo
+// call per chunk — this used to fire 5-symbol chunks in parallel because the server could
+// only ever fetch one symbol per request. Fills `liveQuotes`, which the cold-start warm-up
+// polls so every chart is live before the splash lifts. Returns the symbols that now carry
+// a usable live price.
+async function livePrefetch(symbols, opts) {
   const list = [...new Set((symbols || []).filter(Boolean))];
   if (!list.length) return [];
-  const CHUNK = 5, chunks = [];
+  // The endpoint caps a batch at 96 symbols; chunk only to respect that limit.
+  const CHUNK = 96, chunks = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
-  await Promise.all(chunks.map(c => _liveFetchQuotes(c)));
+  for (const c of chunks) await _liveFetchQuotes(c, opts);
   return list.filter(s => { const q = liveQuotes[s]; return !!(q && Number.isFinite(q.price) && q.day); });
 }
 
@@ -271,16 +296,32 @@ function startLiveLayer() {
     _liveTickActive();
     _liveTickPrewarm();
   }, LIVE_KICK_DEBOUNCE_MS);
-  _liveActiveTimer = setInterval(_liveTickActive, LIVE_QUOTE_INTERVAL_MS);
+  // The active tick re-schedules ITSELF rather than sitting on a fixed interval, so the
+  // cadence can drop to LIVE_CLOSED_INTERVAL_MS once every symbol on screen reports a
+  // closed session — and pick straight back up when one reopens.
+  _armActiveTick();
   _livePrewarmTimer = setInterval(_liveTickPrewarm, PREWARM_QUOTE_INTERVAL_MS);
   _liveDeferredTimer = setInterval(_liveTickDeferred, DEFERRED_WARM_INTERVAL_MS);
   // First deferred warm kicked behind the fast three so they win the request race.
   setTimeout(() => { if (_liveEnabled()) _liveTickDeferred(); }, DEFERRED_WARM_DELAY_MS);
 }
 
+// Schedule the next on-screen tick. Closed session -> the slow pulse; otherwise the normal
+// 15s. Re-arms after each tick so a reopening market is picked up on the next pass.
+function _armActiveTick() {
+  if (_liveActiveTimer) { clearTimeout(_liveActiveTimer); _liveActiveTimer = null; }
+  const closed = liveAllClosed(liveActiveTargets().symbols);
+  const delay = closed ? LIVE_CLOSED_INTERVAL_MS : LIVE_QUOTE_INTERVAL_MS;
+  _liveActiveTimer = setTimeout(async () => {
+    _liveActiveTimer = null;
+    await _liveTickActive();
+    if (_liveEnabled()) _armActiveTick();
+  }, delay);
+}
+
 function stopLiveLayer() {
   if (_liveKickTimer) { clearTimeout(_liveKickTimer); _liveKickTimer = null; }   // cancel a pending debounced kick
-  if (_liveActiveTimer) { clearInterval(_liveActiveTimer); _liveActiveTimer = null; }
+  if (_liveActiveTimer) { clearTimeout(_liveActiveTimer); _liveActiveTimer = null; }
   if (_livePrewarmTimer) { clearInterval(_livePrewarmTimer); _livePrewarmTimer = null; }
   if (_liveDeferredTimer) { clearInterval(_liveDeferredTimer); _liveDeferredTimer = null; }
 }

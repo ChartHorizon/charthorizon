@@ -53,6 +53,7 @@ __all__ = [
     '_cached_contract_volume_series',
     '_choose_fresh_or_previous_contracts',
     '_choose_fresh_or_previous_series',
+    '_choose_fresh_or_previous_spread',
     '_history_looks_worse',
     '_is_yfinance_volume_source',
     '_load_existing_market_payloads',
@@ -249,6 +250,38 @@ def _choose_fresh_or_previous_contracts(fresh_contracts, previous_contracts):
         out["source"] = "previous_local_store"
         merged.append(out)
     return merged
+
+
+def _choose_fresh_or_previous_spread(fresh_series, previous_series):
+    """Local-first gate for the calendar spread: a fresh series that reaches no further
+    than the stored one never replaces it.
+
+    The spread is the one series that is recomputed from scratch on every refresh (no
+    accumulation — see generate_html), which used to mean an empty recomputation was
+    written as the answer. A rate-limited run therefore erased it everywhere at once: on
+    2026-08-22 every one of the 39 markets came back `fresh_history_missing`, and because
+    eod_store purges the table before rewriting it, the SQLite archive went with the JSON.
+    Price/seasonal (_choose_fresh_or_previous_series), contract quotes
+    (_choose_fresh_or_previous_contracts) and COT all already refuse that trade; this
+    closes the last hole.
+
+    The test is the LAST DATE, never the length. `_trailing_same_pair_spread` deliberately
+    keeps only the pair trading today, so the session after a roll the series drops to one
+    or two points — perfectly healthy, and a length rule would freeze the pane on the old
+    pair for as long as the new one is short.
+    """
+    fresh_dates = _series_dates(fresh_series)
+    previous_dates = _series_dates(previous_series)
+    if not previous_dates:
+        return fresh_series or []
+    if fresh_dates and fresh_dates[-1] >= previous_dates[-1]:
+        return fresh_series
+    reused = []
+    for row in previous_series or []:
+        out = dict(row)
+        out["source"] = "previous_local_store"
+        reused.append(out)
+    return reused
 
 
 def _oi_series_from_cot(cot_series):

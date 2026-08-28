@@ -20,7 +20,7 @@
   document.documentElement.setAttribute('data-theme', dark?'dark':'light');
 }catch(e){document.documentElement.setAttribute('data-theme','light');}})();
 </script>
-<link rel="stylesheet" href="web/styles.css?v=44">
+<link rel="stylesheet" href="web/styles.css?v=45">
 </head>
 <body>
 <!-- Cold-start splash: kept up by html.booting (set in <head> before first paint, normal
@@ -28,16 +28,30 @@
 <div id="bootSplash" role="status" aria-live="polite">
   <div class="boot-splash-inner">
     <div class="boot-splash-title">ChartHorizon</div>
-    <div class="boot-splash-sub">Loading live prices<span id="bootSplashProgress"></span></div>
+    <div class="boot-splash-sub"><span id="bootSplashPhase">Starting…</span><span id="bootSplashProgress"></span></div>
     <div class="boot-splash-dots"><span></span><span></span><span></span></div>
+    <button id="bootSplashSkip" type="button" hidden onclick="_revealBootSplash()">Open anyway</button>
   </div>
 </div>
 <script>
-/* Safety net: if the boot JS never runs/errors, never trap the user behind the splash. */
-setTimeout(function(){var s=document.getElementById('bootSplash');if(s)s.classList.add('boot-splash-done');document.documentElement.classList.remove('booting');},15000);
+/* Last-resort net: if boot.js never ran at all (a syntax error, a failed load), nothing would
+   ever lift the splash. It stands down as soon as bootWarmup() marks itself started — from
+   then on the splash has its own stall watchdog and its own "Open anyway" button, and must
+   NOT be yanked out from under a warm-up that is still making progress. */
+setTimeout(function(){
+  if (window.__bootWarmupStarted) return;
+  var s=document.getElementById('bootSplash');
+  if(s)s.classList.add('boot-splash-done');
+  document.documentElement.classList.remove('booting');
+},60000);
 </script>
 <header>
-  <a class="logo" href="https://chart-horizon.com" target="_blank" rel="noopener" title="chart-horizon.com" aria-label="ChartHorizon — open chart-horizon.com">
+  <!-- /from-dashboard leitet (302) auf chart-horizon.com weiter und zaehlt den Klick
+       unterwegs als reine Tagessumme — keine IP, kein Cookie, nichts Personenbezogenes.
+       Es ist der einzige Anhaltspunkt dafuer, wie viele Leute das Dashboard ueberhaupt
+       benutzen. Der Pfad ist also kein Tippfehler: bitte nicht auf die nackte Domain
+       "aufraeumen". -->
+  <a class="logo" href="https://chart-horizon.com/from-dashboard" target="_blank" rel="noopener" title="chart-horizon.com" aria-label="ChartHorizon — open chart-horizon.com">
     <svg class="logo-icon" viewBox="0 0 100 100" fill="none" aria-hidden="true"><defs><linearGradient id="hlSun" x1="50" y1="29" x2="50" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fde08a"/><stop offset="0.5" stop-color="#fcd34d"/><stop offset="1" stop-color="#f97316"/></linearGradient><radialGradient id="hlBloom" cx="50%" cy="55%" r="50%"><stop offset="0" stop-color="#f97316" style="stop-opacity:var(--glow-a)"/><stop offset="0.45" stop-color="#fcd34d" style="stop-opacity:var(--glow-b)"/><stop offset="1" stop-color="#fcd34d" stop-opacity="0"/></radialGradient><linearGradient id="hlHz" x1="14" y1="0" x2="86" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa7b8" stop-opacity="0"/><stop offset="0.2" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="0.5" stop-color="#c6cfdb"/><stop offset="0.8" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="1" stop-color="#9aa7b8" stop-opacity="0"/></linearGradient><filter id="hlGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><circle cx="50" cy="55" r="42" fill="url(#hlBloom)"/><g transform="translate(0,3)"><line x1="14" y1="64" x2="86" y2="64" stroke="url(#hlHz)" stroke-width="2.6" stroke-linecap="round"/><g stroke="url(#hlSun)" stroke-width="5.2" stroke-linecap="round" fill="none" filter="url(#hlGlow)"><path d="M33 64 a17 17 0 0 1 34 0"/><line x1="50" y1="19" x2="50" y2="28"/><line x1="26.4" y1="35.6" x2="32" y2="41.3"/><line x1="73.6" y1="35.6" x2="68" y2="41.3"/></g></g></svg>
     <span class="logo-mark">ChartHorizon</span>
   </a>
@@ -420,13 +434,14 @@ setTimeout(function(){var s=document.getElementById('bootSplash');if(s)s.classLi
     <div class="screener-head">
       <div>
         <div class="screener-title">Settings</div>
-        <div class="screener-sub">Chart layouts (light/dark) and timezone</div>
+        <div class="screener-sub">Chart layouts (light/dark), timezone and version info</div>
       </div>
     </div>
     <div class="set-card" id="settingsAppearance"></div>
     <div class="set-card" id="settingsLayouts"></div>
     <div class="set-card" id="settingsTimezone"></div>
     <div class="set-card" id="settingsBackup"></div>
+    <div class="set-card" id="settingsAbout"></div>
   </div>
 </section>
 
@@ -451,7 +466,7 @@ setTimeout(function(){var s=document.getElementById('bootSplash');if(s)s.classLi
 <script src="web/live.js?v=7"></script>
 <script src="web/bigchart.js?v=14"></script>
 <script src="web/draw.js?v=25"></script>
-<script src="web/settings.js?v=14"></script>
+<script src="web/settings.js?v=15"></script>
 <script src="web/boot.js?v=11"></script>
 
 </body>

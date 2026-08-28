@@ -25,7 +25,9 @@ import subprocess
 import threading
 import webbrowser
 
+import app_version
 import live_cache
+import yahoo_gateway
 
 try:
     from curl_cffi import requests as _curl_requests
@@ -50,7 +52,9 @@ def _build_live_session():
             return None
 
 
-_LIVE_SESSION = _build_live_session()
+# The shared session now lives on the gateway (one owner for every Yahoo caller in this
+# process); _LIVE_SESSION is kept as a thin alias so the existing live-quote call sites
+# read unchanged.
 
 
 import http.server
@@ -74,6 +78,18 @@ YFINANCE_EOD_READY_ET = time(17, 30)
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
 LOCK_FILE = os.path.join("ff_data", "refresh.lock")
 LOCK_MAX_AGE = 1800  # seconds — a refresh never takes this long; older lock = stale
+
+# The SERVER gateway profile. The generator subprocess installs its own (see
+# commodity_dashboard.py) and must NOT be given lock_path — it is the process that holds
+# the lock. Here lock_path is exactly right: while a refresh runs, the server drops to
+# interactive-only so the refresh gets Yahoo largely to itself.
+yahoo_gateway.configure(
+    capacity=live_cache.LIVE_RATE_CAPACITY,
+    refill_per_sec=live_cache.LIVE_RATE_REFILL_PER_SEC,
+    session_factory=_build_live_session,
+    lock_path=LOCK_FILE,
+)
+_LIVE_SESSION = yahoo_gateway.gateway().session()
 
 FROZEN = getattr(sys, "frozen", False)
 
@@ -209,6 +225,28 @@ def refresh_status_payload():
         prog["state"] = "idle"
     prog["running"] = active
     return prog
+
+
+def _platform_label():
+    if sys.platform == "darwin":
+        return "macOS"
+    if sys.platform.startswith("win"):
+        return "Windows"
+    if sys.platform.startswith("linux"):
+        return "Linux"
+    return sys.platform
+
+
+def version_payload():
+    """Build info for the Settings tab's About card. Read from the RUNNING process,
+    never from ff_data/config.js: a freshly installed version must report itself
+    before (and even if) the first refresh rewrites the data folder."""
+    return {
+        "version": app_version.APP_VERSION,
+        "build": "installer" if FROZEN else "source",
+        "python": "%d.%d.%d" % sys.version_info[:3],
+        "platform": _platform_label(),
+    }
 
 
 def check_python():
@@ -468,11 +506,17 @@ def _drop_unsettled_tail(rows):
     return rows
 
 
-def _history_rows(symbol, period):
+def _history_rows(symbol, period, priority=yahoo_gateway.PRIORITY_INTERACTIVE):
+    """One contract's daily bars. Routed through the shared gateway: this path used to
+    run on a bare Ticker with no session, no rate cap and no retry — the same hole the
+    generator had, and the one the cold-start preload drives 39 requests through."""
     import yfinance as yf
 
-    ticker = yf.Ticker(symbol)
-    hist = ticker.history(period=period, interval="1d")
+    session = yahoo_gateway.gateway().session()
+    ticker = yf.Ticker(symbol, session=session) if session is not None else yf.Ticker(symbol)
+    hist = yahoo_gateway.gateway().call(
+        lambda: ticker.history(period=period, interval="1d"),
+        priority=priority, default=None)
     rows = []
     if hist is None or hist.empty:
         return rows
@@ -496,7 +540,8 @@ def _history_rows(symbol, period):
     return _drop_unsettled_tail(_trim_leading_flat(rows))
 
 
-def get_contract_history(symbol, period="5y"):
+def get_contract_history(symbol, period="5y",
+                         priority=yahoo_gateway.PRIORITY_INTERACTIVE):
     """Holt und cached die Historie eines einzelnen Futures-Kontrakts."""
     cache_path = _contract_history_cache_path(symbol, period)
     with _contract_cache_lock:
@@ -513,7 +558,7 @@ def get_contract_history(symbol, period="5y"):
                     pass
 
     # Netzwerk-Fetch bewusst außerhalb des Locks (langsam) — nur die FS-Ops sind serialisiert.
-    history = _history_rows(symbol, period)
+    history = _history_rows(symbol, period, priority=priority)
     payload = {
         "symbol": symbol,
         "period": period,
@@ -586,31 +631,72 @@ def _live_quote_row(symbol, session=None):
     }
 
 
-def _is_rate_limit_error(exc):
-    """Best-effort 429 detection across yfinance/curl_cffi versions (the dedicated
-    YFRateLimitError isn't present in every build)."""
-    if "ratelimit" in type(exc).__name__.lower():
-        return True
-    text = str(exc).lower()
-    return "429" in text or "too many requests" in text or "rate limit" in text
+# Moved to yahoo_gateway.py so the generator subprocess shares one definition. The alias
+# stays because this module is imported by tools and scripts outside this repo tree; the
+# gateway now normalises rate limits itself, so nothing in start.py calls it directly.
+_is_rate_limit_error = yahoo_gateway._is_rate_limit_error
 
 
-def _live_fetch_fn(symbol):
-    """Injected into LiveQuoteCache. Returns {"day","price"} (or a None-valued row) and
-    re-raises a 429 as live_cache.RateLimitedError so the breaker can trip on it."""
-    try:
-        row = _live_quote_row(symbol, session=_LIVE_SESSION)
-    except live_cache.RateLimitedError:
-        raise
-    except Exception as e:
-        if _is_rate_limit_error(e):
-            raise live_cache.RateLimitedError(str(e))
-        raise
-    return row if row is not None else {"day": None, "price": None}
+def _live_fetch_many(symbols, priority=yahoo_gateway.PRIORITY_INTERACTIVE):
+    """Injected into LiveQuoteCache. Batches every SINGLE-CONTRACT symbol into ONE Yahoo
+    request; continuous (`=F`) symbols keep the per-symbol chart path.
+
+    That split is measured, not cautious: Yahoo's quote endpoint prices a continuous
+    symbol from a different contract than its own chart series does (GC=F chart returns
+    GCQ26, GC=F quote returns GCZ26 — 14 of 16 `=F` symbols disagreed, up to 9.44 %), so
+    splicing a batched quote onto a continuous chart would draw a jump that is not in the
+    market. See yahoo_gateway.is_batchable.
+    """
+    symbols = list(symbols)
+    batchable = [s for s in symbols if yahoo_gateway.is_batchable(s)]
+    rest = [s for s in symbols if not yahoo_gateway.is_batchable(s)]
+    out = {}
+    batch_ran = True
+    if batchable:
+        # `status` is how the batch reports itself: {} means both "ran, nothing usable"
+        # and "never ran", and the breaker below must not confuse the two.
+        status = {}
+        out.update(yahoo_gateway.gateway().quotes(batchable, priority=priority,
+                                                  status=status))
+        if status.get("rate_limited") or yahoo_gateway.gateway().cooldown_active():
+            # Yahoo pushed back. Raising is what arms the client-side cooldown: the cache
+            # trips its own breaker, /api/live-quote answers 429 + retry_after, and
+            # live.js stands the poller down. Swallowing this (returning {}) left every
+            # one of those unreachable — a failed batch even RESET the cache breaker.
+            raise live_cache.RateLimitedError("Yahoo rate limit (batch quote)")
+        # A batch that did not RUN — the bucket refused it, the breaker was open, or the
+        # request failed. Fanning out to one request per symbol there is strictly worse
+        # than doing nothing: it spends N requests of exactly the budget that just said
+        # no, and it is how a declined batch of 39 turned into 39 individual chart
+        # fetches. Serve last-known instead (the cache does that for us).
+        batch_ran = bool(status.get("ran"))
+    # Continuous symbols never batch, so they always take the per-symbol chart path. Batchable
+    # ones only fall back when the batch actually ran and simply omitted them.
+    fallback = list(rest)
+    if batch_ran:
+        fallback += [s for s in batchable if s not in out]
+    for symbol in fallback:
+        try:
+            # THROUGH the gateway, one token per symbol: get_many() spends a single token
+            # for the whole call, so an unwrapped fallback let one /api/live-quote of up
+            # to 96 continuous symbols fire up to 96 unrationed Yahoo requests from one
+            # handler thread — no breaker, no priority, no 429 normalisation. The
+            # RateLimitedError below is only reachable because the gateway raises it.
+            row = yahoo_gateway.gateway().call(
+                lambda: _live_quote_row(symbol, session=yahoo_gateway.gateway().session()),
+                priority=priority, default=None)
+        except live_cache.RateLimitedError:
+            raise                      # let the cache trip its breaker, as before
+        except Exception:
+            continue
+        if row:
+            row.setdefault("state", None)
+            out[symbol] = row
+    return out
 
 
 # One process-wide cache shared by every request thread (cross-tab + cross-poll dedup).
-_live_quote_cache = live_cache.LiveQuoteCache(_live_fetch_fn)
+_live_quote_cache = live_cache.LiveQuoteCache(_live_fetch_many)
 
 
 def live_quote_payload(symbol):
@@ -619,12 +705,14 @@ def live_quote_payload(symbol):
     return {
         "symbol": symbol, "price": q.get("price"), "day": q.get("day"),
         "open": q.get("open"), "high": q.get("high"), "low": q.get("low"),
+        "state": q.get("state"),
     }
 
 
-def live_quotes_payload(symbols):
-    """Batch form: one request warms/serves many symbols (e.g. the SMT tab's 3 charts)."""
-    return {"quotes": _live_quote_cache.get_many(symbols)}
+def live_quotes_payload(symbols, priority=yahoo_gateway.PRIORITY_INTERACTIVE):
+    """Batch form: ONE Yahoo request warms/serves every single-contract symbol asked for
+    (the cold-start preload sends all 39 front months in one call)."""
+    return {"quotes": _live_quote_cache.get_many(symbols, priority=priority)}
 
 
 def live_cooldown_retry_after():
@@ -673,10 +761,24 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    @staticmethod
+    def _priority(qs):
+        """The server cannot infer WHY a request was made, so the client declares it.
+        Default is interactive — every pre-existing caller is a user action — and the
+        value is validated against the two client-reachable classes, so a crafted request
+        cannot claim one the frontend never uses (notably never PRIORITY_BULK, which
+        outranks nothing but is reserved for the generator)."""
+        want = (qs.get("priority") or [""])[0].strip()
+        return (yahoo_gateway.PRIORITY_PRELOAD if want == "preload"
+                else yahoo_gateway.PRIORITY_INTERACTIVE)
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/refresh-status":
             self._send_json(200, refresh_status_payload())
+            return
+        if parsed.path == "/api/version":
+            self._send_json(200, version_payload())
             return
         if parsed.path == "/api/contract-history":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -688,7 +790,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             if period not in {"6mo", "1y", "2y", "5y", "max"}:
                 period = "5y"
             try:
-                self._send_json(200, get_contract_history(symbol, period))
+                self._send_json(200, get_contract_history(
+                    symbol, period, priority=self._priority(qs)))
             except Exception as e:
                 self._send_json(500, {"error": str(e), "symbol": symbol})
             return
@@ -699,8 +802,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             symbols_raw = (qs.get("symbols") or [""])[0].strip()
             if symbols_raw:                              # batch form: ?symbols=A,B,C
                 syms = [s.strip() for s in symbols_raw.split(",") if s.strip()]
-                syms = [s for s in syms if re.fullmatch(r"[A-Za-z0-9_.=-]{2,32}", s)][:12]
-                payload = live_quotes_payload(syms)
+                # 96 covers the cold-start preload's 39 front-month symbols with room to
+                # spare; yahoo_gateway chunks at QUOTE_BATCH_SIZE regardless.
+                syms = [s for s in syms if re.fullmatch(r"[A-Za-z0-9_.=-]{2,32}", s)][:96]
+                payload = live_quotes_payload(syms, priority=self._priority(qs))
                 if retry > 0:
                     payload["retry_after"] = retry
                     self._send_json(429, payload)

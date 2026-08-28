@@ -6,6 +6,16 @@ renderWatchlist();
 // so its `= null` init can never clobber the running interval's id. Keep idempotent.
 var _headerClockTimer = null;
 
+// Cold-start warm-up state. `var`, and declared HERE, because bootWarmup() is invoked from
+// the branch a few lines below while the definitions live at the bottom of this file — a
+// `let`/`const` down there is in the temporal dead zone at that moment and throws
+// "Cannot access '_bootProgressTick' before initialization", which silently kills the boot.
+var BOOT_STALL_MS = 15000;            // no progress for this long -> offer "Open anyway"
+var BOOT_HISTORY_CONCURRENCY = 6;     // parallel contract-history fetches during phase 2
+var BOOT_REFRESH_POLL_MS = 1000;      // /api/refresh-status cadence while a refresh runs
+var _bootProgressTick = 0;            // bumped by _bootPhase; the stall watchdog watches it
+var _bootWatchdogTimer = null;
+
 // Card-Mode: NUR der Content-Bot ruft `?card=<key>` auf. Konfiguriert den Future-Chart
 // (Front-Month · Daily · 12M · Spread + COT Hedging Program) für den PNG-Export und
 // zeichnet die 4/4-Marker — beides passiert ausschließlich hier, das normale
@@ -42,9 +52,9 @@ if (_cardKey === 'fx') {
       .finally(() => switchCommodity(_cardKey));
   }
 } else {
-  // Cold start: keep the splash up until every Weekly-Outlook 4/4 result has a live price,
-  // then reveal. Fire-and-forget (self-dismissing); runs only here, so bot PNGs are unaffected.
-  runBootSplash();
+  // Cold start: keep the splash up until the whole board is loaded, then reveal.
+  // Fire-and-forget (self-dismissing); runs only here, so bot PNGs are unaffected.
+  bootWarmup();
   try {
     const _lastMarket = localStorage.getItem(LAST_MARKET_KEY);
     if (_lastMarket && INDEX[_lastMarket]) currentKey = _lastMarket;
@@ -97,16 +107,20 @@ window.addEventListener('resize', () => {
 
 // ── Cold-start boot splash ───────────────────────────────────────────────────
 // Hold the splash (html.booting, set in <head> before first paint — normal dashboard only)
-// until every Weekly-Outlook 4/4 result carries a live price, then fade it out. We prefetch
-// each 4/4 market's category + front history + live quote up front, so on reveal the whole
-// Weekly Outlook is live and no candle "pops in" afterwards. A safety deadline guarantees the
-// splash never traps the user (Yahoo down, a 429, or an illiquid symbol that never quotes).
+// until the whole board is in hand, then fade it out. Every category, the screener and every
+// market's front-month history are loaded up front, so on reveal each tab opens populated and
+// no candle "pops in" afterwards. There is no timed reveal: a stalled warm-up surfaces an
+// "Open anyway" button instead (see the stall watchdog below).
 function _hasLiveQuote(sym) {
   const q = (sym && typeof liveQuotes === 'object' && liveQuotes) ? liveQuotes[sym] : null;
   return !!(q && Number.isFinite(q.price) && q.day);
 }
 
 function _revealBootSplash() {
+  // Every exit from the splash runs through here — including the "Open anyway" button and
+  // a warm-up hung on a fetch that never resolves — so this is where the watchdog is
+  // stopped. Otherwise its 15s interval kept firing for the life of the page.
+  _bootStopWatchdog();
   // Draw the prefetched live quote onto the on-screen chart(s) FIRST, so today's candle is
   // actually standing the moment the splash lifts (not "pops in" a tick later).
   try { if (typeof liveActiveTargets === 'function') liveActiveTargets().repaint(); } catch (e) {}
@@ -115,107 +129,156 @@ function _revealBootSplash() {
   setTimeout(() => { document.documentElement.classList.remove('booting'); }, 450); // then display:none
 }
 
-// The selected market opens on its FRONT-MONTH contract by default (switchCommodity, row 0).
-// Pre-load that contract's history so the cold-start chart opens DIRECTLY on the front month
-// (consistent — no continuous flash behind the splash), and return its live symbols in priority
-// order: FRONT MONTH first (always), continuous second. Loads the category if needed; the splash
-// warms this market even when it is not a 4/4 result.
-async function _bootSelectedMarketSymbols() {
-  let key = (typeof currentKey !== 'undefined') ? currentKey : null;
-  try { const last = localStorage.getItem(LAST_MARKET_KEY); if (last && INDEX[last]) key = last; } catch (e) {}
-  const meta = key && INDEX[key];
-  if (!meta) return [];
-  let cfg = catCache[meta.slug] && catCache[meta.slug][key];
-  if (!cfg) { try { const cat = await loadCategory(meta.slug); cfg = cat && cat[key]; } catch (e) {} }
-  if (!cfg) return [];
-  const front = (cfg.contracts || []).find(c => c && c.yf_symbol) || null;   // row 0 = front month (matches switchCommodity)
-  if (front && !(front.chart_history || []).length && typeof fetchContractHistory === 'function') {
-    try { await fetchContractHistory(front); } catch (e) {}                  // so the chart opens directly on the front month
+// ── Stall watchdog ───────────────────────────────────────────────────────────
+// The splash no longer reveals itself on a timer — it waits for real progress. But it must
+// never TRAP the user either (Yahoo down, a 429 cooldown, an illiquid symbol that never
+// quotes). So: 15s with the phase counter frozen reveals an "Open anyway" button, and the
+// user decides. There is no silent auto-reveal any more.
+function _bootStartWatchdog() {
+  let seen = _bootProgressTick;          // compare against the value at ARM time, so a
+  _bootWatchdogTimer = setInterval(() => {   // warm-up frozen from the start is caught at 15s
+    if (_bootProgressTick !== seen) { seen = _bootProgressTick; return; }   // still moving
+    _bootOfferSkip();                                                       // stalled: offer the exit
+  }, BOOT_STALL_MS);
+}
+
+// Idempotent by construction (null timer -> no-op): bootWarmup() and _revealBootSplash()
+// both call it, and on the normal path both run.
+function _bootStopWatchdog() {
+  if (_bootWatchdogTimer) { clearInterval(_bootWatchdogTimer); _bootWatchdogTimer = null; }
+}
+
+function _bootOfferSkip() {
+  const btn = document.getElementById('bootSplashSkip');
+  if (btn) btn.hidden = false;
+}
+
+// ── Cold-start warm-up ───────────────────────────────────────────────────────
+// The splash stays up until every tab's data is in hand, then reveals. Page-aware
+// prefetching is gone: the dashboard used to open on a 12s deadline whether or not it was
+// ready, and everything else loaded while the user was already clicking.
+//
+// Yahoo cost: phase 2 is up to 39 contract-history requests on a cold start (zero once
+// ff_data/contract_history/ is warm), phase 3 is ONE batch request for all the front-month
+// quotes. Both run at `preload` priority so a board refresh still outranks them.
+function _bootPhase(label, done, total) {
+  const p = document.getElementById('bootSplashPhase');
+  const c = document.getElementById('bootSplashProgress');
+  if (p) p.textContent = label;
+  if (c) c.textContent = (total > 0) ? ` · ${done}/${total}` : '';
+  _bootProgressTick += 1;                 // feeds the stall watchdog above
+}
+
+// Phase 1: every category + the screener. Local files, no Yahoo requests.
+async function _bootLoadBoard() {
+  const slugs = [...new Set(Object.keys(INDEX || {})
+    .map(k => INDEX[k] && INDEX[k].slug).filter(Boolean))];
+  let done = 0;
+  _bootPhase('Loading market data', 0, slugs.length);
+  for (const slug of slugs) {
+    try { await loadCategory(slug); } catch (e) {}
+    _bootPhase('Loading market data', ++done, slugs.length);
   }
-  const cont = (typeof getContinuousContract === 'function') ? (getContinuousContract(cfg) || {}) : (cfg.continuous_contract || {});
+  if (typeof ensureScreenerData === 'function') {
+    try { await ensureScreenerData(); } catch (e) {}
+  }
+}
+
+// Each market's LEAD (highest-volume) contract — what switchCommodity actually opens on, and
+// what the Weekly Outlook and Macro Shift both draw. Pure read of what phase 1 loaded; costs
+// nothing, so the quote request can go before the histories.
+function _bootFrontContracts() {
   const out = [];
-  if (front && front.yf_symbol) out.push(front.yf_symbol);                   // prio 1: front month (always)
-  const contSym = cont.yf_symbol || cont.tv_symbol;
-  if (contSym && !out.includes(contSym)) out.push(contSym);                  // prio 2: continuous
+  for (const key of Object.keys(INDEX || {})) {
+    const meta = INDEX[key];
+    const cfg = meta && catCache[meta.slug] && catCache[meta.slug][key];
+    if (!cfg) continue;
+    const contracts = cfg.contracts || [];
+    const idx = (typeof frontContractIndex === 'function') ? frontContractIndex(contracts) : -1;
+    const front = (idx >= 0 ? contracts[idx] : null)
+      || contracts.find(c => c && c.available && c.yf_symbol) || null;
+    if (front && front.yf_symbol) out.push(front);
+  }
   return out;
 }
 
-// The live symbols of every Weekly-Outlook 4/4 result: per market, load its category + front
-// history, then map to the exact symbol its chart plots (front-month, or continuous fallback).
-async function _bootFourFourSymbols() {
-  if (typeof weeklyOutlookSetups !== 'function') return [];
-  const full = weeklyOutlookSetups().full || [];
-  const syms = [];
-  await Promise.all(full.map(async ({ r }) => {
-    const meta = r && INDEX[r.key];
-    if (!meta) return;
-    let cfg = catCache[meta.slug] && catCache[meta.slug][r.key];
-    if (!cfg) { try { const cat = await loadCategory(meta.slug); cfg = cat && cat[r.key]; } catch (e) {} }
-    if (!cfg) return;
-    if (typeof wkEnsureFrontHistory === 'function') { try { await wkEnsureFrontHistory(cfg); } catch (e) {} }
-    const sym = (typeof wkLiveSymbol === 'function') ? wkLiveSymbol(cfg) : null;
-    if (sym) syms.push(sym);
-  }));
-  return [...new Set(syms)];
-}
-
-// The top tab the cold start opens on (persisted) — drives WHAT the splash prefetches/waits for.
-function _bootOpeningPage() {
-  try {
-    const sp = (typeof ACTIVE_PAGE_KEY !== 'undefined') ? localStorage.getItem(ACTIVE_PAGE_KEY) : null;
-    if (sp && typeof PAGE_IDS !== 'undefined' && PAGE_IDS.has(sp)) return sp;
-  } catch (e) {}
-  return 'overview';
-}
-// Whether the Screener opens on its Weekly Outlook (persisted) — only then does it have charts.
-function _bootScreenerWeekly() {
-  try {
-    const key = (typeof SCREENER_STATE_KEY !== 'undefined') ? SCREENER_STATE_KEY : 'ch_screener_state';
-    const st = JSON.parse(localStorage.getItem(key) || 'null');
-    return !!(st && st.view === 'weekly');
-  } catch (e) { return false; }
-}
-
-async function runBootSplash() {
-  if (!document.documentElement.classList.contains('booting')) return;   // card-mode / already revealed
-  const progress = document.getElementById('bootSplashProgress');
-  const DEADLINE_MS = 12000, MIN_MS = 400, t0 = Date.now();
-  let done = false;
-  const finish = () => { if (done) return; done = true; _revealBootSplash(); };
-  const safety = setTimeout(finish, DEADLINE_MS);                          // never trap the user
-  try {
-    // Page-aware: only prefetch/wait for the charts the cold start actually OPENS on. Opening on
-    // the Futures tab -> just the selected market's daily chart; opening on the Weekly Outlook ->
-    // its 4/4 charts. Other pages (and the lazy weekly charts you scroll to / click into later)
-    // load on their own — no point blocking the splash on charts you're not looking at yet.
-    const openingPage = _bootOpeningPage();
-    let syms = [], primary = null;   // primary = the single highest-priority symbol, fired first
-    if (openingPage === 'overview') {
-      try { syms = await _bootSelectedMarketSymbols(); } catch (e) {}   // [front, continuous]
-      primary = syms[0] || null;                                        // front month first
-    } else if (openingPage === 'screener' && _bootScreenerWeekly()) {
-      if (typeof ensureScreenerData === 'function') { try { await ensureScreenerData(); } catch (e) {} }
-      try { syms = await _bootFourFourSymbols(); } catch (e) {}         // every 4/4 result chart
-    }
-    const setProg = () => { if (progress) progress.textContent = syms.length ? ` · ${syms.filter(_hasLiveQuote).length}/${syms.length}` : ''; };
-    if (!done && syms.length && typeof livePrefetch === 'function') {
-      if (primary) livePrefetch([primary]);   // highest-priority symbol first, before the rest
-      setProg();
-      await livePrefetch(syms);
-      setProg();
-      while (!done && !syms.every(_hasLiveQuote) && Date.now() - t0 < DEADLINE_MS) {
-        await new Promise(res => setTimeout(res, 300));
-        const pending = syms.filter(s => !_hasLiveQuote(s));
-        if (pending.length) livePrefetch(pending);                        // retry stragglers (cap tokens refill)
-        setProg();
+// Phase 3: the cold contract histories, with BOUNDED concurrency. Strictly sequential took
+// ~4s per contract against real Yahoo — nearly three minutes for a full board, all of it
+// behind the splash — and the gateway rate-caps the outbound requests regardless, so
+// serialising bought nothing. Warm contracts cost nothing: fetchContractHistory returns
+// immediately when the history is already on the contract.
+async function _bootWarmHistories(fronts) {
+  let done = 0;
+  _bootPhase('Contract histories', 0, fronts.length);
+  const queue = fronts.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const c = queue.shift();
+      if (!(c.chart_history || []).length && typeof fetchContractHistory === 'function') {
+        try { await fetchContractHistory(c, { priority: 'preload' }); } catch (e) {}
       }
+      _bootPhase('Contract histories', ++done, fronts.length);
     }
-  } catch (e) { /* fall through and reveal */ }
-  if (done) return;
-  clearTimeout(safety);
-  const elapsed = Date.now() - t0;
-  if (elapsed < MIN_MS) await new Promise(res => setTimeout(res, MIN_MS - elapsed));
-  finish();
+  };
+  await Promise.all(Array.from({ length: BOOT_HISTORY_CONCURRENCY }, worker));
+}
+
+// Phase 0: a board refresh that is ALREADY running. start.py kicks one on every warm start
+// (the double-click path), before it serves — and the server gateway refuses anything
+// non-interactive while ff_data/refresh.lock exists. Phases 2 and 3 would then be declined
+// before they left the process, and the splash would count 39/39 against no-ops and reveal
+// an empty board. So we wait the refresh out and show ITS progress, which is what the user
+// is actually waiting for. Returns true if we waited at all.
+//
+// That wait is legitimately minutes long, so "Open anyway" is offered IMMEDIATELY here
+// rather than after the 15s stall: the user must always be able to enter. Any failure
+// (endpoint missing, bad JSON) just returns and lets the phases run.
+//
+// The categories phase 1 already read are the pre-refresh ones; refreshing them here
+// would be a no-op (loadCategory serves catCache), and it is not this function's job —
+// startRefreshPolling() is watching the same refresh and reloads every loaded category
+// in place when it reports 'done'.
+async function _bootWaitForRefresh() {
+  let offeredSkip = false;
+  for (;;) {
+    let status = null;
+    try {
+      const res = await fetch('/api/refresh-status', { cache: 'no-store' });
+      if (!res.ok) return;
+      status = await res.json();
+    } catch (e) { return; }
+    if (!status || status.state !== 'running') return;
+    if (!offeredSkip) { offeredSkip = true; _bootOfferSkip(); }
+    _bootPhase('Updating market data', Number(status.done) || 0, Number(status.total) || 0);
+    await new Promise(r => setTimeout(r, BOOT_REFRESH_POLL_MS));
+  }
+}
+
+async function bootWarmup() {
+  if (!document.documentElement.classList.contains('booting')) return;  // card-mode / already revealed
+  window.__bootWarmupStarted = true;      // tells the inline net in index.html to stand down
+  _bootStartWatchdog();
+  try {
+    await _bootLoadBoard();
+    // A refresh in flight declines every preload request below; wait it out first (and
+    // render its progress meanwhile) instead of counting phases that did nothing.
+    await _bootWaitForRefresh();
+    const fronts = _bootFrontContracts();
+    const symbols = [...new Set(fronts.map(c => c.yf_symbol))];
+
+    // Quotes BEFORE histories, deliberately. The quote phase is ONE request for the whole
+    // board; the history phase is up to 39. Warming histories first drained the preload
+    // budget below its floor and the single most valuable request of the whole warm-up was
+    // the one that got refused — the board came up with 1 of 39 live prices.
+    if (symbols.length && typeof livePrefetch === 'function') {
+      _bootPhase('Live prices', 0, symbols.length);
+      await livePrefetch(symbols, { priority: 'preload' });   // ONE batch request for all
+      _bootPhase('Live prices', symbols.filter(_hasLiveQuote).length, symbols.length);
+    }
+    await _bootWarmHistories(fronts);
+  } catch (e) { /* fall through and reveal — a broken warm-up must never trap the user */ }
+  _bootStopWatchdog();
+  _revealBootSplash();
 }
 
 // Header-Uhr (#clock + .hdr-date). Re-initialisierbar: der Settings-Tab ruft sie nach

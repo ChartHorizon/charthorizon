@@ -589,13 +589,18 @@ function wkObserveCharts() {
 
 // ── Front-month series for the Weekly-Outlook 4/4 charts ──────────────────────
 // These charts plot the current FRONT-MONTH contract (e.g. CLN26), not the native
-// continuous: the nearest tradable contract's own daily history, lazily fetched via
-// /api/contract-history (reusing the Futures-tab loader, cached on the contract).
+// continuous: the LEAD (highest-volume) contract's own daily history, lazily fetched
+// via /api/contract-history (reusing the Futures-tab loader, cached on the contract).
 // Markets without a tradable front contract (e.g. the USDX proxy) fall back to the
 // native continuous.
+// The lead is `frontContractIndex` — the same definition switchCommodity opens the
+// Futures chart on and the FRONT badge marks. Taking the nearest *expiry* instead drew
+// the dying month once liquidity had rolled forward (corn in August: Sep 193k lots on
+// screen while Dec traded 409k; gold GCQ26 478 vs GCZ26 186k).
 function wkFrontContract(cfg) {
   const cs = (cfg && cfg.contracts) || [];
-  return cs.find(c => c && c.available && c.yf_symbol) || cs[0] || null;
+  const idx = (typeof frontContractIndex === 'function') ? frontContractIndex(cs) : -1;
+  return (idx >= 0 ? cs[idx] : null) || cs.find(c => c && c.available && c.yf_symbol) || cs[0] || null;
 }
 
 // Synchronously resolve which bars a weekly chart draws: the front contract's own
