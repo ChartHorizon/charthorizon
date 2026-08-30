@@ -24,7 +24,7 @@ hiddenimports += [
     "commodity_dashboard", "market_config", "series_utils", "calendar_utils",
     "contracts", "local_first_merge", "fetch_yfinance", "fetch_cftc",
     "screener", "eod_store", "fx_rates", "live_cache", "app_version",
-    "yahoo_gateway", "dead_symbols",
+    "yahoo_gateway", "dead_symbols", "net_tls",
 ]
 
 # Static frontend, served from the read-only bundle (APP_DIR == sys._MEIPASS).

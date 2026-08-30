@@ -263,19 +263,17 @@ const FX_PAIR_ORDER = [
 ];
 
 // TELEGRAM-SIGNAL threshold: the content bot only posts an FX pair as a signal when its
-// base-minus-quote score spread is at least this strong (out of fxMaxPairSpread() = 12).
+// base-minus-quote score spread is at least this strong (out of fxMaxPairSpread() = 10).
 // Quality over quantity. NOTE: the on-screen Forex-tab heatmap ignores this and always
 // shows the strongest pairs; this gate is for the Telegram signal (bot + ?card=fx) only.
-const FX_PAIR_MIN_SPREAD = 7;
+// 6/10 (60.0%) replaced 7/12 (58.3%) when the score dropped from four signals to three —
+// a slight tightening, not a loosening (5/10 would be 50%, a real loosening).
+const FX_PAIR_MIN_SPREAD = 6;
 
+// The futures signal score of this currency's contract, straight from the generator
+// (screener.py: screener_score). Range -3…+3 since the plain COT signal was dropped.
 function screenerScore(r) {
-  if (!r) return 0;
-  let s = 0;
-  for (const k of ['seasonal', 'cot', 'cot_hedge']) {
-    if (r[k] === 'bullish') s++; else if (r[k] === 'bearish') s--;
-  }
-  if (r.structure === 'premium') s++; else if (r.structure === 'discount') s--;
-  return s;
+  return (r && Number.isFinite(r.score)) ? r.score : 0;
 }
 
 function roundScore(v) {
@@ -297,7 +295,7 @@ function fxInterestRateScore(cur) {
 }
 
 function fxMaxScore() {
-  return 4 + FX_INTEREST_RATE_SCORE_RANGE;
+  return 3 + FX_INTEREST_RATE_SCORE_RANGE;
 }
 
 function fxMaxPairSpread() {
@@ -469,8 +467,8 @@ function fxRateScoreTone(score) {
 function fxFilterLegend() {
   return `<div class="fx-detail-panel">
     <div class="fx-detail-title">Heatmap Filter Logic</div>
-    <div class="fx-detail-copy">Final currency score = Seasonals + COT + COT Hedging + Term Structure + Interest Rate Bias. Pair score = base currency score minus quote currency score, using fixed canonical FX notation.</div>
-    <div class="fx-filter-line"><strong>Seasonals, COT, COT Hedging:</strong> +1 bullish / -1 bearish · <strong>Term Structure:</strong> +1 premium / -1 discount · <strong>Interest Rates:</strong> +${FX_INTEREST_RATE_SCORE_RANGE} highest / -${FX_INTEREST_RATE_SCORE_RANGE} lowest, scaled across the FX basket.</div>
+    <div class="fx-detail-copy">Final currency score = Seasonals + COT Hedging + Term Structure + Interest Rate Bias. Pair score = base currency score minus quote currency score, using fixed canonical FX notation.</div>
+    <div class="fx-filter-line"><strong>Seasonals, COT Hedging:</strong> +1 bullish / -1 bearish · <strong>Term Structure:</strong> +1 premium / -1 discount · <strong>Interest Rates:</strong> +${FX_INTEREST_RATE_SCORE_RANGE} highest / -${FX_INTEREST_RATE_SCORE_RANGE} lowest, scaled across the FX basket.</div>
     <div class="fx-filter-line"><strong>Pairs shown:</strong> the strongest divergences, ranked by score spread. A Telegram signal requires a spread of at least ${FX_PAIR_MIN_SPREAD}/${fxMaxPairSpread()} — quality over quantity.</div>
   </div>`;
 }
@@ -559,7 +557,7 @@ function renderFxSection() {
   el.innerHTML = `
     <div class="fx-head">
       <div class="fx-title">FX Strength &amp; Pairs</div>
-      <div class="fx-note">Signals (-4…+4) + rates (+/-${FX_INTEREST_RATE_SCORE_RANGE}) · total max +/-${fxMaxScore()}</div>
+      <div class="fx-note">Signals (-3…+3) + rates (+/-${FX_INTEREST_RATE_SCORE_RANGE}) · total max +/-${fxMaxScore()}</div>
     </div>
     ${biasBoard}
     ${neutralRow}
@@ -571,11 +569,11 @@ function renderFxSection() {
   }
 }
 
-// ── Card-Mode: gebrandete FX-Heatmap-Karte für den Content-Bot (?card=fx) ──
-// Nutzt die ECHTEN Heatmap-Fragmente (Währungsstärke-Spalten + gefilterte Paar-Regale),
-// nur in einen Export-Rahmen mit Header (ChartHorizon · Data-as-of · Export-Zeit) und
-// Risk-Disclaimer verpackt. Wird headless als DOM-Element gescreenshottet (kein SVG-Export,
-// weil die Heatmap reines HTML/CSS ist). Das normale Forex-Tab bleibt unberührt.
+// ── Card-mode: branded FX heatmap card for the content bot (?card=fx) ──
+// Uses the REAL heatmap fragments (currency-strength columns + filtered pair shelves),
+// merely wrapped in an export frame with a header (EXPORT_BRAND · data-as-of · export
+// time) and a risk disclaimer. Screenshotted headlessly as a DOM element (no SVG export,
+// because the heatmap is plain HTML/CSS). The normal Forex tab is untouched.
 async function openForexCard() {
   if (!(await ensureScreenerData(document.body))) return;
   renderFxCard();
@@ -610,11 +608,11 @@ function renderFxCard() {
         ${asOf ? `<div class="fxcard-meta">Data as of ${esc(asOf)}</div>` : ''}
       </div>
       <div class="fxcard-head-r">
-        <div class="fxcard-brand">ChartHorizon</div>
+        <div class="fxcard-brand">${EXPORT_BRAND}</div>
         <div class="fxcard-meta">Exported ${esc(exportNowStamp())}</div>
       </div>
     </div>
-    <div class="fxcard-sub">Currency score = Seasonals + COT + COT-Hedging + Term Structure + Interest-Rate Bias (−${fxMaxScore()}…+${fxMaxScore()}) · pairs filtered to spread ≥ ${FX_PAIR_MIN_SPREAD}/${fxMaxPairSpread()}</div>
+    <div class="fxcard-sub">Currency score = Seasonals + COT-Hedging + Term Structure + Interest-Rate Bias (−${fxMaxScore()}…+${fxMaxScore()}) · pairs filtered to spread ≥ ${FX_PAIR_MIN_SPREAD}/${fxMaxPairSpread()}</div>
     <div class="fx-bias-board">
       ${fxBiasColumn('long', 'Bullish / Long Bias', longBias)}
       ${fxBiasColumn('short', 'Bearish / Short Bias', shortBias)}
@@ -626,11 +624,11 @@ function renderFxCard() {
     <div class="fxcard-disclaimer">${esc(CARD_RISK_DISCLAIMER)}</div>`;
 }
 
-// ── Card-Mode: natives synthetisches Paar-Chart (Preis-only) mit Signal-Marker ──
-// Der Kurs des Paares = Basis-Future ÷ Quote-Future (beide yfinance) als UNSER eigener
-// gebrandeter Chart — kein TradingView (kein Annotations-API + Lizenzproblem). Preis-only,
-// weil ein Ratio kein eigenes COT/OI/Spread hat. Wird headless gescreenshottet; die
-// bestehende Export-Pipeline (Header + Disclaimer) brandet das SVG aus #chartBody.
+// ── Card-mode: native synthetic pair chart (price-only) with a signal marker ──
+// The pair's price = base future ÷ quote future (both yfinance), drawn as OUR own branded
+// chart — no TradingView (no annotation API + a licensing problem). Price-only, because a
+// ratio has no COT/OI/spread of its own. Screenshotted headlessly; the existing export
+// pipeline (header + disclaimer) brands the SVG from #chartBody.
 async function openFxPairCard(baseKey, quoteKey) {
   const body = document.getElementById('chartBody');
   if (!(await ensureScreenerData(body))) return;
@@ -641,18 +639,18 @@ async function openFxPairCard(baseKey, quoteKey) {
   ranking.forEach(r => { byKey[r.key] = r; });
   const signed = ((byKey[baseKey] || {}).score || 0) - ((byKey[quoteKey] || {}).score || 0);
   const direction = signed >= 0 ? 'bullish' : 'bearish';
-  // Synthetisch aus den zwei Währungs-Futures (echte OHLC -> saubere Kerzenkörper; das
-  // yfinance-Spot-Paar =X liefert oft Open≈Close/Doji und damit keine echten Kerzen).
+  // Synthesised from the two currency futures (real OHLC -> clean candle bodies; the
+  // yfinance spot pair =X often returns open≈close/doji and thus no real candles).
   const cur = await loadCategory('currencies');
   if (!cur || !cur[baseKey] || !cur[quoteKey]) {
-    if (body) body.innerHTML = `<div class="chart-empty">FX-Paardaten nicht verfügbar.</div>`;
+    if (body) body.innerHTML = `<div class="chart-empty">FX pair data unavailable.</div>`;
     return;
   }
   renderFxPairChart(baseCur, quoteCur, fxRatioBars(cur[baseKey], cur[quoteKey]), direction);
 }
 
-// Synthetische Ratio-Kerzen aus zwei Währungs-Futures, ~letzte 12 Monate, nach Datum
-// gepaart. High/Low sind die echten Ratio-Extrema (base_high/quote_low bzw. base_low/quote_high).
+// Synthetic ratio candles from two currency futures, ~last 12 months, paired by date.
+// High/low are the true ratio extremes (base_high/quote_low resp. base_low/quote_high).
 function fxRatioBars(baseCfg, quoteCfg, days = 372) {
   const bh = (getContinuousContract(baseCfg).history) || [];
   const qh = (getContinuousContract(quoteCfg).history) || [];
@@ -679,7 +677,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   const body = document.getElementById('chartBody');
   if (!body) return;
   if (!bars || bars.length < 5) {
-    body.innerHTML = `<div class="chart-empty">Zu wenig gemeinsame Historie für ${esc(baseCur)}/${esc(quoteCur)}.</div>`;
+    body.innerHTML = `<div class="chart-empty">Not enough shared history for ${esc(baseCur)}/${esc(quoteCur)}.</div>`;
     return;
   }
   const W = 1000, padL = 56, padR = 66, padT = 16, priceH = 470;
@@ -700,8 +698,8 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   const dec = lastClose >= 100 ? 2 : lastClose >= 1 ? 3 : 5;
   const bull = direction === 'bullish';
 
-  // Gerundete / psychologische Level wie im Futures-Chart (Vielfache von 1/2/2.5/5/10,
-  // ca. 3–7 sichtbare Level) statt gleichmäßiger Linien.
+  // Round / psychological levels like the futures chart (multiples of 1/2/2.5/5/10,
+  // roughly 3–7 visible levels) instead of evenly spaced lines.
   const pHi = pLo + pSpan;
   function roundLevelStep(span) {
     const rawStep = span / 5;
@@ -716,7 +714,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   const levelStep = roundLevelStep(pSpan);
   let grid = '';
   for (let lv = Math.ceil(pLo / levelStep) * levelStep; lv <= pHi; lv += levelStep) {
-    const v = Math.round(lv / levelStep) * levelStep;   // FP-Rauschen glätten
+    const v = Math.round(lv / levelStep) * levelStep;   // smooth out FP noise
     if (v < pLo || v > pHi) continue;
     const y = pY(v).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
@@ -734,8 +732,8 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
     candles += `<rect x="${(x - candleW / 2).toFixed(1)}" y="${Math.min(yO, yC).toFixed(1)}" width="${candleW.toFixed(1)}" height="${Math.max(1, Math.abs(yC - yO)).toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
   });
 
-  // Marker an der AUSLÖSE-Kerze (since aus der Card-URL) + Schattierung von dort bis heute —
-  // analog zur 4/4-Perioden-Schattierung der Futures (nicht erst ab der heutigen Kerze).
+  // Marker at the TRIGGERING candle (`since` from the card URL) + shading from there to
+  // today — like the futures 3/3 period shading (not only from today's candle onwards).
   const _q = new URLSearchParams(location.search);
   const _sinceIso = _q.get('since');
   let markIdx = n - 1;
@@ -745,8 +743,8 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
     bars.forEach((b, i) => { const dd = Math.abs(new Date(b.date).getTime() - t); if (dd < dist) { dist = dd; best = i; } });
     markIdx = best;
   }
-  // Identische Logik wie die 4/4-Schattierung der Futures: Rechteck von Bar-Mitte (Start)
-  // bis Bar-Mitte (heute), opacity 0.2; Marker-Dreieck am Start-Bar (gleiche Offsets).
+  // Identical logic to the futures 3/3 shading: a rectangle from bar centre (start) to
+  // bar centre (today), opacity 0.2; marker triangle at the start bar (same offsets).
   const x1 = barXs[markIdx], x2 = barXs[n - 1];
   const band = x2 > x1
     ? `<rect x="${x1.toFixed(1)}" y="${padT}" width="${(x2 - x1).toFixed(1)}" height="${priceH}" fill="${bull ? '#16a34a' : '#dc2626'}" opacity="0.2"/>`
@@ -770,8 +768,8 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   }
   const chartBg = `<rect x="0" y="0" width="${W}" height="${totalH}" fill="${CHART_THEME.bg}" rx="7"/>`;
 
-  // Export-Header-Kontext (von getChartExportContext gelesen) + optionale Runway aus der
-  // Card-URL (?rw=<Tage>&until=<iso>), die der Bot aus fx_backfill berechnet hat.
+  // Export header context (read by getChartExportContext) + an optional runway from the
+  // card URL (?rw=<days>&until=<iso>) that the bot computed from fx_backfill.
   let runway = null;
   const _rw = parseInt(_q.get('rw') || '', 10);
   if (_rw > 0) runway = { days: _rw, until: _q.get('until') || '', note: `before the FX score-spread falls below ${FX_PAIR_MIN_SPREAD}/${fxMaxPairSpread()}` };
@@ -893,9 +891,9 @@ async function openFxPairChart(baseKey, quoteKey, baseCur, quoteCur, interval = 
       style: '1',
       locale: 'en',
       toolbar_bg: CHART_THEME.bg,
-      // Hintergrund auf die Futures-Chart-Farbe ziehen (sonst nutzt das Dark-Theme-Widget
-      // TradingViews Fast-Schwarz #131722 statt unserem --chart-bg #131c27). Grid bleibt
-      // bewusst der TradingView-Default (siehe fxTradingViewOverrides).
+      // Pull the background onto the futures-chart color (otherwise the dark-theme widget
+      // uses TradingView's near-black #131722 instead of our --chart-bg #131c27). The grid
+      // deliberately stays the TradingView default (see fxTradingViewOverrides).
       backgroundColor: CHART_THEME.bg,
       enable_publishing: false,
       hide_side_toolbar: false,

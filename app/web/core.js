@@ -68,7 +68,7 @@ function applyChartTheme() {
 const CHART_STYLE_DEFAULT = { candle: 'filled', wick: 'thin', width: 'normal', grid: 'normal', border: null };
 let CHART_STYLE = { ...CHART_STYLE_DEFAULT };
 
-// Die editierbaren Farb-Tokens (Reihenfolge nur fuer Robustheit; UI-Gruppen in settings.js).
+// The editable color tokens (order is only for robustness; UI groups live in settings.js).
 const CHART_COLOR_TOKENS = [
   '--chart-bg', '--chart-grid', '--chart-grid-soft', '--chart-axis', '--chart-text',
   '--chart-bull', '--chart-bull-wick', '--chart-bear', '--chart-bear-wick',
@@ -146,7 +146,7 @@ function _defaultPresetStore() {
   return { light: mk('light'), dark: mk('dark') };
 }
 
-// Liest den Preset-Store robust (defektes/fehlendes JSON -> Defaults; Standard erzwungen).
+// Read the preset store defensively (broken/missing JSON -> defaults; Standard enforced).
 function loadPresetStore() {
   try {
     const raw = JSON.parse(localStorage.getItem(CHART_PRESETS_KEY) || 'null');
@@ -175,8 +175,8 @@ function getActivePreset(theme = currentTheme()) {
   return t.presets.find(p => p.id === t.activeId) || t.presets[0];
 }
 
-// Setzt die Inline-Vars + CHART_STYLE des aktiven Presets, OHNE neu zu zeichnen
-// (fuer den initialen Load, bevor die anderen Module/das DOM bereit sind).
+// Apply the active preset's inline vars + CHART_STYLE WITHOUT redrawing (for the
+// initial load, before the other modules / the DOM are ready).
 function applyActivePresetVars() {
   const root = document.documentElement;
   if (_isCardMode()) {
@@ -199,10 +199,10 @@ function applyActivePresetVars() {
   applyChartTheme();
 }
 
-// Wie oben + sichtbare Charts neu zeichnen (nach Theme-Wechsel / Settings-Aenderung).
+// As above + redraw the visible charts (after a theme switch / settings change).
 function applyActivePreset() { applyActivePresetVars(); rerenderThemedCharts(); }
 
-// ── Zeitzone (nur die Header-Uhr) ──
+// ── Timezone (header clock only) ──
 function getTimezone() {
   try { return localStorage.getItem(CHART_TZ_KEY) || 'auto'; } catch (e) { return 'auto'; }
 }

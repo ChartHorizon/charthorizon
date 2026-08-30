@@ -3,6 +3,9 @@ const CHART_EXPORT_CSS = `
 `;
 const CHART_EXPORT_WIDTH = 1200; // ~on-screen display size; height stays proportional to the chart.
 const CHART_EXPORT_TITLE_H = 70; // header band: brand rows + a metadata row (data-as-of / export time).
+// Brand mark stamped on every image that leaves the app (download / share / X / card-mode).
+// The domain, not the product name: a shared chart should say where it came from.
+const EXPORT_BRAND = 'Chart-Horizon.com';
 
 // Risk disclaimer baked into the bottom of CARD-MODE exports only (the Telegram/social
 // cards). The normal in-app chart export stays clean. Kept to one line (no emoji, so it
@@ -58,7 +61,7 @@ function getChartExportContext(kind = null) {
       xLabelId: 'btnSeasonalsXLabel'
     };
   }
-  // Card-Mode: synthetisches FX-Paar-Chart (eigener Header, kein Markt-cfg dahinter).
+  // Card-mode: synthetic FX pair chart (its own header, no market cfg behind it).
   if (window.__fxPairCard) {
     return {
       kind: 'overview',
@@ -83,11 +86,11 @@ function getChartExportContext(kind = null) {
     name: meta.display_name || 'Chart',
     symbol: document.getElementById('chartSym')?.textContent || '',
     asOf: exportAsOfDate(getCurrentCfg()),
-    // Card-Mode: nur die Telegram-/Social-Karten -> Risk-Disclaimer + Seasonal-Runway
-    // im Export-Footer-Band (das normale In-App-Export bleibt clean).
+    // Card-mode: only the Telegram/social cards get a risk disclaimer + seasonal runway
+    // in the export footer band (the normal in-app export stays clean).
     cardMode: document.body.classList.contains('card-mode'),
-    runway: (document.body.classList.contains('card-mode') && window.__fourFourLog
-             && window.__fourFourLog[currentKey] && window.__fourFourLog[currentKey].runway) || null,
+    runway: (document.body.classList.contains('card-mode') && window.__threeThreeLog
+             && window.__threeThreeLog[currentKey] && window.__threeThreeLog[currentKey].runway) || null,
     shareButtonId: 'btnChartShare',
     shareLabelId: 'btnChartShareLabel',
     xButtonId: 'btnChartX',
@@ -140,7 +143,7 @@ function buildExportSvg(kind = null) {
     <text x="${pad}" y="20" font-size="11" font-weight="600" letter-spacing="1" fill="${pal.cat}">${escapeXml(ctx.category)}</text>
     <text x="${pad}" y="42" font-size="20" font-family="'Geist', system-ui, sans-serif" fill="${pal.name}">${escapeXml(ctx.name)}</text>
     <text x="${w - pad}" y="20" font-size="10" fill="${pal.sym}" text-anchor="end">${escapeXml(ctx.symbol)}</text>
-    <text x="${w - pad}" y="42" font-size="11" font-weight="700" fill="${pal.brand}" text-anchor="end">ChartHorizon</text>
+    <text x="${w - pad}" y="42" font-size="11" font-weight="700" fill="${pal.brand}" text-anchor="end">${EXPORT_BRAND}</text>
     ${ctx.asOf ? `<text x="${pad}" y="60" font-size="10" fill="${pal.meta}">Data as of ${escapeXml(ctx.asOf)}</text>` : ''}
     <text x="${w - pad}" y="60" font-size="10" fill="${pal.meta}" text-anchor="end">Exported ${escapeXml(exportNowStamp())}</text>
     <g transform="translate(0,${titleH})">${chartMarkup}</g>
@@ -366,7 +369,7 @@ function drawExportHeader(ctx, w, exportCtx = getChartExportContext()) {
   ctx.fillText(exportCtx.symbol, w - pad, 20);
   ctx.fillStyle = pal.brand;
   ctx.font = '700 11px Geist, system-ui, sans-serif';
-  ctx.fillText('ChartHorizon', w - pad, 42);
+  ctx.fillText(EXPORT_BRAND, w - pad, 42);
   // Metadata row: data "as of" date (left) and export timestamp (right).
   ctx.font = '10px Geist, system-ui, sans-serif';
   ctx.fillStyle = pal.meta;
@@ -376,8 +379,8 @@ function drawExportHeader(ctx, w, exportCtx = getChartExportContext()) {
   ctx.fillText(`Exported ${exportNowStamp()}`, w - pad, 60);
 }
 
-// Footer-Band (nur Card-Mode): optionale Seasonal-Runway-Zeile (das einzige vorhersehbare
-// Signal) + immer ein Risk-Disclaimer. Beginnt mit einem dünnen Trenner unter dem Chart.
+// Footer band (card-mode only): an optional seasonal-runway line (the only foreseeable
+// signal) + always a risk disclaimer. Starts with a thin divider below the chart.
 function drawExportFooter(ctx, w, y, exportCtx) {
   const pad = 16;
   const pal = exportPalette();
@@ -396,7 +399,7 @@ function drawExportFooter(ctx, w, y, exportCtx) {
     } catch (e) {}
     ctx.fillStyle = pal.strong;
     ctx.font = '600 11px Geist, system-ui, sans-serif';
-    const tail = exportCtx.runway.note || 'before dropping to 3/4';
+    const tail = exportCtx.runway.note || 'before dropping to 2/3';
     ctx.fillText(`Seasonal window supports this setup ~${exportCtx.runway.days} more days (until ${until}) ${tail}`, pad, cursor + 17);
     cursor += 21;
   }
@@ -413,7 +416,7 @@ function chartSvgToCanvas(targetWidth = CHART_EXPORT_WIDTH, kind = null) {
   const w = vb[2] || 1000;
   const innerH = vb[3] || 600;
   const titleH = CHART_EXPORT_TITLE_H;
-  // Card-Mode-Footer: Disclaimer immer, Runway-Zeile zusätzlich falls vorhanden.
+  // Card-mode footer: disclaimer always, runway line in addition when present.
   const footerH = exportCtx.cardMode ? (exportCtx.runway ? 46 : 24) : 0;
   const totalH = innerH + titleH + footerH;
   const scale = targetWidth / w;
@@ -1491,7 +1494,7 @@ function loadChart(cfg, opts = {}) {
 
   const dec = cfg.tick_decimals;
 
-  // Candlesticks — stil-bewusst: gefuellt / hohl (Up nur Umriss) / Linie (nur Close); Docht-Dicke.
+  // Candlesticks — style-aware: filled / hollow (up drawn as an outline) / line (close only); wick width.
   const _wickW = CHART_STYLE.wick === 'thick' ? 2 : CHART_STYLE.wick === 'medium' ? 1.5 : 1;
   let candles = '';
   if (CHART_STYLE.candle === 'line') {
@@ -1553,12 +1556,12 @@ function loadChart(cfg, opts = {}) {
       `<animate attributeName="opacity" values="1;0.2;1" dur="1.6s" repeatCount="indefinite"/></circle>`;
   }
 
-  // ── Aktuelle-Preis-Linie: dezente gestrichelte Linie auf dem zuletzt handelnden Preis
-  // (Live-Tick wenn vorhanden — injectLivePoint hat ihn als letzten Bar gespliced; sonst der
-  // letzte settled Close) + Preis-Tag RECHTSBUENDIG an der Achse: rechte Kante fix am Chart-Rand,
-  // Tag waechst nach links — lange Zahlen (z.B. BTC) werden nie abgeschnitten. Eigene Klasse (kein
-  // chart-live-dot), damit der SVG-Export sie behaelt; erscheint auch in Card-Mode. `curY` wird
-  // unten genutzt, um das kollidierende Round-Level-Label auf gleicher Hoehe wegzulassen.
+  // ── Current-price line: a subtle dashed line at the last traded price (the live tick
+  // when present — injectLivePoint spliced it in as the last bar; otherwise the last
+  // settled close) + a price tag RIGHT-ALIGNED to the axis: right edge fixed at the chart
+  // border, the tag grows leftwards — long numbers (e.g. BTC) are never clipped. Its own
+  // class (not chart-live-dot) so the SVG export keeps it; it also appears in card-mode.
+  // `curY` is used below to drop a round-level label that collides at the same height.
   let priceLine = '';
   let curY = null;
   if (liveBar && Number.isFinite(liveBar.close)) {
@@ -1579,12 +1582,12 @@ function loadChart(cfg, opts = {}) {
     }
   }
 
-  // ── Roll-Marker: geplante Frontmonat-Verfallstermine (Boersenkalender) ──
-  // Deterministisch aus contract_months + expiry_rule (generatorseitig in roll_dates).
-  // Nur On-Screen + nativer Continuous: NICHT in Card-Mode-Exports und nicht bei
-  // Einzelkontrakt-Ansicht. Marker = geplanter Verfall und kann ein paar Tage neben
-  // Yahoos tatsaechlichem Roll liegen (dessen Punkt ist nicht bekannt). Labels werden
-  // bei dichten (monatlichen) Zyklen ausgeduennt, die Linie bleibt.
+  // ── Roll markers: scheduled front-month expiries (exchange calendar) ──
+  // Deterministic, from contract_months + expiry_rule (generator-side, in roll_dates).
+  // On-screen + native continuous only: NOT in card-mode exports and not in the
+  // single-contract view. A marker is the SCHEDULED expiry and can sit a few days away
+  // from where Yahoo actually rolled (that point is unknowable). Labels are thinned out
+  // on dense (monthly) cycles; the line stays.
   let rollLines = '', rollLabels = '';
   if (showRoll
       && !document.body.classList.contains('card-mode')
@@ -1630,9 +1633,9 @@ function loadChart(cfg, opts = {}) {
     const y = pY(lv).toFixed(1);
     if (!_gridOff)
       roundLevels += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="${_gridOpacity}"/>`;
-    // Label weglassen, wenn es mit dem Aktuelle-Preis-Tag auf gleicher Hoehe kollidiert.
-    // Rechtsbuendig (text-anchor=end) an der rechten Kante, damit lange Zahlen (BTC: "100000.00")
-    // nicht am Rand abgeschnitten werden.
+    // Drop the label when it collides with the current-price tag at the same height.
+    // Right-aligned (text-anchor=end) at the right edge so long numbers (BTC: "100000.00")
+    // are not clipped at the border.
     if (!(curY != null && Math.abs(+y - curY) < 9))
       roundLevels += `<text x="${W-4}" y="${(+y+3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${lv.toFixed(dec)}</text>`;
   }
@@ -1898,18 +1901,18 @@ function loadChart(cfg, opts = {}) {
     if (spreadSeries.length) {
       const spVals = spreadSeries.map(d => d.spread);
       const dataLo = Math.min(...spVals), dataHi = Math.max(...spVals);
-      // Eng um die ECHTEN Werte skalieren (0 NICHT erzwingen), mit Polster, damit sich die
-      // Linie über die ganze Box entfaltet und nicht an die Rahmenlinien stößt (vgl. CAD-Bug).
-      // Würde man 0 erzwingen, klebt ein durchweg positiver/negativer Spread (z.B. USD-Index
-      // ~+0,26) als flaches Band am Rand, statt das Fenster zu nutzen.
+      // Scale tightly around the REAL values (do NOT force 0), with padding, so the line
+      // unfolds across the whole box instead of touching the frame (cf. the CAD bug).
+      // Forcing 0 would glue a consistently positive/negative spread (e.g. USD index
+      // ~+0.26) to the border as a flat band instead of using the window.
       const pad = ((dataHi - dataLo) || Math.abs(dataHi) || 1) * 0.12;
       const spLo = dataLo - pad, spHi = dataHi + pad;
       const spRng = (spHi - spLo) || 1;
       const spreadY = v => spreadTop + (1 - (v - spLo) / spRng) * spreadH;
-      // 0-Linie als Orientierung IMMER zeigen: an ihrer echten Position, wenn 0 im
-      // Fenster liegt; sonst an den näheren Rand geheftet (Linie über 0 = Premium /
-      // Backwardation, darunter = Contango). Bei geheftetem 0 ist der Abstand bewusst
-      // NICHT maßstabsgetreu — die Linie soll dynamisch das Fenster füllen.
+      // ALWAYS show the zero line for orientation: at its true position when 0 is inside
+      // the window, otherwise pinned to the nearer edge (line above 0 = premium /
+      // backwardation, below = contango). When 0 is pinned the distance is deliberately
+      // NOT to scale — the line should fill the window dynamically.
       const zeroYraw = spreadY(0);
       const zeroY = Math.max(spreadTop, Math.min(spreadTop + spreadH, zeroYraw));
       const zeroPinned = zeroYraw !== zeroY;
@@ -1944,7 +1947,7 @@ function loadChart(cfg, opts = {}) {
     }
   }
 
-  // X-Labels liegen unter dem letzten Pane.
+  // The x labels sit below the last pane.
   const axisY = padT + priceH + panesH;
   const totalH = axisY + 22;
 
@@ -2044,12 +2047,12 @@ function loadChart(cfg, opts = {}) {
   const legend = (showOi || showCot)
     ? `${cotDotsLegend}${volumeLegendText}${oiLegendText}${cotReportText}${priceLegendText}`
     : `${volumeLegendText}${priceLegendText} · candlesticks aggregated from settled daily EoD`;
-  // Card-Mode (nur Content-Bot via ?card=): 4/4-Perioden-Schattierung aus
-  // window.__fourFourLog. Passiert AUSSCHLIESSLICH hier — normales Dashboard bleibt clean.
-  // (Entry- und Exit/Drop-Marker wurden bewusst entfernt — nur noch das Band bleibt.)
+  // Card-mode (content bot only, via ?card=): 3/3 period shading from
+  // window.__threeThreeLog. Happens EXCLUSIVELY here — the normal dashboard stays clean.
+  // (Entry and exit/drop markers were removed on purpose — only the band remains.)
   let cardShade = '';
-  if (document.body.classList.contains('card-mode') && window.__fourFourLog) {
-    const periods = ((window.__fourFourLog[chartState.key] || {}).periods) || [];
+  if (document.body.classList.contains('card-mode') && window.__threeThreeLog) {
+    const periods = ((window.__threeThreeLog[chartState.key] || {}).periods) || [];
     const lastX = barXs[barXs.length - 1];
     periods.forEach(p => {
       const x1 = xForDate(p.start), x2 = p.end ? xForDate(p.end) : lastX;

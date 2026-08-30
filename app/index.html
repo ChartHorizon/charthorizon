@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2048%2048%22%20fill%3D%22none%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22chSunFav%22%20x1%3D%2224%22%20y1%3D%229%22%20x2%3D%2224%22%20y2%3D%2234%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23fcd34d%22/%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23f97316%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Cline%20x1%3D%226%22%20y1%3D%2234%22%20x2%3D%2242%22%20y2%3D%2234%22%20stroke%3D%22%238896a8%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cpath%20d%3D%22M15%2034a9%209%200%200%201%2018%200%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2224%22%20y1%3D%2210%22%20x2%3D%2224%22%20y2%3D%2215%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2211.5%22%20y1%3D%2219%22%20x2%3D%2214.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2236.5%22%20y1%3D%2219%22%20x2%3D%2233.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3C/svg%3E">
 <script>
-/* Theme so frueh wie moeglich setzen (kein Flash). Card-Mode (Content-Bot) laeuft
-   IMMER dunkel -> die exportierten Telegram-/X-Karten sind im dunklen Design,
-   unabhaengig von der Nutzer-Einstellung. */
+/* Set the theme as early as possible (no flash). Card-mode (content bot) ALWAYS
+   runs dark -> the exported Telegram/X cards keep the dark design, independent of
+   the user's setting. */
 (function(){try{
   if(new URLSearchParams(location.search).get('card')){document.documentElement.setAttribute('data-theme','dark');return;}
   document.documentElement.classList.add('booting');  /* cold-start splash covers the app until boot.js reveals it (normal dashboard only; never in card-mode) */
@@ -24,7 +24,7 @@
 </head>
 <body>
 <!-- Cold-start splash: kept up by html.booting (set in <head> before first paint, normal
-     dashboard only) until boot.js confirms every Weekly-Outlook 4/4 result has a live price. -->
+     dashboard only) until boot.js confirms every Weekly-Outlook 3/3 result has a live price. -->
 <div id="bootSplash" role="status" aria-live="polite">
   <div class="boot-splash-inner">
     <div class="boot-splash-title">ChartHorizon</div>
@@ -46,11 +46,10 @@ setTimeout(function(){
 },60000);
 </script>
 <header>
-  <!-- /from-dashboard leitet (302) auf chart-horizon.com weiter und zaehlt den Klick
-       unterwegs als reine Tagessumme — keine IP, kein Cookie, nichts Personenbezogenes.
-       Es ist der einzige Anhaltspunkt dafuer, wie viele Leute das Dashboard ueberhaupt
-       benutzen. Der Pfad ist also kein Tippfehler: bitte nicht auf die nackte Domain
-       "aufraeumen". -->
+  <!-- /from-dashboard redirects (302) to chart-horizon.com and counts the click on the
+       way as a plain daily total — no IP, no cookie, nothing personal. It is the only
+       hint we have of how many people use the dashboard at all. So the path is not a
+       typo: please do not "clean it up" to the bare domain. -->
   <a class="logo" href="https://chart-horizon.com/from-dashboard" target="_blank" rel="noopener" title="chart-horizon.com" aria-label="ChartHorizon — open chart-horizon.com">
     <svg class="logo-icon" viewBox="0 0 100 100" fill="none" aria-hidden="true"><defs><linearGradient id="hlSun" x1="50" y1="29" x2="50" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fde08a"/><stop offset="0.5" stop-color="#fcd34d"/><stop offset="1" stop-color="#f97316"/></linearGradient><radialGradient id="hlBloom" cx="50%" cy="55%" r="50%"><stop offset="0" stop-color="#f97316" style="stop-opacity:var(--glow-a)"/><stop offset="0.45" stop-color="#fcd34d" style="stop-opacity:var(--glow-b)"/><stop offset="1" stop-color="#fcd34d" stop-opacity="0"/></radialGradient><linearGradient id="hlHz" x1="14" y1="0" x2="86" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa7b8" stop-opacity="0"/><stop offset="0.2" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="0.5" stop-color="#c6cfdb"/><stop offset="0.8" stop-color="#aab6c6" stop-opacity="0.9"/><stop offset="1" stop-color="#9aa7b8" stop-opacity="0"/></linearGradient><filter id="hlGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><circle cx="50" cy="55" r="42" fill="url(#hlBloom)"/><g transform="translate(0,3)"><line x1="14" y1="64" x2="86" y2="64" stroke="url(#hlHz)" stroke-width="2.6" stroke-linecap="round"/><g stroke="url(#hlSun)" stroke-width="5.2" stroke-linecap="round" fill="none" filter="url(#hlGlow)"><path d="M33 64 a17 17 0 0 1 34 0"/><line x1="50" y1="19" x2="50" y2="28"/><line x1="26.4" y1="35.6" x2="32" y2="41.3"/><line x1="73.6" y1="35.6" x2="68" y2="41.3"/></g></g></svg>
     <span class="logo-mark">ChartHorizon</span>
@@ -226,7 +225,7 @@ setTimeout(function(){
     <div class="screener-head">
       <div>
         <div class="screener-title">Screener</div>
-        <div class="screener-sub">Signals by market · Seasonals · COT · COT Hedging Program · Term structure</div>
+        <div class="screener-sub">Signals by market · Seasonals · COT Hedging Program · Term structure</div>
       </div>
       <div class="screener-controls" id="screenerDailyControls">
         <input type="search" id="screenerSearch" class="screener-search" placeholder="Search markets…" oninput="onScreenerInput()" autocomplete="off">
@@ -247,7 +246,7 @@ setTimeout(function(){
         </div>
       </div>
       <div class="screener-body" id="screenerBody"></div>
-      <div class="screener-legend"><span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> · COT: net position (long/short) · COT Hedging: relative to the 12M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
+      <div class="screener-legend"><span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> · COT Hedging: relative to the 6M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
     </div>
     <div id="screenerWeekly" hidden>
       <div class="screener-actions">
@@ -261,7 +260,7 @@ setTimeout(function(){
         <span class="screener-count" id="screenerWeeklyCount"></span>
       </div>
       <div class="screener-body" id="screenerWeeklyBody"></div>
-      <div class="screener-legend">4/4 = all four signals aligned. Below: only 3/4 markets whose seasonal turns <strong>this week (today–Sunday)</strong> in the matching direction and lifts the setup to 4/4 · 📅 = seasonal onset date · grouped by category.</div>
+      <div class="screener-legend">3/3 = all three signals aligned. Below: only 2/3 markets whose seasonal turns <strong>this week (today–Sunday)</strong> in the matching direction and lifts the setup to 3/3 · 📅 = seasonal onset date · grouped by category.</div>
     </div>
   </div>
   <aside class="watchlist-sidebar" aria-label="Watchlist" data-watchlist-context="screener">
@@ -455,17 +454,17 @@ setTimeout(function(){
 <script src="ff_data/config.js"></script>
 <script src="web/core.js?v=18"></script>
 <script src="web/indicators.js?v=1"></script>
-<script src="web/chart.js?v=28"></script>
+<script src="web/chart.js?v=29"></script>
 <script src="web/futures.js?v=4"></script>
 <script src="web/seasonals.js?v=3"></script>
 <script src="web/screener.js?v=16"></script>
-<script src="web/forex.js?v=5"></script>
+<script src="web/forex.js?v=6"></script>
 <script src="web/smt.js?v=4"></script>
 <script src="web/tools.js?v=3"></script>
 <script src="web/refresh.js?v=2"></script>
 <script src="web/live.js?v=7"></script>
 <script src="web/bigchart.js?v=14"></script>
-<script src="web/draw.js?v=25"></script>
+<script src="web/draw.js?v=26"></script>
 <script src="web/settings.js?v=15"></script>
 <script src="web/boot.js?v=11"></script>
 

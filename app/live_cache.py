@@ -10,12 +10,19 @@ import threading
 import time
 
 # ── Tuning (server-side) ──────────────────────────────────────────────────────
-LIVE_TTL_SECONDS = 20.0               # outbound Yahoo rate per symbol is bounded at 1/TTL
+# Must stay SHORTER than web/live.js's LIVE_QUOTE_INTERVAL_MS (15 s), or the two beat
+# against each other: at 20 s a 15 s poll alternated miss/hit/miss/hit, so a genuinely
+# new price reached the on-screen candle only every 30 s while half the requests
+# returned an identical body and `_liveTickActive`'s `changed` guard skipped the
+# repaint. The gap absorbs setTimeout jitter (observed ticks: 15.0-15.3 s). Raising
+# this above the poll interval re-breaks the live candle silently — test_live_cache.py's
+# LivePollCadenceTest reads both constants and is the only thing guarding the pair.
+LIVE_TTL_SECONDS = 10.0               # outbound Yahoo rate per symbol is bounded at 1/TTL
 # Burst size must cover the largest single on-screen poll batch: a get_many() fetches
 # its symbols sequentially and only the first CAPACITY *cold* ones win a token — the rest
 # fall back to last-known (empty until first fetched). 3 was sized for the futures
 # priority set {active, front, cont}; the Weekly Outlook polls one symbol per rendered
-# 4/4+3/4 chart (front-month contracts since the front-month change), which routinely
+# 3/3+2/3 chart (front-month contracts since the front-month change), which routinely
 # exceeds 3, so charts past the third were starved of a live candle every tick. Sized to
 # cover a realistic Weekly-Outlook batch (and the futures forward-curve prewarm). Steady
 # state is still bounded by the per-symbol TTL (1 fetch/symbol/TTL); the refill only needs

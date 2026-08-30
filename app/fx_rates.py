@@ -24,6 +24,8 @@ import math
 import urllib.request
 from datetime import date
 
+from net_tls import https_context
+
 # Currency → BIS REF_AREA (ISO country / XM = euro area).
 CURRENCY_TO_AREA = {
     "USD": "US", "GBP": "GB", "EUR": "XM", "JPY": "JP",
@@ -136,7 +138,7 @@ def fetch_fx_rates(timeout: float = 30.0, today: date | None = None) -> dict | N
     url = _bis_url(today)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=https_context()) as resp:
             text = resp.read().decode("utf-8")
         rates = build_rates(parse_bis_csv(text))
         print(f"   · FX policy rates: fetched {len(rates)} from BIS")

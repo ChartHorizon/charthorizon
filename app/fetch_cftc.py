@@ -36,6 +36,7 @@ except ImportError:
 
 # ---- cross-module dependencies (from the lower layers) ----
 from market_config import COMMODITIES
+from net_tls import https_context
 
 __all__ = [
     'CFTC_CATEGORY_PREFERENCE',
@@ -223,7 +224,9 @@ def _fetch_cftc_dataset(dataset, wanted_codes):
     url = f"{CFTC_PUBLIC_DOMAIN}/{dataset['id']}.json?{params}"
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    # Explicit certifi context: urllib's default trusts the OS root store, which on a
+    # fresh Windows install is empty enough to fail every CFTC call. See net_tls.
+    with urllib.request.urlopen(req, timeout=30, context=https_context()) as resp:
         rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
 
     result = {}
@@ -311,7 +314,7 @@ def fetch_cftc_cot_legacy_txt():
     """
     url = "https://www.cftc.gov/dea/newcot/f_disagg.txt"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=30, context=https_context()) as resp:
         text = resp.read().decode("utf-8", errors="ignore")
 
     code_category = _code_to_category()

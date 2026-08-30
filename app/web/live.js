@@ -35,7 +35,7 @@ let _liveConfirmed = new Set();
 function _liveLayerPage() {
   const page = (typeof activePage === 'function') ? activePage() : 'overview';
   if (page === 'overview' || page === 'smt') return page;
-  // Screener: live only while the Weekly Outlook (with its 4/4 charts) is on screen.
+  // Screener: live only while the Weekly Outlook (with its 3/3 charts) is on screen.
   if (page === 'screener' && typeof screenerView !== 'undefined' && screenerView === 'weekly') return 'screener';
   return null;
 }
@@ -155,7 +155,7 @@ function liveActiveTargets() {
     };
   }
   if (page === 'screener') {
-    // The continuous symbols of the rendered Weekly-Outlook 4/4 charts (read live each tick,
+    // The continuous symbols of the rendered Weekly-Outlook 3/3 charts (read live each tick,
     // so charts that scroll in later get picked up automatically).
     const symbols = [], seen = new Set();
     document.querySelectorAll('#screenerWeeklyBody .wk-chart[data-rendered]').forEach(el => {

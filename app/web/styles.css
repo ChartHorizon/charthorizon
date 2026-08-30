@@ -1,9 +1,9 @@
 
 /* ============================================================
    ChartHorizon Theme-Tokens
-   LIGHT = warm Sonnenaufgang-Amber · DARK = Navy/Sonnenaufgang (X-Profil).
-   Fast die ganze App ist token-getrieben; das DARK-Set unten re-themed sie.
-   Charts: TradingView-Candles (gruen/rot) in beiden Themes.
+   LIGHT = warm sunrise amber · DARK = navy/sunrise (X profile).
+   Almost the whole app is token-driven; the DARK set below re-themes it.
+   Charts: TradingView candles (green/red) in both themes.
    ============================================================ */
 :root {
   /* base */
@@ -19,7 +19,7 @@
   --font-body:'Geist', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --header-bg:rgba(255,255,255,0.72);
   /* warm sunrise accent */
-  --accent:#ef9412; --accent2:#0ea679;            /* accent2 bleibt gruen (Erfolg/Bull) */
+  --accent:#ef9412; --accent2:#0ea679;            /* accent2 stays green (success/bull) */
   --accent-light:#fcf0db; --accent-border:#f3d6a2; --accent-ring:rgba(239,148,18,0.34);
   --on-accent:#0e1822; --on-accent-soft:#7a4d05;
   /* semantics */
@@ -28,7 +28,7 @@
   --up-soft:#e6f7f2; --up-ring:rgba(14,166,121,0.30); --down-soft:#fdeeee; --down-ring:rgba(229,62,62,0.28);
   --bias-bull-bg:#f2fbf7; --bias-bear-bg:#fff6f6; --star:#f5a623; --sheen:rgba(255,255,255,0.48);
   --glow-a:0.20; --glow-b:0.07;
-  /* chart — LIGHT behaelt das urspruengliche Blau/Rot-Schema (DARK = TradingView gruen/rot) */
+  /* chart — LIGHT keeps the original blue/red scheme (DARK = TradingView green/red) */
   --chart-bg:#f4f6fa; --chart-grid:#c5cdd7; --chart-grid-soft:#d9dee5; --chart-axis:#aeb8c4; --chart-text:#000000;
   --chart-bull:#6b89f0; --chart-bull-wick:#91a6f1; --chart-bear:#f3795f; --chart-bear-wick:#f3a08f;
   --chart-volume:#8b98aa; --chart-volume-bull:#0ea679; --chart-volume-bear:#e53e3e;
@@ -141,18 +141,18 @@ header {
   text-decoration:none; white-space:nowrap;
   color:#fff; background:linear-gradient(135deg,#fb7185,#e11d48); border:1px solid transparent;
   transition:transform 0.15s, box-shadow 0.15s, filter 0.15s;
-  animation:ch-support-pulse 7s ease-in-out infinite;   /* ab und zu ein leiser Herzschlag */
+  animation:ch-support-pulse 7s ease-in-out infinite;   /* a quiet heartbeat every now and then */
 }
 .support-link svg { width:14px; height:14px; flex:none; }
 .support-link:hover { color:#fff; filter:brightness(1.07); box-shadow:0 6px 18px -6px rgba(225,29,72,0.6); animation:none; }
-/* Dezenter, seltener Puls (ein Herzschlag pro ~7s) — zieht den Blick, ohne zu nerven. */
+/* Subtle, infrequent pulse (one heartbeat every ~7s) — draws the eye without nagging. */
 @keyframes ch-support-pulse {
   0%, 70%, 100% { transform:scale(1); box-shadow:0 0 0 0 rgba(244,63,94,0); }
   76% { transform:scale(1.05); box-shadow:0 0 0 0 rgba(244,63,94,0.5); }
   88% { transform:scale(1); box-shadow:0 0 0 9px rgba(244,63,94,0); }
 }
 @media (prefers-reduced-motion: reduce) { .support-link { animation:none; } }
-body.card-mode .support-link { display:none; }   /* nie in den Content-Bot-Exporten */
+body.card-mode .support-link { display:none; }   /* never in the content-bot exports */
 .theme-toggle {
   display:inline-flex; align-items:center; justify-content:center;
   width:30px; height:30px; border-radius:50%;
@@ -312,7 +312,7 @@ body.card-mode .support-link { display:none; }   /* nie in den Content-Bot-Expor
 .wk-bear { color:var(--down); font-weight:700; }
 .wk-complete { color:var(--accent); font-weight:700; }
 
-/* Weekly Outlook: inline dynamic 4/4 chart, sitting under the header band with a divider */
+/* Weekly Outlook: inline dynamic 3/3 chart, sitting under the header band with a divider */
 .wk-chart { width:100%; min-height:280px; border-top:1px solid var(--border); margin-top:0.95rem; padding-top:0.95rem; }
 .wk-chart-svg { display:block; width:100%; height:auto; shape-rendering:geometricPrecision; border-radius:7px; }
 .wk-chart-loading, .wk-chart-empty { font-size:0.72rem; color:var(--muted); padding:1.1rem 0.2rem; }
@@ -758,7 +758,7 @@ body.bigchart-tab .page-disclaimer { display:none; }
 }
 @media (max-width:560px) {
   header { padding:0 1rem; gap:0.8rem; }
-  .support-link { padding:0; width:30px; justify-content:center; }   /* icon-only, kein Gedraenge */
+  .support-link { padding:0; width:30px; justify-content:center; }   /* icon-only, no crowding */
   .support-link .support-label { display:none; }
   .top-tab { padding:0 0.7rem; }
   .spec-grid { grid-template-columns:1fr; }
@@ -830,9 +830,9 @@ body.bigchart-tab .page-disclaimer { display:none; }
 .smt-empty { color: var(--muted); font-size: 13px; padding: 24px 8px; text-align: center; }
 /* SMT charts always stack vertically (per user); each renders at native width */
 
-/* ── Card-Mode: gebrandete FX-Heatmap-Karte (nur Content-Bot, ?card=fx) ──
-   Verpackt die echten Heatmap-Fragmente in einen Export-Rahmen und blendet das
-   restliche Dashboard aus, damit der headless DOM-Screenshot sauber ist. */
+/* ── Card-mode: branded FX heatmap card (content bot only, ?card=fx) ──
+   Wraps the real heatmap fragments in an export frame and hides the rest of the
+   dashboard so the headless DOM screenshot comes out clean. */
 #fxCardExport { display: none; }
 body.fx-card-mode { background: #fff; overflow: hidden; }
 body.fx-card-mode > *:not(#fxCardExport) { display: none !important; }
@@ -841,7 +841,7 @@ body.fx-card-mode #fxCardExport {
   width: 1080px; box-sizing: border-box; background: #fff;
   padding: 20px 24px 16px; font-family: var(--font-body);
 }
-body.fx-card-mode .fx-pair-add { display: none; }   /* keine Watchlist-Buttons im Bild */
+body.fx-card-mode .fx-pair-add { display: none; }   /* no watchlist buttons in the image */
 body.fx-card-mode .fx-chip, body.fx-card-mode .fx-pair { cursor: default; }
 .fxcard-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .fxcard-head-r { text-align: right; }
@@ -852,8 +852,8 @@ body.fx-card-mode .fx-chip, body.fx-card-mode .fx-pair { cursor: default; }
 .fxcard-sub { color: #647084; font-size: 0.66rem; margin: 0.55rem 0 0.75rem; line-height: 1.35; }
 .fxcard-pairboard { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 0.7rem; }
 .fxcard-disclaimer { margin-top: 0.9rem; padding-top: 0.55rem; border-top: 1px solid #e5e9f0; color: #8896a8; font-size: 0.6rem; line-height: 1.3; }
-/* Dark-Mode FX-Heatmap-Karte (Card-Mode laeuft dunkel -> Bot-PNG dunkel).
-   Die Heatmap-Fragmente selbst sind token-basiert und werden automatisch dunkel. */
+/* Dark-mode FX heatmap card (card-mode runs dark -> the bot PNG is dark).
+   The heatmap fragments themselves are token-based and go dark automatically. */
 [data-theme="dark"] body.fx-card-mode { background: #0e1822; }
 [data-theme="dark"] body.fx-card-mode #fxCardExport { background: #0e1822; }
 [data-theme="dark"] .fxcard-cat { color: #f9b03a; }
@@ -863,7 +863,7 @@ body.fx-card-mode .fx-chip, body.fx-card-mode .fx-pair { cursor: default; }
 [data-theme="dark"] .fxcard-disclaimer { border-top-color: #243240; color: #8493a6; }
 
 /* ── Cold-start boot splash ───────────────────────────────────────────────────
-   Covers the app until boot.js confirms every Weekly-Outlook 4/4 result has a live
+   Covers the app until boot.js confirms every Weekly-Outlook 3/3 result has a live
    price, then fades. Shown ONLY while html.booting is set (in <head>, before first
    paint -> no FOUC; never set in card-mode -> content-bot PNGs are unaffected). */
 #bootSplash { display: none; }

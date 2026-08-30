@@ -1,14 +1,14 @@
 let screenerData = null;
 function resetScreenerData() { screenerData = null; }
 let screenerSort = { col: 'category', dir: 1 };
-const screenerFilters = { seasonal: new Set(), cot: new Set(), cot_hedge: new Set(), structure: new Set() };
-let screenerView = 'daily';   // 'daily' (live screener) | 'weekly' (4/4 + 3/4 outlook)
+const screenerFilters = { seasonal: new Set(), cot_hedge: new Set(), structure: new Set() };
+let screenerView = 'daily';   // 'daily' (live screener) | 'weekly' (3/3 + 2/3 outlook)
 let screenerWeekSel = 0;      // Weekly Outlook: 0 = this week, 1 = next week
 
-// Weekly Outlook inline charts: the bot's 4/4 period log (start = "when first
-// triggered") is reused to shade the 4/4 band + entry/drop markers. Charts render
+// Weekly Outlook inline charts: the bot's 3/3 period log (start = "when first
+// triggered") is reused to shade the 3/3 band + entry/drop markers. Charts render
 // lazily (IntersectionObserver) and redraw on resize so they stay crisp/dynamic.
-let _wkFourFourLog = null;     // cached ff_data/four_four_log.json ({} if absent)
+let _wkThreeThreeLog = null;     // cached ff_data/three_three_log.json ({} if absent)
 let _wkChartObserver = null;   // lazy-render observer for the current weekly render
 let _wkResizeBound = false;    // window-resize redraw bound once
 
@@ -33,9 +33,9 @@ function loadScreenerState() {
   try { st = JSON.parse(localStorage.getItem(SCREENER_STATE_KEY) || 'null'); } catch (e) { st = null; }
   if (!st) return;
   if (st.view === 'weekly' || st.view === 'daily') screenerView = st.view;
-  if (st.sort && st.sort.col) screenerSort = { col: st.sort.col, dir: st.sort.dir === -1 ? -1 : 1 };
+  if (st.sort && st.sort.col && ['category', 'display_name', 'seasonal', 'cot_hedge', 'structure'].includes(st.sort.col)) screenerSort = { col: st.sort.col, dir: st.sort.dir === -1 ? -1 : 1 };
   if (st.filters) {
-    for (const sig of ['seasonal', 'cot', 'cot_hedge', 'structure']) {
+    for (const sig of ['seasonal', 'cot_hedge', 'structure']) {
       screenerFilters[sig].clear();
       (st.filters[sig] || []).forEach(v => screenerFilters[sig].add(v));
     }
@@ -74,7 +74,7 @@ async function openScreener() {
   applyScreenerView();              // show daily or weekly + render the active one
 }
 
-// Switch between Daily Outlook (live screener) and Weekly Outlook (4/4 + 3/4 report).
+// Switch between Daily Outlook (live screener) and Weekly Outlook (3/3 + 2/3 report).
 function setScreenerView(view) {
   screenerView = (view === 'weekly') ? 'weekly' : 'daily';
   saveScreenerState();
@@ -85,7 +85,7 @@ function setScreenerView(view) {
 function setScreenerWeek(sel) {
   screenerWeekSel = sel ? 1 : 0;
   renderWeeklyOutlook();
-  if (typeof restartLiveLayer === 'function') restartLiveLayer();   // re-resolve live 4/4 charts
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();   // re-resolve live 3/3 charts
 }
 
 function applyScreenerView() {
@@ -99,7 +99,7 @@ function applyScreenerView() {
     b.classList.toggle('on', b.dataset.view === screenerView));
   if (isWeekly) renderWeeklyOutlook();
   else renderScreener();
-  // Live 4/4-Charts nur im Weekly Outlook; restart greift den aktiven Page-Mode neu ab.
+  // Live 3/3 charts only in the Weekly Outlook; restart re-reads the active page mode.
   if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 
@@ -141,7 +141,7 @@ function filteredScreenerRows() {
   return screenerData.filter(r => {
     if (catF && r.category !== catF) return false;
     if (q && !(r.display_name || '').toLowerCase().includes(q)) return false;
-    for (const sig of ['seasonal', 'cot', 'cot_hedge', 'structure']) {
+    for (const sig of ['seasonal', 'cot_hedge', 'structure']) {
       const set = screenerFilters[sig];
       if (set.size && !set.has(r[sig])) return false;
     }
@@ -172,7 +172,6 @@ function renderScreenerFilters() {
   if (!bar) return;
   const groups = [
     ['seasonal', 'Seasonals', [['bullish', 'Bullish'], ['bearish', 'Bearish'], ['neutral', 'Neutral']]],
-    ['cot', 'COT', [['bullish', 'Bullish'], ['bearish', 'Bearish']]],
     ['cot_hedge', 'COT Hedging', [['bullish', 'Bullish'], ['bearish', 'Bearish']]],
     ['structure', 'Term Structure', [['premium', 'Premium'], ['discount', 'Discount']]],
   ];
@@ -236,7 +235,7 @@ function renderScreener() {
       const va = txt(a.display_name), vb = txt(b.display_name);
       return va < vb ? -dir : va > vb ? dir : 0;
     }
-    if (col === 'seasonal' || col === 'cot' || col === 'cot_hedge' || col === 'structure') {
+    if (col === 'seasonal' || col === 'cot_hedge' || col === 'structure') {
       return (sigRank(a[col]) - sigRank(b[col])) * dir;
     }
     return 0;
@@ -253,12 +252,11 @@ function renderScreener() {
   };
 
   const bodyHtml = cats.map(cat => {
-    const head = `<tr class="screener-cat-head"><td colspan="6">${CAT_ICONS[cat] || ''} ${esc(cat)}</td></tr>`;
+    const head = `<tr class="screener-cat-head"><td colspan="5">${CAT_ICONS[cat] || ''} ${esc(cat)}</td></tr>`;
     const items = groups[cat].slice().sort(withinSort).map(r => `<tr class="screener-row" onclick="openScreenerMarket('${r.key}')">
         ${starCell(r)}
         <td><span class="screener-name">${esc(r.display_name || r.key)}</span></td>
         <td>${sigBadge(r.seasonal)}</td>
-        <td>${sigBadge(r.cot)}</td>
         <td>${sigBadge(r.cot_hedge)}</td>
         <td class="sig-structure">${sigBadge(r.structure)}</td>
       </tr>`).join('');
@@ -270,7 +268,6 @@ function renderScreener() {
       <th></th>
       ${th('display_name', 'Market')}
       ${th('seasonal', 'Seasonals')}
-      ${th('cot', 'COT')}
       ${th('cot_hedge', 'COT Hedging')}
       ${th('structure', 'Term Structure')}
     </tr></thead>
@@ -284,14 +281,14 @@ function openScreenerMarket(key) {
   switchCommodity(key);
 }
 
-// ── Weekly Outlook: all 4/4 + all 3/4 setups, each annotated with its next seasonal
-// event. The 4/4 / 3/4 derivation mirrors content_bot/filter.py's aligned() exactly;
+// ── Weekly Outlook: all 3/3 + all 2/3 setups, each annotated with its next seasonal
+// event. The 3/3 / 2/3 derivation mirrors chartbot/filter.py's aligned(): |score| == 3;
 // the seasonal dates come from screener.json's per-market seasonal_event (generator).
 
-const SIG_KEYS = ['seasonal', 'cot', 'cot_hedge', 'structure'];
-const SIG_LABEL = { seasonal: 'Seasonals', cot: 'COT', cot_hedge: 'COT Hedging', structure: 'Term Structure' };
+const SIG_KEYS = ['seasonal', 'cot_hedge', 'structure'];
+const SIG_LABEL = { seasonal: 'Seasonals', cot_hedge: 'COT Hedging', structure: 'Term Structure' };
 // Compact labels for the Weekly block's signal strip (the band is tighter than the table).
-const WK_SIG_SHORT = { seasonal: 'Seasonals', cot: 'COT', cot_hedge: 'Hedging', structure: 'Structure' };
+const WK_SIG_SHORT = { seasonal: 'Seasonals', cot_hedge: 'Hedging', structure: 'Structure' };
 
 // Does a signal value match a direction? structure speaks premium/discount.
 function sigMatches(key, val, dir) {
@@ -301,11 +298,16 @@ function sigMatches(key, val, dir) {
 function screenerAlignedCount(r, dir) {
   return SIG_KEYS.reduce((n, k) => n + (sigMatches(k, r[k], dir) ? 1 : 0), 0);
 }
-// Best-aligned direction with >=3 of 4 signals: { dir, count, missing:[keys] } or null.
+// Best-aligned direction with >=2 of 3 signals: { dir, count, missing:[keys] } or null.
+// This is the ONE place the frontend still derives the alignment itself instead of
+// reading the generator's `score`: the Weekly Outlook feeds it rows whose seasonal has
+// been projected to a future week (projectSeasonal), which the generator never scored.
+// It also needs `missing` to decide whether a seasonal onset completes the setup.
+// Everywhere the row is unprojected (forex.js), read r.score instead.
 function screenerSetup(r) {
   for (const dir of ['bullish', 'bearish']) {
     const count = screenerAlignedCount(r, dir);
-    if (count >= 3) return { dir, count, missing: SIG_KEYS.filter(k => !sigMatches(k, r[k], dir)) };
+    if (count >= 2) return { dir, count, missing: SIG_KEYS.filter(k => !sigMatches(k, r[k], dir)) };
   }
   return null;
 }
@@ -335,8 +337,8 @@ function seasonalNote(r, setup) {
   const n = daysUntil(ev.date);
   const dirCls = ev.direction === 'bullish' ? 'wk-bull' : 'wk-bear';
   if (ev.type === 'onset') {
-    const completes = setup && setup.count === 3 && setup.missing.includes('seasonal') && ev.direction === setup.dir;
-    return `📅 <span class="wk-seasonal">Seasonal onset ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span> → <span class="${dirCls}">${ev.direction}</span>${completes ? ' <span class="wk-complete">→ 4/4</span>' : ''}</span>`;
+    const completes = setup && setup.count === 2 && setup.missing.includes('seasonal') && ev.direction === setup.dir;
+    return `📅 <span class="wk-seasonal">Seasonal onset ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span> → <span class="${dirCls}">${ev.direction}</span>${completes ? ' <span class="wk-complete">→ 3/3</span>' : ''}</span>`;
   }
   return `📅 <span class="wk-seasonal">Seasonal <span class="${dirCls}">${ev.direction}</span> until ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span></span>`;
 }
@@ -372,12 +374,12 @@ function selectedWeekRange() {
   return { calStart: mon, calEnd: sun };
 }
 // Project a market's seasonal signal forward to the START of the selected week, using its
-// seasonal_event, so the 4/4 vote reflects that week rather than the generation day:
+// seasonal_event, so the 3/3 vote reflects that week rather than the generation day:
 //   • offset on/before the week's Monday → the seasonal run has ended  → seasonal = neutral
 //   • onset  on/before the week's Monday → the seasonal run has begun   → seasonal = its dir
-// Events inside or after the week leave the seasonal unchanged (handled as a live 4/4 with a
-// runway note, or — for an onset within the week — as a 3/4→4/4 transition below). This makes
-// the weekly 4/4 set symmetric: setups whose seasonal expires by the week drop out, and 3/4
+// Events inside or after the week leave the seasonal unchanged (handled as a live 3/3 with a
+// runway note, or — for an onset within the week — as a 2/3→3/3 transition below). This makes
+// the weekly 3/3 set symmetric: setups whose seasonal expires by the week drop out, and 2/3
 // setups whose seasonal has turned on by the week join in. Each seasonal run is >= 14 days, so
 // a market has at most one event per week — the per-market next-event data is enough.
 function projectSeasonal(r, weekStart) {
@@ -385,35 +387,40 @@ function projectSeasonal(r, weekStart) {
   if (!ev || !ev.date) return r;
   const d = new Date(ev.date + 'T00:00:00');
   if (isNaN(d) || _midnight(d) > _midnight(weekStart)) return r;
-  if (ev.type === 'offset') return { ...r, seasonal: 'neutral' };
-  if (ev.type === 'onset') return { ...r, seasonal: ev.direction };
+  // r.score is the generator's signed score over the row's UNPROJECTED seasonal —
+  // once seasonal is overridden below it would contradict the projected row's own
+  // signals, so drop it rather than recompute (recomputing would duplicate the
+  // scoring rule that now lives solely in screener_score() generator-side).
+  const { score, ...rest } = r;
+  if (ev.type === 'offset') return { ...rest, seasonal: 'neutral' };
+  if (ev.type === 'onset') return { ...rest, seasonal: ev.direction };
   return r;
 }
 
-// 3/4 market whose seasonal switches on within [start,end] in the matching direction
-// -> it becomes a fresh 4/4 in that week.
+// 2/3 market whose seasonal switches on within [start,end] in the matching direction
+// -> it becomes a fresh 3/3 in that week.
 function onsetInWindow(r, setup, start, end) {
   const ev = r.seasonal_event;
   if (!ev || ev.type !== 'onset' || !setup) return false;
-  if (!(setup.count === 3 && setup.missing.includes('seasonal'))) return false;
-  if (ev.direction !== setup.dir) return false;      // onset must match the other 3 -> a real 4/4
+  if (!(setup.count === 2 && setup.missing.includes('seasonal'))) return false;
+  if (ev.direction !== setup.dir) return false;      // onset must match the other 2 -> a real 3/3
   const d = new Date(ev.date + 'T00:00:00');
   if (isNaN(d)) return false;
   return _midnight(d) >= start && _midnight(d) <= end;
 }
 
 // One result as an editorial block: a header band — prominent serif name, a conviction
-// emblem (direction-tinted dots + N/4) beside the contract basis, a direction badge, the
-// four labelled signal tags, and ONE consolidated stat line — above the full-width chart.
+// emblem (direction-tinted dots + N/3) beside the contract basis, a direction badge, the
+// three labelled signal tags, and ONE consolidated stat line — above the full-width chart.
 // The stat line replaces the old separate seasonal-note + chart-caption (which duplicated
 // each other); see wkStatLine. The basis + live-state spans are filled by wkDrawChart.
 function wkBlock(r, setup, withChart) {
   const dirCls = setup.dir === 'bullish' ? 'bull' : 'bear';
   const dirArrow = setup.dir === 'bullish' ? '▲' : '▼';
   const dirWord = setup.dir === 'bullish' ? 'Bullish' : 'Bearish';
-  const dots = [0, 1, 2, 3].map(i => `<span class="wk-dot${i < setup.count ? ' on' : ''}"></span>`).join('');
-  // Four labelled tags sharing the Daily tab's language: ▲/▼ for bull/bear, a quiet dash
-  // for neutral; the missing signal of a 3/4 onset is dimmed. Term structure speaks
+  const dots = [0, 1, 2].map(i => `<span class="wk-dot${i < setup.count ? ' on' : ''}"></span>`).join('');
+  // Three labelled tags sharing the Daily tab's language: ▲/▼ for bull/bear, a quiet dash
+  // for neutral; the missing signal of a 2/3 onset is dimmed. Term structure speaks
   // premium/discount and renders as an outline tag (a different axis from the others).
   const strip = SIG_KEYS.map(k => {
     const v = r[k];
@@ -424,7 +431,7 @@ function wkBlock(r, setup, withChart) {
     const cls = `wk-sig2 ${tone}${k === 'structure' ? ' struct' : ''}${setup.missing.includes(k) ? ' miss' : ''}`;
     return `<span class="${cls}"><span class="wk-sig2-lbl">${WK_SIG_SHORT[k]}</span><span class="wk-sig2-mark">${glyph}</span></span>`;
   }).join('');
-  const meta = `<span class="wk-conv"><span class="wk-dots">${dots}</span><span class="wk-conv-label">${setup.count}/4</span></span>`
+  const meta = `<span class="wk-conv"><span class="wk-dots">${dots}</span><span class="wk-conv-label">${setup.count}/3</span></span>`
     + (withChart ? '<span class="wk-basis"></span><span class="wk-live-state" hidden></span>' : '');
   const chart = withChart ? wkChartHtml(r, setup) : '';
   return `<div class="wk-block wk-dir-${dirCls}">
@@ -443,13 +450,13 @@ function wkBlock(r, setup, withChart) {
     </div>`;
 }
 
-// The consolidated header stat line. For a 3/4 onset it reuses the seasonal "→ 4/4" note.
-// For a live 4/4 it reads the bot's period log (when the setup first triggered + the
+// The consolidated header stat line. For a 2/3 onset it reuses the seasonal "→ 3/3" note.
+// For a live 3/3 it reads the bot's period log (when the setup first triggered + the
 // seasonal runway). Before the log has loaded — or when no period is recorded yet — it
 // falls back to the seasonal note; renderWeeklyOutlook re-renders once the log lands.
 function wkStatLine(r, setup) {
-  if (setup.count < 4) return seasonalNote(r, setup);
-  const logEntry = (_wkFourFourLog || {})[r.key] || {};
+  if (setup.count < 3) return seasonalNote(r, setup);
+  const logEntry = (_wkThreeThreeLog || {})[r.key] || {};
   const periods = Array.isArray(logEntry.periods) ? logEntry.periods : [];
   const lead = periods.find(p => !p.end && p.direction === setup.dir)
             || periods.filter(p => p.direction === setup.dir).slice(-1)[0]
@@ -468,10 +475,10 @@ function wkStatLine(r, setup) {
   }
   return (r.seasonal_event && r.seasonal_event.date)
     ? seasonalNote(r, setup)
-    : `<span class="wk-muted">4/4 active · details follow on the next bot run</span>`;
+    : `<span class="wk-muted">3/3 active · details follow on the next bot run</span>`;
 }
 
-// The lazy inline 4/4 chart container for one block (4/4 section only).
+// The lazy inline 3/3 chart container for one block (3/3 section only).
 function wkChartHtml(r, setup) {
   const meta = INDEX[r.key];
   const slug = meta ? meta.slug : '';
@@ -492,21 +499,21 @@ function wkCategorySection(title, items, emptyMsg, withChart) {
   return header + `<div class="wk-blocks">${body}</div>`;
 }
 
-// The Weekly-Outlook result sets for the selected week: 4/4 setups (`full`) and the 3/4s that
-// turn 4/4 via seasonal onset (`onsets`). Each entry is { r: projectedRow, setup }. Pure read of
+// The Weekly-Outlook result sets for the selected week: 3/3 setups (`full`) and the 2/3s that
+// turn 3/3 via seasonal onset (`onsets`). Each entry is { r: projectedRow, setup }. Pure read of
 // screenerData — shared by renderWeeklyOutlook and the cold-start boot splash (which prefetches
-// every 4/4 result's live price before revealing the dashboard).
+// every 3/3 result's live price before revealing the dashboard).
 function weeklyOutlookSetups() {
   const full = [], onsets = [];
   if (!screenerData) return { full, onsets };
   const wk = selectedWeekRange();
   for (const r of screenerData) {
-    // Seasonal projected to the selected week's start: 4/4s whose seasonal has expired by
-    // then drop out, and 3/4s whose seasonal has turned on by then join in (symmetric).
+    // Seasonal projected to the selected week's start: 3/3s whose seasonal has expired by
+    // then drop out, and 2/3s whose seasonal has turned on by then join in (symmetric).
     const pr = projectSeasonal(r, wk.calStart);
     const setup = screenerSetup(pr);
     if (!setup) continue;
-    if (setup.count === 4) full.push({ r: pr, setup });
+    if (setup.count === 3) full.push({ r: pr, setup });
     else if (onsetInWindow(pr, setup, wk.calStart, wk.calEnd)) onsets.push({ r: pr, setup });
   }
   return { full, onsets };
@@ -516,11 +523,11 @@ function renderWeeklyOutlook() {
   const body = document.getElementById('screenerWeeklyBody');
   if (!body || !screenerData) return;
 
-  // The header stat line reads the bot's 4/4 period log (also used by the charts). If it
+  // The header stat line reads the bot's 3/3 period log (also used by the charts). If it
   // hasn't loaded yet, fetch it and re-render once it lands so "Active / since / runway"
   // fill in — the first paint shows the seasonal note as a graceful fallback.
-  if (_wkFourFourLog === null) {
-    ensureFourFourLog().then(() => {
+  if (_wkThreeThreeLog === null) {
+    ensureThreeThreeLog().then(() => {
       if (!document.getElementById('screenerWeekly')?.hidden) renderWeeklyOutlook();
     });
   }
@@ -538,27 +545,27 @@ function renderWeeklyOutlook() {
     wkEl.textContent = `📅 Week ${isoWeekNumber(wk.calStart)} · ${f(wk.calStart)} – ${wk.calEnd.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}`;
   }
   const countEl = document.getElementById('screenerWeeklyCount');
-  if (countEl) countEl.textContent = `${full.length} × 4/4 · ${onsets.length} ${onsets.length === 1 ? 'onset' : 'onsets'} ${weekWord}`;
+  if (countEl) countEl.textContent = `${full.length} × 3/3 · ${onsets.length} ${onsets.length === 1 ? 'onset' : 'onsets'} ${weekWord}`;
 
   body.innerHTML =
-    wkCategorySection('', full, 'No 4/4 setup right now.', true)
-    + wkCategorySection(`3/4 → turns 4/4 ${weekWord} via seasonal`, onsets,
-        `No seasonal lifts a 3/4 setup to 4/4 ${weekWord}.`, false);
+    wkCategorySection('', full, 'No 3/3 setup right now.', true)
+    + wkCategorySection(`2/3 → turns 3/3 ${weekWord} via seasonal`, onsets,
+        `No seasonal lifts a 2/3 setup to 3/3 ${weekWord}.`, false);
 
-  wkObserveCharts();   // lazy-render the 4/4 charts as they scroll into view
+  wkObserveCharts();   // lazy-render the 3/3 charts as they scroll into view
 }
 
-// ── Weekly Outlook inline 4/4 charts (native, dynamic, lazy) ──────────────────
+// ── Weekly Outlook inline 3/3 charts (native, dynamic, lazy) ──────────────────
 
-// The bot's 4/4 period log, fetched once. Holds {key: {periods:[{direction,start,
-// end}], runway:{days,until}}} — `start` is the day the 4/4 first triggered.
-async function ensureFourFourLog() {
-  if (_wkFourFourLog) return _wkFourFourLog;
+// The bot's 3/3 period log, fetched once. Holds {key: {periods:[{direction,start,
+// end}], runway:{days,until}}} — `start` is the day the 3/3 first triggered.
+async function ensureThreeThreeLog() {
+  if (_wkThreeThreeLog) return _wkThreeThreeLog;
   try {
-    const res = await fetch(`${DATA_DIR}/four_four_log.json?v=${DATA_VERSION}`, { cache: 'no-store' });
-    _wkFourFourLog = res.ok ? (await res.json()) : {};
-  } catch (e) { _wkFourFourLog = {}; }
-  return _wkFourFourLog;
+    const res = await fetch(`${DATA_DIR}/three_three_log.json?v=${DATA_VERSION}`, { cache: 'no-store' });
+    _wkThreeThreeLog = res.ok ? (await res.json()) : {};
+  } catch (e) { _wkThreeThreeLog = {}; }
+  return _wkThreeThreeLog;
 }
 
 // (Re)wire lazy rendering for the charts in the current weekly render, and bind a
@@ -587,7 +594,7 @@ function wkObserveCharts() {
   }
 }
 
-// ── Front-month series for the Weekly-Outlook 4/4 charts ──────────────────────
+// ── Front-month series for the Weekly-Outlook 3/3 charts ──────────────────────
 // These charts plot the current FRONT-MONTH contract (e.g. CLN26), not the native
 // continuous: the LEAD (highest-volume) contract's own daily history, lazily fetched
 // via /api/contract-history (reusing the Futures-tab loader, cached on the contract).
@@ -629,7 +636,7 @@ async function wkEnsureFrontHistory(cfg) {
   } catch (e) { /* fall back to continuous */ }
 }
 
-// ── Live overlay for the Weekly-Outlook 4/4 charts ───────────────────────────
+// ── Live overlay for the Weekly-Outlook 3/3 charts ───────────────────────────
 // The yfinance symbol a given .wk-chart plots: its market's front-month contract
 // (front-month mode), else the native continuous (fallback).
 // The live-quote symbol for a market's weekly chart: its front-month contract once that
@@ -648,19 +655,19 @@ function wkChartLiveSymbol(el) {
   const cfg = meta && catCache[meta.slug] && catCache[meta.slug][key];
   return wkLiveSymbol(cfg);
 }
-// Redraw every already-rendered 4/4 chart so a fresh live tick lands on its price line.
+// Redraw every already-rendered 3/3 chart so a fresh live tick lands on its price line.
 // (live.js calls this as the repaint for the screener page.)
 function wkRepaintLiveCharts() {
   if (document.getElementById('screenerWeekly')?.hidden) return;
   document.querySelectorAll('#screenerWeeklyBody .wk-chart[data-rendered]').forEach(wkDrawChart);
 }
 
-// Lazy entry point: load the 4/4 log + the market's category data, then draw.
+// Lazy entry point: load the 3/3 log + the market's category data, then draw.
 async function wkRenderChart(el) {
   const key = el.dataset.key, meta = INDEX[key];
   if (!meta) { el.innerHTML = ''; return; }
   el.innerHTML = '<div class="wk-chart-loading">Loading chart …</div>';
-  await ensureFourFourLog();
+  await ensureThreeThreeLog();
   const cat = await loadCategory(meta.slug);
   const cfg = cat && cat[key];
   if (!cfg) { el.innerHTML = '<div class="wk-chart-empty">No chart history available.</div>'; return; }
@@ -673,7 +680,7 @@ async function wkRenderChart(el) {
 }
 
 // Draw (or redraw) the chart in the Futures-tab layout — rounded background, round-
-// level price grid, themed candles, bottom date axis — plus the 4/4 band + entry/
+// level price grid, themed candles, bottom date axis — plus the 3/3 band + entry/
 // drop markers from the bot log. Synchronous + sized to the live container width,
 // so resize just re-runs this. Mirrors the native chart in chart.js / forex.js.
 function wkDrawChart(el) {
@@ -688,14 +695,14 @@ function wkDrawChart(el) {
   if (basisEl) basisEl.textContent = (mode === 'front' && front)
     ? (front.contract_symbol || front.label || front.delivery_month_label || 'Front month')
     : 'Continuous';
-  const logEntry = (_wkFourFourLog || {})[key] || {};
+  const logEntry = (_wkThreeThreeLog || {})[key] || {};
   const periods = Array.isArray(logEntry.periods) ? logEntry.periods : [];
   // The period that drives the caption + view window: prefer the open one in `dir`.
   const lead = periods.find(p => !p.end && p.direction === dir)
             || periods.filter(p => p.direction === dir).slice(-1)[0]
             || periods.slice(-1)[0] || null;
 
-  // Window: ~12 months (Futures default range), extended to include the 4/4 start.
+  // Window: ~12 months (Futures default range), extended to include the 3/3 start.
   const ms = iso => new Date(iso + 'T00:00:00').getTime();
   let from = Math.max(0, all.length - 252);
   if (lead && lead.start) {
@@ -703,8 +710,8 @@ function wkDrawChart(el) {
     if (si >= 0) from = Math.min(from, Math.max(0, si - 12));
   }
   let bars = all.slice(from);
-  // Live-Tick des Continuous-Symbols (display-only) auf die Bars splicen — wie chart.js
-  // injectLivePoint. Nie persistiert; ein Reload / der Board-Refresh ersetzt ihn.
+  // Splice the continuous symbol's live tick onto the bars (display-only) — like chart.js
+  // injectLivePoint. Never persisted; a reload / the board refresh replaces it.
   const cont = (typeof getContinuousContract === 'function') ? (getContinuousContract(cfg) || {}) : (cfg.continuous_contract || {});
   const liveSym = (mode === 'front' && front && front.yf_symbol)
     ? front.yf_symbol
@@ -759,9 +766,9 @@ function wkDrawChart(el) {
   const last = bars[n - 1].close;
   const dec = (cfg.tick_decimals != null) ? cfg.tick_decimals : (last >= 100 ? 2 : last >= 1 ? 3 : 5);
 
-  // Aktuelle-Preis-Linie (Live-Tick wenn vorhanden, sonst letzter Close) + rechtsbündiges
-  // Preis-Tag — wie die Haupt-Charts (chart.js/smt.js). `curY` unterdrueckt unten das
-  // kollidierende Round-Level-Label.
+  // Current-price line (live tick when present, otherwise the last close) + a right-aligned
+  // price tag — like the main charts (chart.js/smt.js). `curY` suppresses a colliding
+  // round-level label below.
   const curY = pY(last);
   let priceLine = '';
   if (Number.isFinite(curY)) {
@@ -796,12 +803,12 @@ function wkDrawChart(el) {
     if (v < pLo || v > pHi) continue;
     const y = pY(v).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    // Rechtsbuendig (kein Clipping); Label weglassen, wenn es mit dem Preis-Tag kollidiert.
+    // Right-aligned (no clipping); drop the label when it collides with the price tag.
     if (!(Number.isFinite(curY) && Math.abs(+y - curY) < 9))
       grid += `<text x="${W - 4}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${v.toFixed(dec)}</text>`;
   }
 
-  // 4/4 band + entry/drop markers (all periods in view), behind candles — same as card-mode.
+  // 3/3 band + entry/drop markers (all periods in view), behind candles — same as card-mode.
   const t0 = tms[0], t1 = tms[n - 1];
   let bands = '', marks = '';
   periods.forEach(p => {
@@ -839,9 +846,9 @@ function wkDrawChart(el) {
       + `<rect x="${(x - candleW / 2).toFixed(1)}" y="${Math.min(yO, yC).toFixed(1)}" width="${candleW.toFixed(1)}" height="${Math.max(1, Math.abs(yC - yO)).toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
   }
 
-  // ── Untere Panes (Volumen / OI / COT / Calendar-Spread) — wie der Futures-Tab
-  // (chart.js loadChart), nur statisch + immer Continuous. Nutzt dieselben globalen
-  // normalize*-Helfer + CHART_THEME, damit beide Charts visuell identisch bleiben.
+  // ── Lower panes (volume / OI / COT / calendar spread) — like the Futures tab
+  // (chart.js loadChart), only static and always continuous. Uses the same global
+  // normalize* helpers + CHART_THEME so both charts stay visually identical.
   const volumeH = 62, oiH = 68, cotH = 84, spreadH = 64, gap = 22;
   const firstDate = new Date(bars[0].date), lastDate = new Date(bars[n - 1].date);
   const inVisibleRange = d => { const dt = new Date(d.date); return dt >= firstDate && dt <= lastDate; };
@@ -852,7 +859,7 @@ function wkDrawChart(el) {
     return padL + edgePad + inset + usableW * index / (count - 1);
   };
 
-  // Volumen-Pane (Continuous: summierte Kontrakt-Volumina; Fallback: Bar-Volumen).
+  // Volume pane (continuous: summed contract volumes; fallback: bar volume).
   const volumeTop = padT + priceH + gap;
   let volumeSvg = '';
   {
@@ -896,7 +903,7 @@ function wkDrawChart(el) {
     }
   }
 
-  // OI-Pane (Daily-OI wenn vorhanden, sonst CFTC-Wochen-OI aus der COT-Reihe).
+  // OI pane (daily OI when present, otherwise the weekly CFTC OI from the COT series).
   const cotSeries = (typeof normalizeCotSeries === 'function') ? normalizeCotSeries(cfg.cot_series || []) : [];
   const visCot = cotSeries.filter(inVisibleRange);
   const oiTop = volumeTop + volumeH + gap;
@@ -926,7 +933,7 @@ function wkDrawChart(el) {
     }
   }
 
-  // COT-Pane (Commercial Net; ohne Hedging-Fenster-Variante im Outlook).
+  // COT pane (commercial net; no hedging-window variant in the Outlook).
   const cotValue = d => (d.cot_net !== undefined && d.cot_net !== null) ? d.cot_net : d.comm_net;
   const cotTop = oiTop + oiH + gap;
   let cotSvg = '';
@@ -955,7 +962,7 @@ function wkDrawChart(el) {
     }
   }
 
-  // Calendar-Spread-Pane (Front − Next; negativ = Contango). Nur wenn Daten da sind.
+  // Calendar-spread pane (front − next; negative = contango). Only when data is there.
   let spreadSeries = (typeof normalizeSpreadSeries === 'function') ? normalizeSpreadSeries(cfg.calendar_spread_series || []) : [];
   spreadSeries = spreadSeries.filter(inVisibleRange);
   const spreadShown = spreadSeries.length > 0;
@@ -993,12 +1000,12 @@ function wkDrawChart(el) {
       + `<text x="${W - padR + 5}" y="${(spreadY(dataLo) + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataLo.toFixed(dec)}</text>`;
   }
 
-  // Pane-Überschriften links (kein Toggle-Control im Outlook, daher beschriftet).
+  // Pane headings on the left (no toggle control in the Outlook, hence the labels).
   const paneLabel = (top, txt) => `<text x="${padL}" y="${(top - 6).toFixed(1)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em" opacity="0.72">${txt}</text>`;
   const paneHeads = paneLabel(volumeTop, 'VOLUME') + paneLabel(oiTop, 'OPEN INTEREST') + paneLabel(cotTop, 'COT · COMMERCIAL NET')
     + (spreadShown ? paneLabel(spreadTop, 'CALENDAR SPREAD') : '');
 
-  // Untere Datumsachse unter dem letzten Pane.
+  // Bottom date axis below the last pane.
   const panesH = (volumeH + gap) + (oiH + gap) + (cotH + gap) + (spreadShown ? spreadH + gap : 0);
   const axisY = padT + priceH + panesH, totalH = axisY + 22;
   let xLabels = '';
@@ -1011,7 +1018,7 @@ function wkDrawChart(el) {
   const svg = `<svg class="wk-chart-svg" viewBox="0 0 ${W} ${totalH}" width="${W}" height="${totalH}" preserveAspectRatio="xMinYMin meet">`
     + `${chartBg}${bands}${grid}${candles}${marks}${priceLine}${liveDot}${volumeSvg}${oiSvg}${cotSvg}${spreadSvg}${paneHeads}${xLabels}</svg>`;
 
-  // The 4/4-since + seasonal-runway readout now lives in the block's header stat line
+  // The 3/3-since + seasonal-runway readout now lives in the block's header stat line
   // (wkStatLine), so the chart renders on its own — no duplicated caption above it.
   el.innerHTML = svg;
 }

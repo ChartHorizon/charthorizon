@@ -1213,7 +1213,7 @@ function exportChartScreenshot() {
   const H = svg.height.baseVal.value || svg.getBoundingClientRect().height;
   const cssVar = (n, fb) => (getComputedStyle(document.documentElement).getPropertyValue(n) || fb).trim() || fb;
   const bg = cssVar('--chart-bg', '#ffffff'), accent = cssVar('--accent', '#ef9412'), txt2 = cssVar('--text2', '#46586d'), border = cssVar('--border', '#e5e9ef');
-  // Footer caption: ChartHorizon mark + which market/contract + capture time.
+  // Footer caption: brand mark + which market/contract + capture time.
   const market = (document.getElementById('bigchartName')?.textContent || '').trim();
   const sym = (document.getElementById('bigchartSym')?.textContent || '').trim();
   const now = new Date(), p2 = n => String(n).padStart(2, '0');
@@ -1236,8 +1236,8 @@ function exportChartScreenshot() {
     const cyf = H + footerH / 2;
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     ctx.fillStyle = accent; ctx.beginPath(); ctx.moveTo(10, cyf + 5); ctx.lineTo(16, cyf - 6); ctx.lineTo(22, cyf + 5); ctx.closePath(); ctx.fill();   // ▲ mark
-    ctx.font = '700 13px Geist, system-ui, sans-serif'; ctx.fillText('ChartHorizon', 28, cyf);
-    const chW = ctx.measureText('ChartHorizon').width;
+    ctx.font = '700 13px Geist, system-ui, sans-serif'; ctx.fillText(EXPORT_BRAND, 28, cyf);
+    const chW = ctx.measureText(EXPORT_BRAND).width;
     ctx.font = '500 12px Geist, system-ui, sans-serif'; ctx.fillStyle = txt2; ctx.fillText(meta, 28 + chW, cyf);
     ctx.textAlign = 'right'; ctx.fillText('captured ' + ts, W - 10, cyf); ctx.textAlign = 'left';
     canvas.toBlob(blob => {

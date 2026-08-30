@@ -414,10 +414,10 @@ function renderSmtChart(bars, opts) {
     }
   }
 
-  // Aktuelle-Preis-Linie + Preis-Tag RECHTSBUENDIG an der Achse (Futures-Tab-Parität): rechte
-  // Kante fix am Rand, Tag waechst nach links -> lange Zahlen werden nie abgeschnitten. Dezent,
-  // theme-aware; Preis = letzter Bar (Live-Tick wenn vorhanden, sonst letzter Close). `curY`
-  // dient unten dazu, das kollidierende Round-Level-Label wegzulassen.
+  // Current-price line + price tag RIGHT-ALIGNED to the axis (parity with the Futures tab):
+  // right edge fixed at the border, the tag grows leftwards -> long numbers are never
+  // clipped. Subtle, theme-aware; price = the last bar (live tick when present, otherwise
+  // the last close). `curY` is used below to drop a colliding round-level label.
   let priceLine = '';
   let curY = null;
   if (_lb && Number.isFinite(Number(_lb.close))) {
@@ -447,8 +447,8 @@ function renderSmtChart(bars, opts) {
     if (lv < pLo || lv > pHi) continue;
     const y = yAt(lv).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${(W - padR).toFixed(1)}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    // Label weglassen, wenn es mit dem Aktuelle-Preis-Tag auf gleicher Hoehe kollidiert.
-    // Rechtsbuendig (text-anchor=end), damit lange Zahlen am Rand nicht abgeschnitten werden.
+    // Drop the label when it collides with the current-price tag at the same height.
+    // Right-aligned (text-anchor=end) so long numbers are not clipped at the border.
     if (!(curY != null && Math.abs(+y - curY) < 9))
       grid += `<text x="${(W - 4)}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${smtFmtPrice(lv)}</text>`;
   }

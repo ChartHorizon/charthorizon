@@ -221,10 +221,10 @@ async function switchCommodity(key) {
       // Front history already cached → render the front month immediately.
       await selectCurveContract(frontIdx, true);
     } else if (document.body.classList.contains('card-mode')) {
-      // Card-Mode (Bot-PNG-Export, ?card=): KEIN Instant-Paint + Hintergrund-Swap — das
-      // Chart-SVG darf erst existieren, wenn der Front-Month steht, sonst friert der
-      // Exporter-Screenshot die Continuous-Serie ein (Race). Fetch-Fehler → bestehender
-      // Continuous-Fallback via fallbackToContinuous=true (ehrlicher Degrade).
+      // Card-mode (bot PNG export, ?card=): NO instant paint + background swap — the
+      // chart SVG must not exist before the front month is in place, or the exporter's
+      // screenshot freezes the continuous series (race). On a fetch error the existing
+      // continuous fallback kicks in via fallbackToContinuous=true (an honest degrade).
       await selectCurveContract(frontIdx, true);
     } else {
       // Instant first paint from the continuous series (already in the category JSON, no
@@ -250,28 +250,32 @@ async function switchCommodity(key) {
 
 // ── Futures Strength heatmap (bottom of the Futures tab) ────────────────────
 // Mirrors the FX strength board (forex.js) but for the futures universe, and shows
-// ONLY strong setups: markets where at least 3 of the 4 signals (Seasonals · COT ·
-// COT-Hedging · Term Structure) align in one direction — the same 3/4 / 4/4 "setup"
-// definition the Screener's Weekly Outlook and the content bot use (screenerSetup,
-// from screener.js). Drawn as two bias columns, reusing the FX board's .fx-* styling
-// verbatim. Reads the shared screenerData; pure on-screen view, never invoked in
-// card-mode (so content-bot PNGs are unchanged). Chip color uses fxCurrencyHeat()
-// with max pinned to 4, fed the signed setup count, so 4/4 is full green/red and
-// 3/4 a step lighter.
-const FUTURES_HEAT_MAX = 4;
+// ONLY full setups: markets where all 3 signals (Seasonals · COT-Hedging · Term
+// Structure) align in one direction — a full 3/3, using the same setup definition
+// the Screener's Weekly Outlook and the content bot use (screenerSetup, from
+// screener.js), but filtered down to count === 3 here at the call site.
+// screenerSetup itself still returns 2/3 partials — the Weekly Outlook needs those
+// (its "completing this week" section lifts a 2/3 to 3/3) — this board just doesn't
+// show them: a 2/3 is a two-to-one split among three signals, not a setup one
+// signal short, and doesn't belong on a board that reads as "these are aligned."
+// Drawn as two bias columns, reusing the FX board's .fx-* styling verbatim. Reads
+// the shared screenerData; pure on-screen view, never invoked in card-mode (so
+// content-bot PNGs are unchanged). Chip color uses fxCurrencyHeat() with max
+// pinned to 3, fed the signed setup count, so a full setup saturates the chip.
+const FUTURES_HEAT_MAX = 3;
 // FX currencies have their own heatmap on the Forex tab — exclude them here so
 // the two boards don't overlap.
 const FUTURES_HEAT_EXCLUDE_CATEGORY = 'Currencies';
 
 function futuresHeatTitle(r, setup) {
   const sig = SIG_KEYS.map(k => `${SIG_LABEL[k]} ${k === 'structure' ? (r.structure || 'neutral') : (r[k] || 'neutral')}`).join(' · ');
-  return `${r.display_name}: ${setup.count}/4 ${setup.dir} — ${sig}`;
+  return `${r.display_name}: ${setup.count}/3 ${setup.dir} — ${sig}`;
 }
 
 function futuresHeatChip(item) {
   const { row: r, setup } = item;
-  const signed = setup.dir === 'bullish' ? setup.count : -setup.count;   // +3/+4 or -3/-4
-  return `<button type="button" class="fx-chip" style="${fxCurrencyHeat(signed, FUTURES_HEAT_MAX)}" onclick="openScreenerMarket('${r.key}')" title="${esc(futuresHeatTitle(r, setup))}">${esc(r.display_name)} <b>${setup.count}/4</b></button>`;
+  const signed = setup.dir === 'bullish' ? setup.count : -setup.count;   // +2/+3 or -2/-3
+  return `<button type="button" class="fx-chip" style="${fxCurrencyHeat(signed, FUTURES_HEAT_MAX)}" onclick="openScreenerMarket('${r.key}')" title="${esc(futuresHeatTitle(r, setup))}">${esc(r.display_name)} <b>${setup.count}/3</b></button>`;
 }
 
 function futuresHeatColumn(kind, title, items) {
@@ -282,7 +286,7 @@ function futuresHeatColumn(kind, title, items) {
       <div class="fx-bias-count">${items.length || 0}</div>
     </div>
     <div class="fx-bias-list">
-      ${items.length ? items.map(futuresHeatChip).join('') : '<span class="fx-bias-empty">No 3/4+ setup today</span>'}
+      ${items.length ? items.map(futuresHeatChip).join('') : '<span class="fx-bias-empty">No 3/3 setup today</span>'}
     </div>
   </div>`;
 }
@@ -292,11 +296,11 @@ function renderFuturesHeat() {
   if (!el) return;
   if (!Array.isArray(screenerData) || !screenerData.length) { el.hidden = true; el.innerHTML = ''; return; }
 
-  // Only markets with a >=3/4 aligned setup (3/4 or 4/4); everything weaker is dropped.
+  // Only full 3/3 aligned setups; 2/3 partials and everything weaker are dropped.
   const setups = screenerData
     .filter(r => r && r.category !== FUTURES_HEAT_EXCLUDE_CATEGORY)
     .map(r => ({ row: r, setup: screenerSetup(r) }))
-    .filter(item => item.setup);
+    .filter(item => item.setup && item.setup.count === 3);
 
   const byStrength = (a, b) => b.setup.count - a.setup.count || a.row.display_name.localeCompare(b.row.display_name);
   const bullish = setups.filter(s => s.setup.dir === 'bullish').sort(byStrength);
@@ -306,7 +310,7 @@ function renderFuturesHeat() {
   el.innerHTML = `
     <div class="fx-head">
       <div class="fx-title">Futures Strength</div>
-      <div class="fx-note">Only 3/4 &amp; 4/4 setups · Seasonals + COT + COT-Hedging + Term Structure · click a market to load its chart</div>
+      <div class="fx-note">Only full 3/3 setups · Seasonals + COT-Hedging + Term Structure aligned · click a market to load its chart</div>
     </div>
     <div class="fx-bias-board">
       ${futuresHeatColumn('long', 'Bullish / Long Bias', bullish)}

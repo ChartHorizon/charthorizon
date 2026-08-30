@@ -1,11 +1,11 @@
-// ── Settings-Tab: Chart-Layout-Presets (Light/Dark) + Zeitzone ──
-// Plain script, ein globaler Scope. Datenschicht (Preset-Store, applyActivePreset,
-// Zeitzonen-Helfer) liegt in core.js; hier nur View + Event-Handler.
+// ── Settings tab: chart layout presets (light/dark) + timezone ──
+// Plain script, one global scope. The data layer (preset store, applyActivePreset,
+// timezone helpers) lives in core.js; this file is view + event handlers only.
 
-// Welches Theme der Chart-Layout-Editor gerade bearbeitet (unabhaengig vom App-Theme).
+// Which theme the chart-layout editor is currently editing (independent of the app theme).
 let settingsEditTheme = null;
 
-// Farb-Tokens als UI-Gruppen: [Gruppenname, [token, Label]...] (Labels englisch — UI-Sprache)
+// Color tokens as UI groups: [group name, [token, label]...]
 const SETTINGS_COLOR_GROUPS = [
   ['Surface', [['--chart-bg', 'Background'], ['--chart-grid', 'Grid'], ['--chart-grid-soft', 'Grid (soft)'], ['--chart-axis', 'Axis'], ['--chart-text', 'Text']]],
   ['Candles', [['--chart-bull', 'Bull'], ['--chart-bull-wick', 'Bull wick'], ['--chart-bear', 'Bear'], ['--chart-bear-wick', 'Bear wick']]],
@@ -14,7 +14,7 @@ const SETTINGS_COLOR_GROUPS = [
   ['Other', [['--chart-spread', 'Spread'], ['--chart-trend', 'Trend line']]],
 ];
 
-// Stil-Optionen: [key, Label, [wert, Label]...] (Labels englisch — UI-Sprache)
+// Style options: [key, label, [value, label]...]
 const SETTINGS_STYLE_OPTIONS = [
   ['candle', 'Candle style', [['filled', 'Filled'], ['hollow', 'Hollow'], ['line', 'Line']]],
   ['wick', 'Wick thickness', [['thin', 'Thin'], ['medium', 'Medium'], ['thick', 'Thick']]],
@@ -22,8 +22,8 @@ const SETTINGS_STYLE_OPTIONS = [
   ['grid', 'Grid', [['normal', 'Normal'], ['subtle', 'Subtle'], ['off', 'Off']]],
 ];
 
-// Liest die reinen CSS-Default-Farben eines Themes: Inline-Overrides temporaer entfernen,
-// data-theme setzen, computed Werte lesen, alles synchron wieder herstellen (kein Flash).
+// Read a theme's pure CSS default colors: temporarily strip the inline overrides, set
+// data-theme, read the computed values, restore everything synchronously (no flash).
 function settingsReadThemeDefaults(theme) {
   const root = document.documentElement;
   const prevTheme = root.getAttribute('data-theme');
@@ -38,7 +38,7 @@ function settingsReadThemeDefaults(theme) {
   return out;
 }
 
-// Aufgeloeste Farben/Stil eines Presets (Defaults des Themes + Preset-Overrides).
+// Resolved colors/style of a preset (theme defaults + preset overrides).
 function settingsCurrentColors(theme, preset) {
   const out = { ...settingsReadThemeDefaults(theme) };
   if (preset && preset.colors) Object.keys(preset.colors).forEach(k => { if (preset.colors[k]) out[k] = preset.colors[k]; });
@@ -48,7 +48,7 @@ function settingsCurrentStyle(preset) {
   return { ...CHART_STYLE_DEFAULT, ...((preset && preset.style) || {}) };
 }
 
-// Normalisiert einen Farbwert auf #rrggbb (Pflicht fuer <input type="color">).
+// Normalise a color value to #rrggbb (mandatory for <input type="color">).
 function _toHex6(v) {
   if (!v) return '#000000';
   v = String(v).trim();
@@ -57,7 +57,7 @@ function _toHex6(v) {
   return '#000000';
 }
 
-// Feste Demo-Kerzen fuer die Live-Vorschau.
+// Fixed demo candles for the live preview.
 const SETTINGS_PREVIEW_BARS = [
   { o: 100, h: 104, l: 99, c: 103 }, { o: 103, h: 106, l: 102, c: 105 }, { o: 105, h: 107, l: 101, c: 102 },
   { o: 102, h: 103, l: 98, c: 99 }, { o: 99, h: 102, l: 97, c: 101 }, { o: 101, h: 105, l: 100, c: 104 },
@@ -65,7 +65,7 @@ const SETTINGS_PREVIEW_BARS = [
   { o: 103, h: 105, l: 101, c: 104 }, { o: 104, h: 110, l: 103, c: 109 }, { o: 109, h: 112, l: 108, c: 111 },
 ];
 
-// Eigenstaendiger Mini-Candlestick-Renderer (keine Kopplung an chart.js).
+// Standalone mini candlestick renderer (no coupling to chart.js).
 function settingsMiniPreview(colors, style) {
   const W = 260, H = 120, padL = 6, padR = 6, padT = 8, padB = 8;
   const bars = SETTINGS_PREVIEW_BARS;
@@ -125,16 +125,16 @@ function settingsMiniPreview(colors, style) {
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet"><rect x="0" y="0" width="${W}" height="${H}" fill="${bg}"/>${grid}${body}</svg>`;
 }
 
-// Rendert den Tab. Die beiden Render-Funktionen kommen in spaeteren Tasks dazu;
-// die typeof-Guards halten diesen Zwischenstand lauffaehig (leerer, klickbarer Tab).
+// Renders the tab. The typeof guards keep it runnable even when a render function is
+// not defined yet (empty but clickable tab).
 function openSettings() {
   if (typeof renderSettingsAppearance === 'function') renderSettingsAppearance();
   if (typeof renderSettingsLayouts === 'function') renderSettingsLayouts();
   if (typeof renderSettingsTimezone === 'function') renderSettingsTimezone();
   if (typeof renderSettingsBackup === 'function') renderSettingsBackup();
   if (typeof renderSettingsAbout === 'function') {
-    renderSettingsAbout();                                    // sofort zeichnen (Version evtl. noch offen)
-    loadSettingsVersion().then(() => renderSettingsAbout());  // und nachziehen, sobald der Server geantwortet hat
+    renderSettingsAbout();                                    // draw immediately (version may still be pending)
+    loadSettingsVersion().then(() => renderSettingsAbout());  // and redraw once the server has answered
   }
 }
 
@@ -188,8 +188,8 @@ function setSettingsEditTheme(theme) {
   renderSettingsLayouts();
 }
 
-// Editiert das aktive (Custom-)Preset des gerade bearbeiteten Themes; speichert,
-// wendet live an (nur wenn = App-Theme) und zeichnet den Tab neu.
+// Edits the active (custom) preset of the theme being edited; saves it, applies it
+// live (only when it is the app theme) and redraws the tab.
 function _updateActivePresetField(mutator) {
   const theme = settingsEditTheme || currentTheme();
   const store = loadPresetStore();
@@ -388,12 +388,12 @@ function importSettings() {
   input.remove();
 }
 
-// ── About: welche Version hier tatsaechlich laeuft ──
-// Die Version kommt vom laufenden Server (/api/version), NICHT aus config.js: config.js
-// schreibt der Generator, und nach einem Update steht dort so lange die alte Version,
-// bis der erste Refresh durch ist. Eine Versionsanzeige darf nicht luegen.
-let _settingsVersionInfo = null;      // gecacht — aendert sich zur Laufzeit nicht
-let _settingsVersionTried = false;    // ein Fehlschlag wird nicht bei jedem Tab-Wechsel wiederholt
+// ── About: which version is actually running here ──
+// The version comes from the running server (/api/version), NOT from config.js: config.js
+// is written by the generator, and after an update it still names the old version until
+// the first refresh is through. A version display must not lie.
+let _settingsVersionInfo = null;      // cached — does not change at runtime
+let _settingsVersionTried = false;    // one failure is not retried on every tab switch
 
 async function loadSettingsVersion() {
   if (_settingsVersionInfo || _settingsVersionTried) return _settingsVersionInfo;
@@ -403,7 +403,7 @@ async function loadSettingsVersion() {
     if (!res.ok) return null;
     const data = await res.json();
     if (data && data.version) _settingsVersionInfo = data;
-  } catch (e) { /* Server weg / Seite als file:// geoeffnet — Karte zeigt dann "unavailable" */ }
+  } catch (e) { /* server gone / page opened as file:// — the card then shows "unavailable" */ }
   return _settingsVersionInfo;
 }
 
@@ -411,7 +411,7 @@ function renderSettingsAbout() {
   const host = document.getElementById('settingsAbout');
   if (!host) return;
   const info = _settingsVersionInfo;
-  // genDate haelt refresh.js nach einem Hintergrund-Refresh aktuell.
+  // refresh.js keeps genDate current after a background refresh.
   const asOf = (window.__CONFIG__ && window.__CONFIG__.genDate) || '';
 
   const rows = [];
@@ -430,7 +430,7 @@ function renderSettingsAbout() {
       ? `<div class="set-kv">${rows.map(([k, v]) => `<div class="set-kv-k">${esc(k)}</div><div class="set-kv-v">${esc(v)}</div>`).join('')}</div>`
       : `<div class="set-hint">Version unavailable — the local server did not answer. Restart ChartHorizon.</div>`) +
     `<div class="set-hint">Latest release and release notes: ` +
-      // Bewusst der nackte Link, nicht /from-dashboard: der zaehlt die Logo-Klicks im
-      // Banner und soll nicht durch einen zweiten Einstieg verwaessert werden.
+      // Deliberately the bare link, not /from-dashboard: that one counts the logo clicks
+      // in the banner and must not be diluted by a second entry point.
       `<a class="set-about-link" href="https://chart-horizon.com/dashboard" target="_blank" rel="noopener">chart-horizon.com/dashboard</a></div>`;
 }

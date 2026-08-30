@@ -39,6 +39,7 @@ from series_utils import _coerce_iso_date
 from local_first_merge import _slug
 
 __all__ = [
+    'SCORE_SIGNALS',
     'SEASONAL_MAX_WINDOW',
     'SEASONAL_MIN_RUN_DAYS',
     'SEASONAL_WINDOWS',
@@ -46,7 +47,6 @@ __all__ = [
     'SPREAD_SIGNAL_MAX_LAG_DAYS',
     '_cot_net',
     '_screener_cot_hedge_signal',
-    '_screener_cot_signal',
     '_screener_doy',
     '_screener_seasonal_event',
     '_screener_seasonal_signal',
@@ -58,17 +58,20 @@ __all__ = [
     '_seasonal_gated_sequence',
     '_seasonal_signal_at',
     '_seasonal_window_curve',
+    '_signal_dir',
     'build_screener_summary',
+    'screener_score',
 ]
 
 
 
 # ─────────────────────────────────────────────────────────────────────
 #  SCREENER SIGNALS  (lean per-market summary -> ff_data/screener.json)
-#  Signals are computed to match the on-chart logic exactly:
+#  Three signals, summed into `score` (-3 … +3) by screener_score(). The plain COT
+#  sign was dropped on 2026-08-29 (a constant in structurally-hedged markets).
+#  Each is computed to match the on-chart logic; cot_hedge matches the chart's 6M range:
 #   - seasonal:  3-of-4 confirmation (of the four 5/10/15Y+max curves at least three share a direction, none opposes), read over a short trailing window [today-SEASONAL_WINDOW_DAYS, today] so a season active now OR within the last few days still counts; else neutral
-#   - cot:       latest net position sign (>=0 long = bullish)        [plain COT pane]
-#   - cot_hedge: latest net vs midpoint of the trailing 12M window    [COT Hedging Program]
+#   - cot_hedge: latest net vs midpoint of the trailing 6M window     [COT Hedging Program]
 #   - structure: front contract > next contract = premium (backwardation) — read off the
 #                same calendar_spread_series the chart pane draws (volume-led front),
 #                with the nearest priced contract pair as fallback
@@ -397,13 +400,36 @@ def _screener_seasonal_event(seasonal_history, today=None, curves=None):
     return None
 
 
-def _screener_cot_signal(cot_series):
-    if not cot_series:
-        return None
-    net = _cot_net(cot_series[-1])
-    if net is None:
-        return None
-    return "bullish" if net >= 0 else "bearish"
+# The three signals the setup score is built from. Deliberately three, not four:
+# the plain COT signal (sign of the net position) was dropped on 2026-08-29 because
+# it is a per-market constant wherever hedgers are structurally one-sided -- 13 of 39
+# markets never flipped it in 273 weeks, so it could only block one direction and gift
+# the other. `cot_hedge` measures the same net against its own trailing range instead.
+SCORE_SIGNALS = ("seasonal", "cot_hedge", "structure")
+
+
+def _signal_dir(value):
+    """Map a screener signal to a direction: +1 / -1 / 0.
+    seasonal/cot_hedge speak bullish/bearish/neutral; structure speaks premium/discount.
+    Anything else -- neutral, None, an unknown string -- is 0."""
+    if value in ("bullish", "premium"):
+        return 1
+    if value in ("bearish", "discount"):
+        return -1
+    return 0
+
+
+def screener_score(signals):
+    """Signed alignment score over SCORE_SIGNALS (-3 … +3).
+
+    This ONE number answers every consumer question, which is why no companion
+    `alignment`/`aligned_count` field exists:
+      abs(score) == 3  -> full 3/3 setup      sign -> direction
+      abs(score) == 2  -> near miss: exactly two aligned + one neutral
+    The near-miss property holds only because there are three signals: an opposing
+    vote can never produce abs(score) > 1. A fourth signal would break it.
+    """
+    return sum(_signal_dir(signals.get(k)) for k in SCORE_SIGNALS)
 
 
 def _screener_cot_hedge_signal(cot_series, days=182):
@@ -441,6 +467,46 @@ def _screener_cot_hedge_signal(cot_series, days=182):
     return "bullish" if window[-1] >= midpoint else "bearish"
 
 
+def _screener_cot_hedge_position(cot_series, days=182):
+    """Where the latest net sits in that same window, 0..1 (0 = low, 0.5 = midpoint).
+
+    The verdict above is a side and says nothing about distance, and the distance is
+    sometimes the whole story: Ethereum cleared the midpoint by 39 contracts in the
+    2026-08-25 report — 0.35% of its range — which is a crossing on the definition and a
+    coin-flip in fact. A consumer that reports turns (the weekly Ledger does) can only
+    tell those apart with a number.
+
+    Deliberately re-derived from the same window rather than returned alongside the
+    verdict: the signal's return type is consumed by screener_score and the frontend, and
+    widening it to a tuple to carry a diagnostic would touch every caller of the thing
+    that must not drift. None wherever the verdict is None or neutral — a flat window has
+    no range to hold a position in.
+    """
+    if not cot_series:
+        return None
+    try:
+        last = date.fromisoformat(str(cot_series[-1].get("date"))[:10])
+    except (TypeError, ValueError):
+        return None
+    cutoff = last - timedelta(days=days)
+    window = []
+    for r in cot_series:
+        try:
+            dt = date.fromisoformat(str(r.get("date"))[:10])
+        except (TypeError, ValueError):
+            continue
+        if cutoff <= dt <= last:
+            net = _cot_net(r)
+            if net is not None:
+                window.append(net)
+    if not window:
+        return None
+    lo, hi = min(window), max(window)
+    if hi == lo:
+        return None
+    return round((window[-1] - lo) / (hi - lo), 4)
+
+
 def _screener_structure_signal(contracts, spread_series=None, as_of=None):
     """Term structure: premium (backwardation) when the front trades over the next month.
 
@@ -460,7 +526,7 @@ def _screener_structure_signal(contracts, spread_series=None, as_of=None):
     drops the quote for a thinly-traded deferred contract (e.g. the US Dollar Index next
     month DXU…, which trades at a fraction of the front's volume). Comparing only
     contracts[0] vs contracts[1] would then return None and silently drop the market out
-    of the 4/4 filter, so the signal degrades to the next available deferred month rather
+    of the 3/3 filter, so the signal degrades to the next available deferred month rather
     than disappearing. Non-quoted far months carry last=None and are skipped, so no stale
     far-deferred print can leak in."""
     last_point = None
@@ -486,7 +552,7 @@ def _screener_structure_signal(contracts, spread_series=None, as_of=None):
 
 
 def build_screener_summary(by_cat):
-    """One lean record per market with the four screener signals."""
+    """One lean record per market with the three screener signals and their score."""
     out = []
     for cat, payload in by_cat.items():
         for key, mk in payload.items():
@@ -501,7 +567,7 @@ def build_screener_summary(by_cat):
             # measures the calendar spread's lag against (see _screener_structure_signal).
             history = cc.get("history") or []
             latest_bar_date = history[-1].get("date") if history else None
-            out.append({
+            row = {
                 "key": key,
                 "display_name": mk.get("display_name"),
                 "category": cat,
@@ -509,13 +575,36 @@ def build_screener_summary(by_cat):
                 "last": front.get("last"),
                 "change_pct": front.get("change_pct"),
                 "seasonal": _screener_seasonal_signal(seasonal_history, curves=seasonal_curves),
-                "cot": _screener_cot_signal(mk.get("cot_series") or []),
                 "cot_hedge": _screener_cot_hedge_signal(mk.get("cot_series") or []),
+                # The same verdict one COT release earlier. The window is anchored on the
+                # series' LAST point (see _screener_cot_hedge_signal), so dropping that
+                # point is exactly "as of the previous report" — not an approximation.
+                # It is emitted here, next to the reading it is compared against, because
+                # the consumer is the weekly Hedgers' Ledger, which reports the programs
+                # that TURNED. Deriving it over there would put a second copy of this
+                # definition in the content repo, which is the one thing the split between
+                # screener.py and blog/hedgeboard.py exists to prevent. None for a market
+                # with fewer than two COT points — no previous reading, not a turn.
+                "cot_hedge_prev": _screener_cot_hedge_signal(
+                    (mk.get("cot_series") or [])[:-1]),
+                # Which COT cohort the two readings above are ABOUT. Not a signal, and the
+                # only non-signal field here, but the tracked book is not always the
+                # commercial one — the financial futures carry Leveraged Funds / Managed
+                # Money / Asset Manager, i.e. speculators. A consumer that names the cohort
+                # in prose (the Ledger does) would otherwise have to open the 60 MB market
+                # JSONs for one string per market, or guess — and guessing here means
+                # calling leveraged funds "hedgers".
+                "cot_label": ((mk.get("cot_series") or [{}])[-1] or {}).get("cot_label"),
+                # How far the net actually sits from that midpoint (0..1 in the window).
+                # A side alone cannot separate a decisive crossing from a 39-contract one.
+                "cot_hedge_pos": _screener_cot_hedge_position(mk.get("cot_series") or []),
                 "structure": _screener_structure_signal(
                     contracts,
                     spread_series=mk.get("calendar_spread_series") or [],
                     as_of=latest_bar_date,
                 ),
                 "seasonal_event": _screener_seasonal_event(seasonal_history, curves=seasonal_curves),
-            })
+            }
+            row["score"] = screener_score(row)
+            out.append(row)
     return out

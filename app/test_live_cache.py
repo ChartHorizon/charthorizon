@@ -3,6 +3,8 @@
 # No network and no real sleeps (except the one threaded single-flight test): a
 # FakeClock + a recording fake fetch make every path deterministic.
 
+import pathlib
+import re
 import unittest
 
 import live_cache as lc
@@ -503,6 +505,72 @@ class LiveFetchManyTest(unittest.TestCase):
         out = self.start._live_fetch_many(["GCZ26.CMX", "ZCZ26.CBT"])
         self.assertEqual(self.per_symbol, ["ZCZ26.CBT"])  # the one the batch omitted
         self.assertEqual(set(out), {"GCZ26.CMX", "ZCZ26.CBT"})
+
+
+class LivePollCadenceTest(unittest.TestCase):
+    """The server TTL and the browser's on-screen poll interval are two halves of ONE
+    cadence, and they live in different languages — LIVE_TTL_SECONDS here,
+    LIVE_QUOTE_INTERVAL_MS in web/live.js. Nothing else in the codebase reads both, so
+    nothing else notices when they stop agreeing.
+
+    They must not merely differ: the TTL has to be SHORTER than the poll interval, with
+    room for timer jitter. When it is longer the two beat against each other — a 15 s
+    poll against a 20 s TTL alternates miss/hit/miss/hit, so a genuinely new price
+    reaches the chart only every 30 s and half the requests return a byte-identical
+    body. `_liveTickActive`'s `changed` guard then correctly declines to repaint, and
+    the live candle visibly freezes for a full poll cycle. Measured on a live gold
+    front-month on 2026-08-28: prices stepped in exact 20.4 s stairs under a 5 s poll —
+    the TTL, not the market."""
+
+    JITTER_BUDGET_SECONDS = 3.0    # observed browser ticks ran 15.0-15.3 s; leave headroom
+
+    def _client_interval_seconds(self):
+        js = pathlib.Path(__file__).resolve().parent / "web" / "live.js"
+        m = re.search(r"LIVE_QUOTE_INTERVAL_MS\s*=\s*(\d+)", js.read_text(encoding="utf-8"))
+        self.assertIsNotNone(
+            m, "LIVE_QUOTE_INTERVAL_MS vanished from web/live.js — this test is the only "
+               "thing tying the browser's poll rate to the server's TTL; re-point it.")
+        return int(m.group(1)) / 1000.0
+
+    def test_ttl_is_shorter_than_the_on_screen_poll_interval(self):
+        interval = self._client_interval_seconds()
+        self.assertLessEqual(
+            lc.LIVE_TTL_SECONDS, interval - self.JITTER_BUDGET_SECONDS,
+            "LIVE_TTL_SECONDS (%s) must stay at least %ss below the browser's %ss poll "
+            "or every other on-screen tick is served a stale, identical quote and the "
+            "live candle updates at half the advertised rate."
+            % (lc.LIVE_TTL_SECONDS, self.JITTER_BUDGET_SECONDS, interval))
+
+    def test_every_on_screen_poll_reaches_yahoo(self):
+        # The behavioural half: drive the REAL module TTL at the REAL client cadence and
+        # require a fetch per poll. An arithmetic check alone would pass a TTL that is
+        # shorter but still swallows a tick.
+        interval = self._client_interval_seconds()
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = lc.LiveQuoteCache(fetch, clock=clk,
+                              bucket=lc._TokenBucket(1000, 1000, clk),
+                              breaker=lc._CircuitBreaker(90, 3, clk))
+        polls = 6
+        c.get("CL=F")
+        for _ in range(polls - 1):
+            clk.advance(interval)
+            c.get("CL=F")
+        self.assertEqual(len(fetch.calls), polls,
+                         "%d of %d on-screen polls were served from cache instead of "
+                         "refetching" % (polls - len(fetch.calls), polls))
+
+    def test_a_tick_arriving_early_still_refetches(self):
+        # setTimeout is not a metronome and a re-armed tick can land marginally early;
+        # the jitter budget above is what keeps such a tick from being swallowed.
+        interval = self._client_interval_seconds()
+        clk = FakeClock(); fetch = RecordingFetch()
+        c = lc.LiveQuoteCache(fetch, clock=clk,
+                              bucket=lc._TokenBucket(1000, 1000, clk),
+                              breaker=lc._CircuitBreaker(90, 3, clk))
+        c.get("CL=F")
+        clk.advance(interval - self.JITTER_BUDGET_SECONDS)
+        c.get("CL=F")
+        self.assertEqual(len(fetch.calls), 2)
 
 
 if __name__ == "__main__":

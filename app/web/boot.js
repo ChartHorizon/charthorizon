@@ -16,38 +16,48 @@ var BOOT_REFRESH_POLL_MS = 1000;      // /api/refresh-status cadence while a ref
 var _bootProgressTick = 0;            // bumped by _bootPhase; the stall watchdog watches it
 var _bootWatchdogTimer = null;
 
-// Card-Mode: NUR der Content-Bot ruft `?card=<key>` auf. Konfiguriert den Future-Chart
-// (Front-Month · Daily · 12M · Spread + COT Hedging Program) für den PNG-Export und
-// zeichnet die 4/4-Marker — beides passiert ausschließlich hier, das normale
-// Dashboard bleibt unberührt.
+// Card-mode: ONLY the content bot calls `?card=<key>`. It configures the futures chart
+// (front month · daily · 12M or `range=6m` · spread + COT hedging program) for the PNG
+// export and draws the 3/3 markers — both happen exclusively here, the normal dashboard
+// is untouched.
 const _cardKey = (() => {
   try { return new URLSearchParams(location.search).get('card'); } catch (e) { return null; }
 })();
 if (_cardKey === 'fx') {
-  // FX-Heatmap-Karte (zweite Signalquelle): gebrandete Heatmap als DOM-Screenshot.
+  // FX heatmap card (second signal source): branded heatmap as a DOM screenshot.
   document.body.classList.add('card-mode', 'fx-card-mode');
   openForexCard();
 } else if (_cardKey && _cardKey.indexOf('fxpair-') === 0) {
-  // Natives FX-Paar-Chart (Preis-only + Marker): ?card=fxpair-<baseKey>-<quoteKey>.
+  // Native FX pair chart (price-only + marker): ?card=fxpair-<baseKey>-<quoteKey>.
   document.body.classList.add('card-mode');
-  const _p = _cardKey.split('-');   // ['fxpair', baseKey, quoteKey] (Keys haben nur '_')
+  const _p = _cardKey.split('-');   // ['fxpair', baseKey, quoteKey] (keys only ever use '_')
   openFxPairCard(_p[1], _p[2]);
 } else if (_cardKey && INDEX[_cardKey]) {
   document.body.classList.add('card-mode');
   const _q = new URLSearchParams(location.search);
-  // hedge=0 -> COT-Pane OHNE Hedging-Program-Overlay; band=0 -> KEIN 4/4-Band/Marker/
-  // Runway-Footer (z.B. COT-Extrem-Posts: nur Chart + rohes COT-Net + Risk-Disclaimer).
-  // Ohne Flags bleibt beides AN (4/4-Posts, unveraendert).
+  // hedge=0 -> COT pane WITHOUT the hedging-program overlay; band=0 -> NO 3/3 band /
+  // marker / runway footer (e.g. COT-extreme posts: chart + raw COT net + risk disclaimer
+  // only). Without the flags both stay ON (3/3 posts, unchanged).
   chartState.cotHedging = _q.get('hedge') !== '0';
+  // range=6m -> put the card on the 6-month window. The overlay is RANGE-relative
+  // (chart.js: trailingCotWindow(cot, chartState.range), RANGE_DAYS['6m'] === 182), and
+  // 182 days is exactly the window screener.py draws its cot_hedge verdict from. So the
+  // default 12M card draws a DIFFERENT midpoint than the one the verdict means — and
+  // labels itself "12M HEDGING PROGRAM". For a post about the 6-month program that is a
+  // visible contradiction, hence the flag. Only '6m'/'12m' are allowed: on any other
+  // range chart.js does not draw the overlay at all, so a card with hedge=1&range=5y
+  // would silently be a card without a program.
+  const _range = _q.get('range');
+  if (_range === '6m' || _range === '12m') chartState.range = _range;
   chartState.showSpread = true;
   if (_q.get('band') === '0') {
-    window.__fourFourLog = {};                 // Log gar nicht laden -> kein Band/Marker/Runway
+    window.__threeThreeLog = {};                 // skip the log entirely -> no band/marker/runway
     switchCommodity(_cardKey);
   } else {
-    // 4/4-Log laden (vom Bot erzeugt), DANN den Chart rendern, damit die Marker da sind.
-    fetch(`${DATA_DIR}/four_four_log.json?v=${DATA_VERSION}`, { cache: 'no-store' })
+    // Load the 3/3 log (written by the bot), THEN render the chart so the markers are there.
+    fetch(`${DATA_DIR}/three_three_log.json?v=${DATA_VERSION}`, { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : {}))
-      .then(log => { window.__fourFourLog = log; })
+      .then(log => { window.__threeThreeLog = log; })
       .catch(() => {})
       .finally(() => switchCommodity(_cardKey));
   }
@@ -102,7 +112,7 @@ window.addEventListener('resize', () => {
 });
 
 
-  /* Live clock in the top-right header — Zeitzone aus den Settings (resolveTimezone). */
+  /* Live clock in the top-right header — timezone comes from Settings (resolveTimezone). */
   initHeaderClock();
 
 // ── Cold-start boot splash ───────────────────────────────────────────────────
@@ -281,9 +291,9 @@ async function bootWarmup() {
   _revealBootSplash();
 }
 
-// Header-Uhr (#clock + .hdr-date). Re-initialisierbar: der Settings-Tab ruft sie nach
-// einer Zeitzonen-Aenderung erneut auf. Baut die Formatter aus resolveTimezone() neu
-// und ersetzt das laufende Intervall (idempotent).
+// Header clock (#clock + .hdr-date). Re-initialisable: the Settings tab calls it again
+// after a timezone change. Rebuilds the formatters from resolveTimezone() and replaces
+// the running interval (idempotent).
 function initHeaderClock() {
   var clock = document.getElementById('clock');
   if (!clock) return;

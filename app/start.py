@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════
-  CHARTHORIZON – LOKALER START
+  CHARTHORIZON – LOCAL START
 ═══════════════════════════════════════════════════════════════════════
-  Dieses Skript erledigt alles automatisch:
-    1. Prüft & installiert benötigte Pakete (yfinance, python-dateutil, pypdf, curl_cffi)
-    2. Nutzt vorhandene Dashboard-Dateien oder generiert sie neu
-    3. Startet einen lokalen Webserver
-    4. Öffnet das Dashboard im Browser
+  This script does everything automatically:
+    1. Checks & installs the required packages (yfinance, python-dateutil, pypdf, curl_cffi)
+    2. Uses the existing dashboard files or regenerates them
+    3. Starts a local web server
+    4. Opens the dashboard in the browser
 
-  Starten:
-    python3 start.py            (schnell starten; holt im Hintergrund die neuesten Daten)
-    python3 start.py --refresh  (immer die aktuellsten yfinance-Daten laden)
-    python3 start.py --refresh --no-serve  (nur Daten-Update, kein Webserver)
+  Start:
+    python3 start.py            (fast start; pulls the freshest data in the background)
+    python3 start.py --refresh  (always fetch the most recent yfinance data)
+    python3 start.py --refresh --no-serve  (data update only, no web server)
 
-  Beenden:  Strg + C  (Ctrl + C)
+  Quit:  Ctrl + C
 ═══════════════════════════════════════════════════════════════════════
 """
 
@@ -251,20 +251,20 @@ def version_payload():
 
 def check_python():
     if sys.version_info < (3, 7):
-        print("✗ Python 3.7 oder neuer wird benötigt.")
-        print(f"  Aktuelle Version: {sys.version}")
+        print("✗ Python 3.7 or newer is required.")
+        print(f"  Current version: {sys.version}")
         sys.exit(1)
 
 
 def ensure_packages():
-    """Installiert fehlende Pakete automatisch via pip."""
-    step("Prüfe benötigte Pakete…")
+    """Install missing packages automatically via pip."""
+    step("Checking required packages…")
     if FROZEN:
-        ok("Pakete im Bundle enthalten")
+        ok("Packages included in the bundle")
         return
     import importlib.util
 
-    # Importname kann vom Paketnamen abweichen
+    # The import name can differ from the package name
     import_names = {"python-dateutil": "dateutil", "yfinance": "yfinance", "pypdf": "pypdf", "curl_cffi": "curl_cffi"}
 
     missing = []
@@ -273,38 +273,38 @@ def ensure_packages():
         if importlib.util.find_spec(mod) is None:
             missing.append(pkg)
         else:
-            ok(f"{pkg} vorhanden")
+            ok(f"{pkg} present")
 
     if not missing:
         return
 
-    warn(f"Fehlend: {', '.join(missing)} – installiere jetzt…")
+    warn(f"Missing: {', '.join(missing)} – installing now…")
     for pkg in missing:
         try:
             subprocess.check_call(
                 [sys.executable, "-m", "pip", "install", "--user", pkg],
                 stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
             )
-            ok(f"{pkg} installiert")
+            ok(f"{pkg} installed")
         except subprocess.CalledProcessError:
-            # zweiter Versuch ohne --user (z.B. in venv)
+            # second attempt without --user (e.g. inside a venv)
             try:
                 subprocess.check_call(
                     [sys.executable, "-m", "pip", "install", pkg],
                     stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                 )
-                ok(f"{pkg} installiert")
+                ok(f"{pkg} installed")
             except subprocess.CalledProcessError:
-                print(f"\n✗ Konnte {pkg} nicht installieren.")
-                print(f"  Bitte manuell ausführen:  pip install {pkg}")
+                print(f"\n✗ Could not install {pkg}.")
+                print(f"  Please run manually:  pip install {pkg}")
                 sys.exit(1)
 
 
 def dashboard_exists():
-    """Prueft, ob die generierten Daten (config.js + Kategorie-JSONs) vorhanden sind.
+    """Check whether the generated data (config.js + category JSONs) is present.
 
-    Das statische Frontend (index.html + web/) ist immer im Repo; was fehlen kann,
-    sind die generierten Daten in ff_data/.
+    The static frontend (index.html + web/) is always in the repo; what can be
+    missing is the generated data in ff_data/.
     """
     if not os.path.exists(os.path.join("ff_data", "config.js")):
         return False
@@ -315,7 +315,7 @@ def dashboard_exists():
 
 
 def _eastern_now():
-    """Aktuelle New-York-Zeit; dateutil hält Python 3.7 kompatibel."""
+    """Current New York time; dateutil keeps this Python 3.7 compatible."""
     if ZoneInfo is not None:
         return datetime.now(ZoneInfo("America/New_York"))
     from dateutil import tz
@@ -362,27 +362,27 @@ def _run_generator_subprocess():
     safe to call from a background thread."""
     cmd = [sys.executable, "--run-generator"] if FROZEN else [sys.executable, GENERATOR]
     if not FROZEN and not os.path.exists(GENERATOR):
-        print(f"\n✗ {GENERATOR} nicht gefunden!")
+        print(f"\n✗ {GENERATOR} not found!")
         return 1
     try:
         return subprocess.call(cmd, cwd=DATA_ROOT)
     except Exception as e:
-        print(f"\n✗ Generator-Subprozess fehlgeschlagen: {e}")
+        print(f"\n✗ Generator subprocess failed: {e}")
         return 1
 
 
 def generate_dashboard():
-    """Erzeugt ff_data/ neu (blockierend). Bricht bei Fehler mit sys.exit ab —
-    fuer den Vordergrund-Pfad (--refresh, Erstlauf)."""
-    step("Generiere Dashboard (Daten werden geladen – das kann 1–2 Min dauern)…")
+    """Regenerate ff_data/ (blocking). Aborts with sys.exit on failure — for the
+    foreground path (--refresh, first run)."""
+    step("Generating dashboard (fetching data – this can take 1–2 min)…")
     rc = _run_generator_subprocess()
     if rc != 0:
-        print("\n✗ Fehler beim Generieren des Dashboards.")
+        print("\n✗ Failed to generate the dashboard.")
         sys.exit(1)
     if not os.path.exists(os.path.join(DATA_ROOT, "ff_data", "config.js")):
-        print("\n✗ ff_data/config.js wurde nicht erstellt.")
+        print("\n✗ ff_data/config.js was not created.")
         sys.exit(1)
-    ok("Dashboard erstellt")
+    ok("Dashboard created")
 
 
 _refresh_spawn_lock = threading.Lock()
@@ -430,7 +430,7 @@ def foreground_refresh():
     """Blocking refresh for the --refresh CLI path. Respects the shared lock so it
     never collides with a running server's background refresh or the 23:30 job."""
     if not acquire_refresh_lock("cli"):
-        warn("Ein anderer Refresh laeuft bereits — uebersprungen.")
+        warn("Another refresh is already running — skipped.")
         return
     try:
         clear_contract_history_cache()
@@ -442,7 +442,7 @@ def foreground_refresh():
 
 
 def free_port(port):
-    """Sucht einen freien Port ab dem gewünschten."""
+    """Find a free port at or above the requested one."""
     import socket
     for p in range(port, port + 20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -464,23 +464,23 @@ def _contract_history_cache_path(symbol, period):
 
 
 def clear_contract_history_cache():
-    """Verwirft die zwischengespeicherten Einzelkontrakt-Historien.
+    """Discard the cached single-contract histories.
 
-    Diese werden erst beim Klick auf eine Kontraktzeile lazy erzeugt und sonst
-    dauerhaft wiederverwendet. Bei --refresh müssen sie weg, sonst zeigen bereits
-    angeklickte Einzelkontrakte nach dem Aktualisieren weiterhin alte Kurse.
+    They are built lazily on the first click of a contract row and otherwise reused
+    forever. On --refresh they have to go, or contracts that were already clicked
+    keep showing stale prices after the update.
     """
     import shutil
     cache_dir = os.path.join("ff_data", "contract_history")
     with _contract_cache_lock:
         if os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
-            ok("Einzelkontrakt-Cache geleert (wird bei Bedarf neu geladen)")
+            ok("Single-contract cache cleared (reloaded on demand)")
 
 
 def _trim_leading_flat(rows):
-    """Entfernt führende Platzhalter-Bars (Volumen 0/None und O=H=L=C), wie yfinance
-    sie für noch nicht aktiv gehandelte, weit datierte Kontrakte liefert."""
+    """Drop leading placeholder bars (volume 0/None and O=H=L=C), the kind yfinance
+    returns for far-dated contracts that are not actively traded yet."""
     i, n = 0, len(rows)
     while i < n:
         r = rows[i]
@@ -493,9 +493,9 @@ def _trim_leading_flat(rows):
 
 
 def _drop_unsettled_tail(rows):
-    """Verwirft nachlaufende Bars jenseits des letzten settled EoD (nie ein Pre-Settle-Bar
-    ausliefern). Gespiegelt zur Ingest-Regel im Generator; hier datumsbasiert genügt für
-    den lazy Einzelkontrakt-Endpoint."""
+    """Drop trailing bars beyond the last settled EoD (never serve a pre-settle bar).
+    Mirrors the generator's ingest rule; a date-based check is enough for the lazy
+    single-contract endpoint."""
     cutoff = _latest_settled_eod_date()
     while rows:
         d = _parse_date(rows[-1].get("date"))
@@ -542,7 +542,7 @@ def _history_rows(symbol, period, priority=yahoo_gateway.PRIORITY_INTERACTIVE):
 
 def get_contract_history(symbol, period="5y",
                          priority=yahoo_gateway.PRIORITY_INTERACTIVE):
-    """Holt und cached die Historie eines einzelnen Futures-Kontrakts."""
+    """Fetch and cache the history of a single futures contract."""
     cache_path = _contract_history_cache_path(symbol, period)
     with _contract_cache_lock:
         if os.path.exists(cache_path):
@@ -550,14 +550,14 @@ def get_contract_history(symbol, period="5y",
                 with open(cache_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except (ValueError, OSError):
-                # Korrupte/abgeschnittene Cache-Datei (z.B. Absturz mitten im Schreiben):
-                # verwerfen und neu erzeugen, statt bei jedem Aufruf 500 zu liefern.
+                # Corrupt/truncated cache file (e.g. a crash mid-write): discard and
+                # rebuild it instead of answering 500 on every call.
                 try:
                     os.remove(cache_path)
                 except OSError:
                     pass
 
-    # Netzwerk-Fetch bewusst außerhalb des Locks (langsam) — nur die FS-Ops sind serialisiert.
+    # Network fetch deliberately outside the lock (slow) — only the FS ops are serialized.
     history = _history_rows(symbol, period, priority=priority)
     payload = {
         "symbol": symbol,
@@ -566,18 +566,18 @@ def get_contract_history(symbol, period="5y",
         "contract_type": "single_expiry_month",
         "history": history,
     }
-    # Ein LEERES Ergebnis nie cachen: das passiert v.a. während eines Refreshs (Cache gerade
-    # geleert + Yahoo durch den Refresh gedrosselt). Würde man die leere Antwort cachen, bliebe
-    # der Kontrakt bis zum nächsten Refresh leer ("No chart history"). So holt der nächste Aufruf
-    # frisch — sobald Yahoo wieder liefert, steht die Historie.
+    # NEVER cache an empty result: that happens mostly during a refresh (cache just
+    # cleared + Yahoo throttled by that refresh). Caching the empty answer would leave the
+    # contract blank until the next refresh ("No chart history"). This way the next call
+    # fetches fresh — as soon as Yahoo answers again, the history is there.
     if not history:
         return payload
     with _contract_cache_lock:
         cache_dir = os.path.dirname(cache_path)
         try:
             os.makedirs(cache_dir, exist_ok=True)
-            # Atomar schreiben (tempfile + os.replace), damit ein Absturz/voller Datenträger
-            # keine halbe JSON-Datei hinterlässt, die jeden späteren Read crasht.
+            # Write atomically (tempfile + os.replace) so a crash / full disk cannot
+            # leave half a JSON file behind that crashes every later read.
             fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".ch_", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -589,7 +589,7 @@ def get_contract_history(symbol, period="5y",
                 except OSError:
                     pass
         except OSError:
-            pass   # Cache best-effort: bei FS-Problemen liefern wir die Historie trotzdem aus.
+            pass   # Cache is best-effort: on FS trouble we still serve the history.
     return payload
 
 
@@ -855,7 +855,7 @@ def _serve_with_mac_app(httpd, url):
     try:
         _run_mac_app(url, httpd)
     except Exception as e:                       # PyObjC missing / Cocoa failed
-        warn(f"macOS-App-Loop nicht verfügbar ({e}) — einfacher Modus.")
+        warn(f"macOS app loop unavailable ({e}) — simple mode.")
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
         try:
             server_thread.join()
@@ -968,17 +968,17 @@ def _relocate_from_unsafe_location():
     dest = "/Applications/ChartHorizon.app"
     already = os.path.isdir(dest)
     if already:
-        info = ("ChartHorizon ist bereits im Programme-Ordner installiert und wird von "
-                "dort gestartet. Der Start aus dem temporären Ort kann abstürzen.")
-        primary = "Aus „Programme“ starten"
+        info = ("ChartHorizon is already installed in the Applications folder and will "
+                "be launched from there. Starting from the temporary location can crash.")
+        primary = "Open from Applications"
     else:
-        info = ("ChartHorizon läuft gerade aus einem temporären Ort (DMG bzw. Download) "
-                "und kann dort abstürzen. Die App wird in den Programme-Ordner kopiert "
-                "und von dort neu gestartet.")
-        primary = "Verschieben & starten"
+        info = ("ChartHorizon is currently running from a temporary location (DMG or "
+                "download) and can crash there. The app will be copied to the "
+                "Applications folder and relaunched from there.")
+        primary = "Move & launch"
     try:
-        choice = _mac_alert("ChartHorizon in den Programme-Ordner", info,
-                            [primary, "Abbrechen"])
+        choice = _mac_alert("Move ChartHorizon to Applications", info,
+                            [primary, "Cancel"])
     except Exception:
         return                       # no GUI available — bail instead of risking SIGBUS
     if choice != 0:
@@ -989,34 +989,34 @@ def _relocate_from_unsafe_location():
         subprocess.Popen(["open", dest])
     except Exception as e:
         try:
-            _mac_alert("Verschieben fehlgeschlagen",
-                       f"Bitte ziehe ChartHorizon manuell in den Programme-Ordner.\n\n{e}",
+            _mac_alert("Move failed",
+                       f"Please drag ChartHorizon into the Applications folder manually.\n\n{e}",
                        ["OK"])
         except Exception:
             pass
 
 
 def serve(open_browser=True):
-    """Startet den Webserver und öffnet den Browser (außer open_browser=False —
-    für den nächtlichen Content-Bot-Lauf, der nur die HTTP-API headless braucht)."""
+    """Start the web server and open the browser (unless open_browser=False — for the
+    nightly content-bot run, which only needs the HTTP API headless)."""
     global PORT
     PORT = free_port(PORT)
     url = f"http://127.0.0.1:{PORT}/{HTML_FILE}"
 
-    step("Starte lokalen Webserver…")
+    step("Starting local web server…")
     class LocalServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
 
     try:
         httpd = LocalServer(("127.0.0.1", PORT), DashboardHandler)
     except OSError as e:
-        print(f"\n✗ Port {PORT} belegt: {e}")
+        print(f"\n✗ Port {PORT} already in use: {e}")
         sys.exit(1)
 
-    ok(f"Server läuft auf {url}")
+    ok(f"Server running at {url}")
     print("\n" + "═" * 60)
-    print(f"  Dashboard geöffnet:  {url}")
-    print("  Zum Beenden:  Strg + C  (Ctrl + C)")
+    print(f"  Dashboard open:  {url}")
+    print("  To quit:  Ctrl + C")
     print("═" * 60 + "\n")
 
     # The clickable macOS .app must serve from a Cocoa loop so re-opening it (Dock
@@ -1027,14 +1027,14 @@ def serve(open_browser=True):
         _serve_with_mac_app(httpd, url)
         return
 
-    # Browser nach kurzer Verzögerung öffnen (nicht im headless/Bot-Modus).
+    # Open the browser after a short delay (not in headless/bot mode).
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n\n▶ Server wird beendet… Tschüss!")
+        print("\n\n▶ Shutting down the server… Bye!")
         httpd.shutdown()
 
 
@@ -1059,7 +1059,7 @@ def main():
     args = parser.parse_args()
 
     print("═" * 60)
-    print("  CHARTHORIZON – LOKALER START")
+    print("  CHARTHORIZON – LOCAL START")
     print("═" * 60)
     # Dev: cwd = script dir (ff_data lives beside the code, unchanged).
     # Frozen: cwd = writable data root, so the generator + server read/write ff_data
@@ -1085,17 +1085,17 @@ def main():
     ensure_packages()
     if (args.refresh or not dashboard_exists()) and not (FROZEN and not dashboard_exists() and not args.refresh):
         if args.refresh:
-            # Immer die aktuellsten yfinance-Daten holen (kein EoD-Skip-Gate mehr).
-            # Der Generator speichert weiterhin nur settled EoD — nie Intraday.
+            # Always pull the freshest yfinance data (no EoD skip-gate any more).
+            # The generator still stores settled EoD only — never intraday.
             foreground_refresh()
         else:
-            generate_dashboard()      # erster Lauf ohne Daten — unconditional
+            generate_dashboard()      # first run with no data — unconditional
     else:
-        step("Nutze vorhandene Dashboard-Dateien")
-        ok("Kein neuer Daten-Download nötig")
+        step("Using existing dashboard files")
+        ok("No new data download needed")
     if args.no_serve:
-        step("Datenmodus abgeschlossen")
-        ok("Webserver wurde nicht gestartet")
+        step("Data mode finished")
+        ok("Web server was not started")
         return
 
     # Warm start (data already present, no CLI --refresh): serve instantly and always
