@@ -17,6 +17,10 @@
 """
 
 import os
+import sys
+# `time` is datetime.time in this module (see the datetime import below), so the
+# clock has to come in under a name of its own.
+import time as wallclock
 import csv
 import contextlib
 import io
@@ -96,6 +100,106 @@ yahoo_gateway.configure(
 # Background-refresh progress (read by start.py's /api/refresh-status). cwd is the
 # data root when the generator runs, so this resolves to <data_root>/ff_data/.
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
+
+
+_REPLACE_RETRIES = 10          # ~2.5 s total; a served file is let go long before that
+_REPLACE_RETRY_SLEEP = 0.25
+_WIN_SHARING_ERRORS = (5, 32)  # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION
+
+
+def _replace_with_retry(tmp, path):
+    """os.replace(tmp, path), retried while Windows says the target is in use.
+
+    POSIX renames over an open file without a word. Windows does not: MoveFileEx has to
+    open the destination for DELETE, and CPython's open() shares read and write but never
+    delete — so replacing a file another process is reading fails outright with
+    ERROR_SHARING_VIOLATION. The other process here is our own web server: http.server
+    holds a file open for the whole response, and boot.js pulls all ~57 MB of category
+    JSON through it *while a refresh runs* (start.py kicks one on every warm start).
+
+    Uncaught, that surfaced as a refresh dying partway with a PermissionError traceback,
+    having written some category files and not others and no new config.js at all — the
+    half-updated state the atomic write exists to prevent, reached by a different road.
+    The window is one response long, so a short retry closes it.
+
+    Only the two sharing errors are retried; anything else (a full disk, a read-only
+    folder) is raised on the first attempt, as before.
+    """
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last = attempt == _REPLACE_RETRIES - 1
+            if last or not sys.platform.startswith("win"):
+                raise
+            if getattr(exc, "winerror", None) not in _WIN_SHARING_ERRORS:
+                raise
+            wallclock.sleep(_REPLACE_RETRY_SLEEP)
+
+
+def _sweep_stale_temp_files(directory, max_age=3600):
+    """Delete orphaned .tmp_*.part files left behind by a hard-killed refresh.
+
+    _write_atomic unlinks its own temp on any exception, but a TerminateProcess (the
+    closed console window on Windows, a reboot, a power cut) runs no handler — and the
+    category payloads are 6-14 MB each, so the leftovers are not small. Nothing ever
+    collected them.
+
+    The age guard means a temp belonging to a live writer is never touched: the refresh
+    lock already makes a second writer unlikely, this makes it harmless.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return                # no data dir yet: nothing to sweep
+    now = wallclock.time()
+    for name in names:
+        if not (name.startswith(".tmp_") and name.endswith(".part")):
+            continue
+        victim = os.path.join(directory, name)
+        try:
+            if now - os.path.getmtime(victim) > max_age:
+                os.unlink(victim)
+        except OSError:
+            pass              # gone already, or held open — either way not ours to force
+
+
+def _write_atomic(path, write_body):
+    """Write a file through a temp file + os.replace, so an interrupted refresh can
+    never leave half of one behind.
+
+    `open(path, "w")` truncates the moment it is called, so every payload the generator
+    writes — the category JSONs are 6-14 MB each and take seconds — spent that whole
+    window as a partial file on disk. A kill in it (a closed console window, a reboot,
+    an out-of-memory browser taking the machine with it) left a truncated file that the
+    frontend could not parse; for config.js that meant a dashboard that could not boot
+    at all. The fsync is the other half: on NTFS, os.replace alone can still surface a
+    zero-length file after a power loss.
+
+    `write_body` receives the open text handle. Raises whatever it raises — but leaves
+    the previous file, and no temp, behind."""
+    directory = os.path.dirname(path) or "."
+    # mkstemp creates 0600. These payloads were 0644 when they were written in place,
+    # and the chartbot reads them, so carry the mode over rather than silently narrowing it.
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".part")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            write_body(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        _replace_with_retry(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _write_refresh_progress(**fields):
@@ -245,6 +349,7 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     The HTML loads category data lazily via fetch().
     """
     os.makedirs(data_dir, exist_ok=True)
+    _sweep_stale_temp_files(data_dir)
     existing_payloads = _load_existing_market_payloads(data_dir)
 
     # Board-wide settled EoD: the latest session the verifiable (full-volume) markets
@@ -439,19 +544,16 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     # 2) Write one JSON file per category
     for cat, payload in by_cat.items():
         fn = os.path.join(data_dir, f"data_{_slug(cat)}.json")
-        with open(fn, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+        _write_atomic(fn, lambda f, p=payload: json.dump(p, f, ensure_ascii=False))
         print(f"   ✓ {fn}  ({len(payload)} markets)")
 
     quality_path = os.path.join(data_dir, "data_quality.json")
-    with open(quality_path, "w", encoding="utf-8") as f:
-        json.dump(quality_index, f, ensure_ascii=False)
+    _write_atomic(quality_path, lambda f: json.dump(quality_index, f, ensure_ascii=False))
     print(f"   ✓ {quality_path}  (data health report)")
 
     screener_path = os.path.join(data_dir, "screener.json")
     screener_rows = build_screener_summary(by_cat)
-    with open(screener_path, "w", encoding="utf-8") as f:
-        json.dump(screener_rows, f, ensure_ascii=False)
+    _write_atomic(screener_path, lambda f: json.dump(screener_rows, f, ensure_ascii=False))
     print(f"   ✓ {screener_path}  ({len(screener_rows)} markets · screener signals)")
 
     # 2a) Mirror everything into the durable SQLite EoD archive. The dashboard
@@ -559,8 +661,8 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     }
     if fx_rate_table:
         config["fxRates"] = fx_rate_table
-    with open(config_path, "w", encoding="utf-8") as f:
-        f.write("window.__CONFIG__ = " + json.dumps(config, ensure_ascii=False) + ";\n")
+    _write_atomic(config_path, lambda f: f.write(
+        "window.__CONFIG__ = " + json.dumps(config, ensure_ascii=False) + ";\n"))
     print(f"\n✓ Frontend config written: {config_path}")
     print(f"   (Static frontend: app/index.html + app/web/; data in ./{data_dir}/)")
     _write_refresh_progress(state="done", done=len(COMMODITIES), current=None,

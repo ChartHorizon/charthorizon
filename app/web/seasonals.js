@@ -1,6 +1,7 @@
 async function selectSeasonalsMarket(key) {
   if (!INDEX[key]) return;
   seasonalState.key = key;
+  setActiveMarket(key);            // the selection is shared with the Futures and Charts tabs
   updateSeasonalsSidebarActive();
   renderWatchlist();
   await renderSeasonalsPage(key);

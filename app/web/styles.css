@@ -74,6 +74,17 @@ body, header, aside, .chart-card, .table-card, .spec-card, .screener-body,
 .cat-btn, .commodity-item, .watchlist-item, input, select { transition:background-color .3s ease, border-color .3s ease, color .3s ease; }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:var(--bg); color:var(--text); font-family:var(--font-body); font-size:14px; min-height:100vh; }
+/* Scrollbars. On macOS these are overlay bars — invisible, zero-width, no layout cost — so
+   nothing here shows locally. On Windows they are classic bars: ~17px of REAL layout carved
+   out of the sidebar, the Charts pane and the table scroller, painted in the OS light grey
+   straight through the dark theme. `thin` gives that back down to ~10px and the colours make
+   them belong to the page. The webkit block is the fallback for Edge/Chrome before 121. */
+* { scrollbar-width:thin; scrollbar-color:var(--border2) transparent; }
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border2); border-radius:5px; }
+::-webkit-scrollbar-thumb:hover { background:var(--muted); }
+::-webkit-scrollbar-corner { background:transparent; }
 /* Visible keyboard focus for every interactive element (a11y). :focus-visible keeps
    mouse clicks clean while showing a clear ring for keyboard/AT users. */
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
@@ -90,6 +101,7 @@ header {
   border-bottom:1px solid var(--border);
   padding:0 2rem; height:58px; display:flex; align-items:center; gap:2rem;
   position:sticky; top:0; z-index:100; box-shadow:var(--shadow-sm);
+  min-width:0;
 }
 .logo { display:flex; align-items:center; gap:0; flex-shrink:0; text-decoration:none; cursor:pointer; }
 .logo-icon { width:32px; height:32px; display:block; flex:none; margin-right:8px; }
@@ -98,13 +110,22 @@ header {
 .header-time { display:flex; flex-direction:column; align-items:flex-end; line-height:1.25; }
 .header-time span { font-size:0.7rem; color:var(--muted); }
 .header-time .hdr-clock { font-variant-numeric:tabular-nums; }
+/* The nav is the header's ONE flexible member: it may shrink and, past that, scroll its
+   tabs sideways. That is what guarantees the header can never be wider than the window —
+   without it the three children are all rigid and the whole page gets a horizontal
+   scrollbar (measured: below 1355px, and again below 1160px once the compact rules fire).
+   A ninth tab therefore costs scroll inside the nav, never a broken page. */
 .top-nav {
   display:flex; align-items:center; gap:2px; height:36px;
   background:var(--surface2); border:1px solid var(--border);
   border-radius:var(--r-md); padding:3px;
+  flex:0 1 auto; min-width:0;
+  overflow-x:auto; overscroll-behavior-x:contain;
+  scrollbar-width:none; -ms-overflow-style:none;     /* the bar itself stays invisible */
 }
+.top-nav::-webkit-scrollbar { display:none; }
 .top-tab {
-  height:100%; display:inline-flex; align-items:center; justify-content:center;
+  height:100%; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center;
   padding:0 0.95rem; border:none; border-radius:7px;
   background:transparent; color:var(--neutral); font-family:var(--font-body);
   font-size:0.78rem; font-weight:500; cursor:pointer; transition:all 0.18s ease;
@@ -644,6 +665,12 @@ main { padding:1.5rem 1.8rem; overflow-y:auto; min-width:0; }
 
 /* Forward curve table */
 .table-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:var(--shadow-sm); margin-bottom:1.2rem; }
+/* The 7 columns are all `white-space:nowrap`, so the table has a hard intrinsic width
+   (~976px). The card clips at its rounded corners, so without this scroller the surplus
+   was simply GONE — no scrollbar, no way to reach it: at a 1280px window 214px were cut
+   off, at 1000px 494px (Volume, Open Interest and Expiration entirely unreachable).
+   Same pattern as .fx-rate-table-wrap. */
+.table-scroll { overflow-x:auto; }
 .table-head { padding:1.1rem 1.4rem; border-bottom:1px solid var(--border); background:var(--surface2); }
 .table-title { font-size:0.85rem; font-weight:600; color:var(--text); }
 .table-sub { font-size:0.65rem; color:var(--muted); margin-top:2px; }
@@ -700,7 +727,12 @@ tbody tr:hover { background:var(--surface2); }
 .bigchart-page { height:calc(100vh - 58px); padding:0; }
 .bigchart-layout { display:grid; grid-template-columns:210px minmax(0,1fr); height:calc(100vh - 58px); }
 #bigchartSidebar { border-right:1px solid var(--border); }
-.bigchart-main { padding:1.2rem 1.6rem 1.2rem; min-width:0; overflow:hidden; }
+/* Scrolls vertically rather than clipping. The price pane is sized to fit the viewport
+   (renderBigChart), but with OI+COT open the panes reserve 196px on their own, so a short
+   window cannot fit the stack at any readable price height — and `overflow:hidden` answered
+   that by cutting the x-axis and the legend off with no way to reach them. overflow-x stays
+   hidden: the chart is drawn to the measured width and never needs sideways scroll. */
+.bigchart-main { padding:1.2rem 1.6rem 1.2rem; min-width:0; overflow-y:auto; overflow-x:hidden; }
 /* Charts tab is a single, fixed-to-viewport screen: no page scroll, no footer. */
 body.bigchart-tab { overflow:hidden; }
 body.bigchart-tab .page-disclaimer { display:none; }
@@ -746,15 +778,36 @@ body.bigchart-tab .page-disclaimer { display:none; }
   .spec-item:nth-child(n+3) { border-top:1px solid var(--border); }
 }
 /* Medium widths: the header runs out of room (nav + right cluster) well before the phone
-   breakpoint. Compact the refresh widget to icon + bar and tighten spacing so it never
-   crowds or clips the clock/date. (Full widget needs ~1242px; icon-only ~1138px.) */
-@media (max-width:1240px) {
+   breakpoint, so it sheds ornament in two measured steps before the nav starts scrolling.
+   The thresholds are the MEASURED minimum widths of each state, not estimates — re-measure
+   with `document.querySelector('header').scrollWidth` if the tab row or the right cluster
+   ever changes, because a stale number here is invisible on a wide Mac and shows up as a
+   horizontal scrollbar on a scaled Windows display (125%/150% put a 1080p screen at
+   1536/1280 CSS px — right inside both dead zones this used to have).
+   Step 1 — full layout needs 1355px: compact the refresh widget to icon + bar, tighten
+   spacing. Leaves a minimum of 1160px. */
+@media (max-width:1380px) {
   header { gap:1.1rem; }
   .header-right { gap:0.7rem; }
   .header-refresh { width:auto; }
   .header-refresh .wlr-label, .header-refresh .wlr-sub { display:none; }
   .header-refresh .wlr-track { width:46px; margin-top:0.3rem; }
   .top-tab { padding:0 0.78rem; }
+}
+/* Step 2 — the compact layout needs 1160px: drop the two labels whose icons already say
+   the same thing (the logo mark stays a link, the heart stays a heart). Leaves ~970px,
+   below which the nav scrolls and the 900px rules take over anyway. */
+/* The forward-curve table's own squeeze: trimming the generous 1.4rem cell gutters buys
+   back ~140px of intrinsic width, so the table keeps fitting (no sideways scroll) down to
+   roughly where the sidebar drops out at 900px. */
+@media (max-width:1380px) {
+  thead th, tbody td { padding-left:0.85rem; padding-right:0.85rem; }
+}
+@media (max-width:1180px) {
+  .logo-mark { display:none; }
+  .logo-icon { margin-right:0; }
+  .support-link { padding:0; width:30px; justify-content:center; }
+  .support-link .support-label { display:none; }
 }
 @media (max-width:560px) {
   header { padding:0 1rem; gap:0.8rem; }
@@ -941,17 +994,25 @@ html.booting #bootSplash {
 .bigchart-drawbar {
   flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:4px;
   padding:6px 4px; border-right:1px solid var(--border); background:var(--surface);
+  /* Scrolls within the height renderBigChart caps it to (the chart's own), instead of being
+     the tallest thing in the row and dictating the pane's height on a short window. The strip
+     is only 39px wide, so its own scrollbar stays hidden — the overflow is drag-scrollable and
+     the cap is only ever a few buttons' worth. */
+  overflow-y:auto; scrollbar-width:none; -ms-overflow-style:none;
 }
+.bigchart-drawbar::-webkit-scrollbar { display:none; }
 #bigchartBody { flex:1 1 auto; min-width:0; }
 .draw-tool-btn {
-  width:30px; height:30px; display:flex; align-items:center; justify-content:center;
+  /* flex:none — the strip is a capped-height flex column now, and without this the buttons
+     silently squash to fit instead of letting it scroll. */
+  width:30px; height:30px; flex:none; display:flex; align-items:center; justify-content:center;
   border:1px solid transparent; border-radius:6px; background:transparent; color:var(--muted);
   cursor:pointer; padding:0;
 }
 .draw-tool-btn:hover { color:var(--accent); background:var(--accent-light); }
 .draw-tool-btn.active { color:var(--accent); border-color:var(--accent-ring); background:var(--accent-light); }
 .draw-tool-btn.draw-action:hover { color:var(--down); }
-.draw-tool-sep { width:18px; height:1px; background:var(--border); margin:4px 0; }
+.draw-tool-sep { width:18px; height:1px; flex:none; background:var(--border); margin:4px 0; }
 /* corner triangle marking a button that opens a flyout */
 .draw-tool-btn.has-flyout { position:relative; }
 .draw-tool-btn.has-flyout::after { content:''; position:absolute; right:3px; bottom:3px; width:0; height:0; border-bottom:5px solid currentColor; border-left:5px solid transparent; opacity:0.55; }

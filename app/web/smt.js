@@ -378,24 +378,40 @@ function renderSmtChart(bars, opts) {
   const padP = pRng * 0.05;
   const pLo = pMin - padP, pHi = pMax + padP, pSpan = (pHi - pLo) || 1;
   const yAt = p => padT + (1 - (p - pLo) / pSpan) * priceH;
-  // Ordinal placement: candle bodies fill ~70% of one slot (Futures-tab parity), max 12px.
-  const candleW = Math.max(1, Math.min(12, ax.slot * 0.7));
+  // Ordinal placement: candle bodies fill one slot per the chart layout's width
+  // setting (Futures-tab parity), max 12px.
+  const candleW = Math.max(1, Math.min(12, ax.slot * candleWidthFactor()));
 
-  let candles = '';
+  // Bodies go through candlePaint() (core.js) like the Futures tab: a preset may
+  // separate up from down by the hollow body alone rather than by colour
+  // ("Black on White" paints both black), so reading CHART_THEME.bull/bear here
+  // and filling unconditionally rendered every candle as one solid mass.
+  const plotted = [];
   for (const b of bars) {
     const t = new Date(b.date).getTime();
     if (isNaN(t)) continue;
     const i = ax.idx.get(t);
     if (i === undefined) continue;
-    const x = smtXAtFrac(ax, i);
-    const o = Number(b.open), c = Number(b.close), h = Number(b.high), l = Number(b.low);
-    const up = c >= o;
-    const col = up ? CHART_THEME.bull : CHART_THEME.bear;
-    const wickCol = up ? CHART_THEME.bullWick : CHART_THEME.bearWick;
-    const yH = yAt(h).toFixed(1), yL = yAt(l).toFixed(1), yO = yAt(o), yC = yAt(c);
-    const bodyTop = Math.min(yO, yC), bodyH = Math.max(1, Math.abs(yC - yO));
-    candles += `<line x1="${x.toFixed(1)}" y1="${yH}" x2="${x.toFixed(1)}" y2="${yL}" stroke="${wickCol}" stroke-width="1"/>`;
-    candles += `<rect x="${(x - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
+    plotted.push({ x: smtXAtFrac(ax, i), o: Number(b.open), c: Number(b.close), h: Number(b.high), l: Number(b.low) });
+  }
+  // 'line' replaces the bodies with a close-only polyline — drawn outside the
+  // crispEdges group below (see candlesCrisp), which would alias its diagonals.
+  const candleLine = CHART_STYLE.candle === 'line'
+    ? candleLinePath(plotted.map(d => ({ x: d.x, y: yAt(d.c) }))) : '';
+  let candles = '';
+  if (!candleLine) {
+    for (const d of plotted) {
+      const up = d.c >= d.o;
+      const { fill, stroke, strokeW, wick, wickW } = candlePaint(up);
+      const yH = yAt(d.h), yL = yAt(d.l);
+      const bodyTop = Math.min(yAt(d.o), yAt(d.c)), bodyBot = Math.max(yAt(d.o), yAt(d.c));
+      const bodyH = Math.max(1, bodyBot - bodyTop);
+      // Two guarded wick segments, never one high→low line: a hollow body is
+      // transparent and a full-length wick would run straight through it.
+      if (yH < bodyTop) candles += `<line x1="${d.x.toFixed(1)}" y1="${yH.toFixed(1)}" x2="${d.x.toFixed(1)}" y2="${bodyTop.toFixed(1)}" stroke="${wick}" stroke-width="${wickW}"/>`;
+      if (bodyBot < yL) candles += `<line x1="${d.x.toFixed(1)}" y1="${bodyBot.toFixed(1)}" x2="${d.x.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${wick}" stroke-width="${wickW}"/>`;
+      candles += `<rect x="${(d.x - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}"/>`;
+    }
   }
 
   // Live tick marker (display-only): pulsing hollow dot on the provisional last point.
@@ -490,7 +506,7 @@ function renderSmtChart(bars, opts) {
   return `<svg class="smt-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet" data-key="${opts.key || ''}" data-plo="${pLo}" data-phi="${pHi}" data-padt="${padT}" data-ploth="${priceH}">`
     + `<rect x="0" y="0" width="${W}" height="${H}" fill="${CHART_THEME.bg}" rx="7"/>`
     + grid + qLines
-    + `<g shape-rendering="crispEdges">${candles}</g>` + priceLine + liveDot
+    + `<g shape-rendering="crispEdges">${candles}</g>` + candleLine + priceLine + liveDot
     + qLabels + dlabels + trend
     + `<line class="smt-cross-v" x1="0" y1="${padT}" x2="0" y2="${(padT + priceH).toFixed(1)}" stroke="#334155" stroke-width="1" stroke-dasharray="2,4" opacity="0" pointer-events="none"/>`
     + `<line class="smt-cross-h" x1="${padL}" y1="0" x2="${(W - padR).toFixed(1)}" y2="0" stroke="#64748b" stroke-width="1" stroke-dasharray="2,4" opacity="0" pointer-events="none"/>`

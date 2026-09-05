@@ -3,7 +3,8 @@
 // time only (chart.js injectLivePoint / smt.js smtInjectLivePoint). They are NEVER
 // written to catCache, contract.chart_history, the category JSON, SQLite, or any
 // persisted store — reload discards them and the board refresh's settled bar replaces
-// them. Tab-aware: drives the Futures (overview) chart and the Macro Shift (smt) charts.
+// them. Tab-aware: drives the Futures (overview) chart, the Macro Shift (smt) charts, the
+// Weekly-Outlook 3/3 charts and the maximized Charts tab (bigchart).
 // Plain shared-scope script (not a module). Backend: GET /api/live-quote?symbol=.
 
 const LIVE_QUOTE_INTERVAL_MS = 15000;     // the on-screen chart(s)
@@ -34,7 +35,7 @@ let _liveConfirmed = new Set();
 // Which top tab (if any) the live layer drives right now.
 function _liveLayerPage() {
   const page = (typeof activePage === 'function') ? activePage() : 'overview';
-  if (page === 'overview' || page === 'smt') return page;
+  if (page === 'overview' || page === 'smt' || page === 'bigchart') return page;
   // Screener: live only while the Weekly Outlook (with its 3/3 charts) is on screen.
   if (page === 'screener' && typeof screenerView !== 'undefined' && screenerView === 'weekly') return 'screener';
   return null;
@@ -152,6 +153,20 @@ function liveActiveTargets() {
       page,
       symbols,
       repaint: () => { if (typeof renderSmtCharts === 'function') renderSmtCharts(); }
+    };
+  }
+  // Charts tab: one symbol — whatever getActiveChartSource resolves under bigChartState
+  // (continuous or the front month). loadChart already runs injectLivePoint on it, so the
+  // overlay needs nothing here beyond the poll target and a repaint.
+  if (page === 'bigchart' && typeof bigChartActiveSymbol === 'function') {
+    const sym = bigChartActiveSymbol();
+    return {
+      page,
+      symbols: sym ? [sym] : [],
+      repaint: () => {
+        const c = (typeof currentBigChartCfg === 'function') ? currentBigChartCfg() : null;
+        if (c && typeof renderBigChart === 'function') renderBigChart(c);
+      }
     };
   }
   if (page === 'screener') {

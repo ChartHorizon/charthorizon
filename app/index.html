@@ -24,7 +24,9 @@
 </head>
 <body>
 <!-- Cold-start splash: kept up by html.booting (set in <head> before first paint, normal
-     dashboard only) until boot.js confirms every Weekly-Outlook 3/3 result has a live price. -->
+     dashboard only) until boot.js has the market about to be on screen ready — its category
+     file, its front month's history and live price. The rest of the board loads behind the
+     open dashboard (_bootLoadRest). -->
 <div id="bootSplash" role="status" aria-live="polite">
   <div class="boot-splash-inner">
     <div class="boot-splash-title">ChartHorizon</div>
@@ -127,6 +129,7 @@ setTimeout(function(){
         <div class="table-title" id="tableTitle">Forward Curve</div>
         <div class="table-sub" id="tableSub">Individual futures by delivery and expiration month · Click a row to show that contract in the main chart</div>
       </div>
+      <div class="table-scroll">
       <table>
         <thead>
           <tr>
@@ -141,6 +144,7 @@ setTimeout(function(){
         </thead>
         <tbody id="curveBody"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="spec-card" id="specCard"></div>
@@ -452,21 +456,21 @@ setTimeout(function(){
 </footer>
 
 <script src="ff_data/config.js"></script>
-<script src="web/core.js?v=18"></script>
+<script src="web/core.js?v=22"></script>
 <script src="web/indicators.js?v=1"></script>
-<script src="web/chart.js?v=29"></script>
-<script src="web/futures.js?v=4"></script>
-<script src="web/seasonals.js?v=3"></script>
-<script src="web/screener.js?v=16"></script>
+<script src="web/chart.js?v=30"></script>
+<script src="web/futures.js?v=6"></script>
+<script src="web/seasonals.js?v=4"></script>
+<script src="web/screener.js?v=17"></script>
 <script src="web/forex.js?v=6"></script>
 <script src="web/smt.js?v=4"></script>
 <script src="web/tools.js?v=3"></script>
 <script src="web/refresh.js?v=2"></script>
-<script src="web/live.js?v=7"></script>
-<script src="web/bigchart.js?v=14"></script>
+<script src="web/live.js?v=8"></script>
+<script src="web/bigchart.js?v=16"></script>
 <script src="web/draw.js?v=26"></script>
 <script src="web/settings.js?v=15"></script>
-<script src="web/boot.js?v=11"></script>
+<script src="web/boot.js?v=12"></script>
 
 </body>
 </html>

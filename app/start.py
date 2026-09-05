@@ -153,9 +153,71 @@ def _write_progress(**fields):
         pass
 
 
+# Windows process-liveness constants (winnt.h / winerror.h).
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000   # "does this pid exist" and nothing more
+_WIN_ERROR_ACCESS_DENIED = 5                      # it exists, it is just not ours to open
+_WIN_ERROR_INVALID_PARAMETER = 87                 # no process owns that pid
+
+
+def _windows_kernel32():
+    """kernel32 behind a three-call surface (OpenProcess / CloseHandle / last_error),
+    so the probe above can be exercised on a machine that is not Windows.
+
+    The signatures are declared rather than left to ctypes' defaults: a HANDLE is
+    pointer-sized and ctypes would otherwise marshal the return as a C int, truncating
+    it on 64-bit — which would leak the handle on every probe."""
+    import ctypes
+    from ctypes import wintypes
+
+    dll = ctypes.WinDLL("kernel32", use_last_error=True)
+    dll.OpenProcess.restype = wintypes.HANDLE
+    dll.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    dll.CloseHandle.restype = wintypes.BOOL
+    dll.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    class _Kernel32:
+        def OpenProcess(self, access, inherit, pid):
+            return dll.OpenProcess(access, inherit, pid)
+
+        def CloseHandle(self, handle):
+            return dll.CloseHandle(handle)
+
+        def last_error(self):
+            return ctypes.get_last_error()
+
+    return _Kernel32()
+
+
+def _pid_alive_windows(pid, kernel32=None):
+    """Windows liveness — deliberately NOT via os.kill.
+
+    os.kill is not a probe on Windows. Signal 0 is CTRL_C_EVENT, so CPython routes it
+    into GenerateConsoleCtrlEvent, which *signals* a console process group — and this
+    process shares its console with the generator subprocess it spawns. Every other
+    signal value goes to TerminateProcess instead. Neither asks a question; both fail
+    with a plain OSError for a foreign pid, which the old code read as "alive", so on
+    Windows a stale refresh.lock could never expire before LOCK_MAX_AGE and the app
+    could not start the refresh that would have repaired it.
+
+    OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION only asks. (A pid whose process
+    has exited but whose handle someone still holds reads as alive here; LOCK_MAX_AGE
+    remains the backstop for that.)"""
+    k32 = kernel32 or _windows_kernel32()
+    handle = k32.OpenProcess(_WIN_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return k32.last_error() == _WIN_ERROR_ACCESS_DENIED
+    k32.CloseHandle(handle)
+    return True
+
+
 def _pid_alive(pid):
     if not pid or pid <= 0:
         return False
+    if sys.platform.startswith("win"):
+        try:
+            return _pid_alive_windows(pid)
+        except Exception:
+            return True        # probe unavailable — age fallback covers stale
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -163,7 +225,7 @@ def _pid_alive(pid):
     except PermissionError:
         return True            # exists, owned by someone else
     except OSError:
-        return True            # Windows: os.kill(pid,0) unreliable — age fallback covers stale
+        return True
     return True
 
 
@@ -300,13 +362,31 @@ def ensure_packages():
                 sys.exit(1)
 
 
+def _config_js_is_complete(path):
+    """Whether ff_data/config.js is a WHOLE file, not just an existing one.
+
+    The generator writes it as `window.__CONFIG__ = {…};\\n` in a single statement, so a
+    complete file starts with the assignment and ends with the semicolon. A refresh
+    killed mid-write used to leave an empty or half file here, and merely existing was
+    enough to count as "data present" — the app then served a page whose very first
+    line (core.js: window.__CONFIG__.index) threw before any other module was defined,
+    with no way back except regenerating by hand. Writes are atomic now, so this only
+    has to catch the files that earlier versions already left on disk. It is ~5 KB."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError:
+        return False
+    return text.startswith("window.__CONFIG__") and text.endswith(";")
+
+
 def dashboard_exists():
     """Check whether the generated data (config.js + category JSONs) is present.
 
     The static frontend (index.html + web/) is always in the repo; what can be
     missing is the generated data in ff_data/.
     """
-    if not os.path.exists(os.path.join("ff_data", "config.js")):
+    if not _config_js_is_complete(os.path.join("ff_data", "config.js")):
         return False
     data_dir = "ff_data"
     if not os.path.isdir(data_dir):
@@ -720,6 +800,18 @@ def live_cooldown_retry_after():
     return _live_quote_cache.retry_after() if _live_quote_cache.cooldown_active() else 0
 
 
+def _is_client_disconnect(exc):
+    """True for the errors a browser that walked away raises on OUR side of the socket.
+
+    Every one of them means the same thing — the peer is gone — and none of them is a
+    fault of this server: a reload or a closed tab resets an in-flight response, and the
+    category JSONs are 6-14 MB, so there is a wide window to be reset inside. There is
+    nothing to log and nothing to fix, but socketserver's default handle_error prints a
+    full traceback, and this console is what a non-technical user is looking at.
+    """
+    return isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError))
+
+
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         return
@@ -789,11 +881,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return
             if period not in {"6mo", "1y", "2y", "5y", "max"}:
                 period = "5y"
+            # Build inside the try, send outside it. Failing to BUILD the payload is a
+            # server error and earns a 500; failing to WRITE it means the client walked
+            # away mid-body (a reload, a closed tab, a superseded fetch) — and answering
+            # that with a second write onto the dead socket raised BrokenPipeError out of
+            # do_GET, so the user's console got two full tracebacks for a non-event.
             try:
-                self._send_json(200, get_contract_history(
-                    symbol, period, priority=self._priority(qs)))
+                payload = get_contract_history(
+                    symbol, period, priority=self._priority(qs))
             except Exception as e:
                 self._send_json(500, {"error": str(e), "symbol": symbol})
+                return
+            self._send_json(200, payload)
             return
 
         if parsed.path == "/api/live-quote":
@@ -996,6 +1095,29 @@ def _relocate_from_unsafe_location():
             pass
 
 
+class LocalServer(socketserver.ThreadingTCPServer):
+    # SO_REUSEADDR means opposite things on the two platforms. On POSIX it lets us
+    # rebind a port still in TIME_WAIT from the previous run, which is why it is on.
+    # On Windows it also permits binding a port another process is ACTIVELY LISTENING
+    # on — the second binder simply takes over new connections. Two double-clicks in
+    # the same second both find 8000 free (free_port probes with connect_ex), and
+    # instead of the second one exiting with "port already in use" as it does on a
+    # Mac, both bind and the browser reaches whichever won. Windows frees a listening
+    # port as soon as the process goes, so it never needed the flag to begin with.
+    allow_reuse_address = not sys.platform.startswith("win")
+
+    def handle_error(self, request, client_address):
+        """Stay silent when the peer merely went away; report everything else.
+
+        This is the last stop for anything raised out of a handler, static files
+        included — copyfile() streaming a 14 MB category JSON is reset just as readily
+        as an /api/ response, and the default here would print a traceback for it.
+        """
+        if _is_client_disconnect(sys.exc_info()[1]):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(open_browser=True):
     """Start the web server and open the browser (unless open_browser=False — for the
     nightly content-bot run, which only needs the HTTP API headless)."""
@@ -1004,9 +1126,6 @@ def serve(open_browser=True):
     url = f"http://127.0.0.1:{PORT}/{HTML_FILE}"
 
     step("Starting local web server…")
-    class LocalServer(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
-
     try:
         httpd = LocalServer(("127.0.0.1", PORT), DashboardHandler)
     except OSError as e:

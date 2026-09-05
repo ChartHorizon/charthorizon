@@ -1,4 +1,21 @@
 
+// ff_data/config.js is GENERATED data, and a refresh killed mid-write could leave it
+// empty or truncated (fixed at the source in 1.2.3: the generator writes atomically and
+// start.py regenerates an incomplete one on the next launch). This dereference is the
+// first line of the first module, so a broken file threw here — before INDEX, before
+// every module below, before boot.js. Nothing was left to lift the cold-start splash,
+// so it hung on the 60s inline net in index.html and then uncovered a blank, dead page:
+// the "it won't start any more" a user reports. Files written by older versions are
+// still out there, so keep the page alive long enough to say what to do about it.
+if (!window.__CONFIG__ || !window.__CONFIG__.index) {
+  window.__CONFIG_BROKEN = true;   // boot.js reads this and holds the splash on the message
+  window.__CONFIG__ = { index: {}, dataDir: 'ff_data', dataVersion: '', firstKey: null };
+  var _brokenPhase = document.getElementById('bootSplashPhase');
+  if (_brokenPhase) _brokenPhase.textContent = 'Market data is incomplete — restart ChartHorizon to rebuild it';
+  var _brokenDots = document.querySelector('.boot-splash-dots');
+  if (_brokenDots) _brokenDots.style.display = 'none';   // .boot-splash-dots is display:flex; [hidden] would not win
+}
+
 const INDEX = window.__CONFIG__.index;          // lightweight: metadata only per market
 const DATA_DIR = window.__CONFIG__.dataDir;  // folder with the category JSON files
 const DATA_VERSION = window.__CONFIG__.dataVersion;
@@ -62,11 +79,89 @@ function applyChartTheme() {
 }
 
 
-// ── Chart-Stil-Optionen (Spiegel zu CHART_THEME; von chart.js gelesen) ──
+// ── Chart style options (companion to CHART_THEME; read by every candle surface) ──
 // `border`: candle-body outline. null = none (stroke == fill); a hex string = that colour;
-// 'darken' = a darker shade of the fill colour (chart.js resolves it per candle).
+// 'darken' = a darker shade of the fill colour (candlePaint() resolves it per candle).
 const CHART_STYLE_DEFAULT = { candle: 'filled', wick: 'thin', width: 'normal', grid: 'normal', border: null };
 let CHART_STYLE = { ...CHART_STYLE_DEFAULT };
+
+// ── Candle painting: ONE definition, used by every surface that draws candles ──
+// Up and down are NOT always separated by colour. The built-in "Black on White"
+// preset paints bull and bear the same black and tells them apart purely by the
+// hollow up-body, so a renderer that reads CHART_THEME.bull/bear and ignores
+// CHART_STYLE collapses into a single black mass — which is exactly what the
+// Macro-Shift and Weekly-Outlook charts did until 2026-09-01, and what the
+// TradingView widget did with its candleStyle-only overrides. Never pick candle
+// colours at the call site; ask candlePaint().
+function chartDarkenHex(hex) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || '');
+  if (!m) return hex || '#000000';
+  const n = parseInt(m[1], 16), d = v => Math.max(0, Math.round(v * 0.66));
+  return '#' + ((1 << 24) | (d((n >> 16) & 255) << 16) | (d((n >> 8) & 255) << 8) | d(n & 255)).toString(16).slice(1);
+}
+// Body fill / outline / wick for one candle, resolved from CHART_STYLE + CHART_THEME.
+// A hollow body is `fill:'none'`, so callers MUST draw the wick as two guarded
+// segments (above and below the body) — a single high→low line shows straight
+// through a hollow body.
+function candlePaint(up) {
+  const hollow = CHART_STYLE.candle === 'hollow';
+  const border = CHART_STYLE.border;      // null | hex | 'darken'
+  const col = up ? CHART_THEME.bull : CHART_THEME.bear;
+  const stroke = !border ? col : (border === 'darken' ? chartDarkenHex(col) : border);
+  return {
+    hollow, border,
+    fill: (hollow && up) ? 'none' : col,
+    stroke,
+    strokeW: border ? 1 : (hollow ? 1 : 0.5),
+    // Wicks follow the body outline whenever one is set, else their own wick colour.
+    wick: border ? stroke : (up ? CHART_THEME.bullWick : CHART_THEME.bearWick),
+    wickW: CHART_STYLE.wick === 'thick' ? 2 : CHART_STYLE.wick === 'medium' ? 1.5 : 1,
+  };
+}
+// Body width as a fraction of one x-slot.
+function candleWidthFactor() {
+  return CHART_STYLE.width === 'narrow' ? 0.55 : CHART_STYLE.width === 'wide' ? 0.85 : 0.7;
+}
+// Close-only polyline for the 'line' candle style — the one style that replaces the
+// bodies entirely. `pts` = [{x, y}]; returns '' when there is nothing to draw.
+function candleLinePath(pts) {
+  let d = '';
+  for (const p of pts) {
+    if (!Number.isFinite(p.y)) continue;
+    d += `${d ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+  }
+  return d ? `<path d="${d}" fill="none" stroke="${CHART_THEME.bull}" stroke-width="1.5"/>` : '';
+}
+
+// ── COT bar layout: ONE definition, used by every surface that draws the COT pane ──
+// Weekly CFTC reports do not land on a regular candle grid. A normal week is 5 trading
+// days, a holiday week 4, a delayed release 6 — so bars placed straight on xForDate sit
+// at 4/5/6-slot centres and the whitespace between them varies by a factor of ~2.6. Under
+// an otherwise even chart that reads as a ragged comb, which is what it is.
+//
+// The fix regularises the middle while keeping the ENDS honest: first and last bar keep
+// their true x, everything between is spread evenly across that span. The pane therefore
+// still starts and ends exactly under the OI point of the same date — which is the whole
+// reason the bars were put back on the time axis in the first place. Do NOT "simplify"
+// this into an even division of the pane width: that is the old bug, where a COT series
+// that ends a week behind price (and only starts 2021-06-08) was stretched to fill the
+// pane and the first bar landed ~485px from its own date on a 20y chart.
+//
+// The drift this costs an interior bar is bounded by the irregularity it removes: measured
+// on lean hogs, at most ~8px at 6M and 12M, under 2px at 5Y and 20Y — 1 to 3 candle slots.
+//
+// `xs` = true x per report, ascending. Returns the positions to draw at plus the constant
+// centre-to-centre step, which is what the bar width is derived from (so the gap between
+// two bars is now the same everywhere by construction).
+function cotBarLayout(xs, fallbackStep) {
+  const n = xs.length;
+  if (n < 2) return { xs: xs.slice(), step: fallbackStep };
+  const step = (xs[n - 1] - xs[0]) / (n - 1);
+  // Every report snapped to the same candle (a range too coarse to separate them): there
+  // is no spacing to even out, so leave the positions alone.
+  if (!(step > 0)) return { xs: xs.slice(), step: fallbackStep };
+  return { xs: xs.map((_, i) => xs[0] + step * i), step };
+}
 
 // The editable color tokens (order is only for robustness; UI groups live in settings.js).
 const CHART_COLOR_TOKENS = [
@@ -80,7 +175,8 @@ const CHART_COLOR_TOKENS = [
 const CHART_PRESETS_KEY = 'ch_chart_presets.v1';
 const CHART_TZ_KEY = 'ch_timezone.v1';
 
-// Content-Bot-Card-Mode: Presets/Stile NICHT anwenden (PNG-Exporte muessen stabil bleiben).
+// Content-bot card mode: presets and styles are NOT applied, so the bot's PNG exports
+// stay stable no matter what the user has picked on screen.
 function _isCardMode() {
   try { return !!new URLSearchParams(location.search).get('card'); } catch (e) { return false; }
 }
@@ -275,6 +371,11 @@ let _overviewThemeDirty = false;
 // kept showing pre-refresh bars until the user clicked a market. switchPage() consumes this
 // on the way back and re-establishes the chart from the refreshed category.
 let _overviewDataDirty = false;
+// Same idea for a market picked on Seasonals or Charts while the Futures tab was hidden:
+// the three tabs share one selection (see setActiveMarket), but switchCommodity() measures
+// the container it draws into, and a hidden page is 0px wide — so the Futures tab redraws
+// on the way back in, not at the moment of the click.
+let _overviewMarketDirty = false;
 // Same idea for the Forex tab's TradingView pair chart: its theme is baked in at
 // creation, so a theme switch while Forex is hidden must re-mount it on return.
 let _fxThemeDirty = false;
@@ -352,9 +453,17 @@ function switchPage(page) {
   document.body.classList.toggle('bigchart-tab', target === 'bigchart');
   if (typeof startLiveLayer === 'function') {
     // Screener too: startLiveLayer self-gates to the Weekly Outlook via _liveLayerPage().
-    if (target === 'overview' || target === 'smt' || target === 'screener') startLiveLayer(); else stopLiveLayer();
+    // Charts (bigchart) starts here for the tab-return case and restarts again from
+    // selectBigChartMarket(), which is where its cfg first exists (openBigChart is async).
+    if (target === 'overview' || target === 'smt' || target === 'screener' || target === 'bigchart') startLiveLayer();
+    else stopLiveLayer();
   }
-  if (target === 'seasonals' && currentKey && INDEX[currentKey]) seasonalState.key = currentKey;
+  // Carry the shared market selection into the tab being opened (see setActiveMarket).
+  if (currentKey && INDEX[currentKey]) {
+    if (target === 'seasonals') seasonalState.key = currentKey;
+    // Set before openBigChart() runs from the PAGES load hook below — it reads this first.
+    if (target === 'bigchart' && typeof bigChartState !== 'undefined') bigChartState.key = currentKey;
+  }
   document.querySelectorAll('[data-page-tab]').forEach(tab => {
     const active = tab.dataset.pageTab === target;
     tab.classList.toggle('active', active);
@@ -367,7 +476,15 @@ function switchPage(page) {
   }
   const activeP = PAGES.find(p => p.id === target);
   if (activeP && activeP.load) activeP.load();
-  if (target === 'overview' && (_overviewDataDirty || _overviewThemeDirty)) {
+  if (target === 'overview' && _overviewMarketDirty) {
+    // A market picked on Seasonals or Charts while this tab was hidden. This supersedes the
+    // other two flags: switchCommodity() re-establishes the chart from the category and
+    // draws it in the current theme anyway.
+    _overviewMarketDirty = false;
+    _overviewDataDirty = false;
+    _overviewThemeDirty = false;
+    switchCommodity(currentKey);
+  } else if (target === 'overview' && (_overviewDataDirty || _overviewThemeDirty)) {
     // Data wins over theme: refreshOverviewChart() repaints in the new theme either way,
     // and unlike a bare repaint it re-fetches a contract history the refresh threw away.
     const _needsData = _overviewDataDirty;
@@ -417,6 +534,20 @@ document.addEventListener('keydown', (e) => {
     if (s) { s.focus(); s.select(); }
   }
 });
+
+// ── One market across Futures, Seasonals and Charts ──
+// Switching tabs must never switch market. Each of the three keeps its own *view* state
+// (timeframe, contract mode, indicators, drawings), but they all read and write ONE
+// selection, currentKey: a tab syncs from it on the way in (switchPage above) and calls
+// this on the way out, whenever its own sidebar picks a market. switchCommodity() is the
+// Futures half of it — that tab has no PAGES `load` hook, so it consumes the dirty flag
+// instead of re-rendering while hidden.
+function setActiveMarket(key) {
+  if (!INDEX[key] || key === currentKey) return;
+  currentKey = key;
+  try { localStorage.setItem(LAST_MARKET_KEY, key); } catch (e) {}
+  _overviewMarketDirty = true;
+}
 
 function activeMarketKey(context = activePage()) {
   return context === 'seasonals' ? seasonalState.key : currentKey;
@@ -513,18 +644,36 @@ function removeFromWatchlist(key, event) {
 }
 
 // ── Lazily load category data (fetch on first access) ──
+// An in-flight map beside the cache: catCache[slug] is only set once the response has
+// landed, so two callers in the same tick each fired a full category fetch (6-14 MB). The
+// cold-start warm-up and switchCommodity() ask for the SAME slug at the same moment on
+// every launch, so that duplicate was not hypothetical.
+// Keyed by _dataReloadNonce too: applyRefreshedData() clears catCache and bumps the nonce
+// when a board refresh lands, and a fetch still in flight from before that carries
+// pre-refresh data — it must neither be handed to the reload nor written into the cache.
+const _catInFlight = {};   // slug -> { nonce, promise }
+
 async function loadCategory(slug) {
   if (catCache[slug]) return catCache[slug];
-  try {
-    const res = await fetch(`${DATA_DIR}/data_${slug}.json?v=${DATA_VERSION}&r=${_dataReloadNonce}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    catCache[slug] = data;
-    return data;
-  } catch (e) {
-    console.error('Category load failed:', slug, e);
-    return null;
-  }
+  const pending = _catInFlight[slug];
+  if (pending && pending.nonce === _dataReloadNonce) return pending.promise;
+  const nonce = _dataReloadNonce;
+  const promise = (async () => {
+    try {
+      const res = await fetch(`${DATA_DIR}/data_${slug}.json?v=${DATA_VERSION}&r=${nonce}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (nonce === _dataReloadNonce) catCache[slug] = data;   // stale generation: don't poison the cache
+      return data;
+    } catch (e) {
+      console.error('Category load failed:', slug, e);
+      return null;
+    } finally {
+      if (_catInFlight[slug] && _catInFlight[slug].nonce === nonce) delete _catInFlight[slug];
+    }
+  })();
+  _catInFlight[slug] = { nonce, promise };
+  return promise;
 }
 
 // ── Seasonals page ──

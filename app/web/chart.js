@@ -1449,8 +1449,7 @@ function loadChart(cfg, opts = {}) {
 
   // Candle geometry
   const slot = plotW / n;
-  const _widthFactor = CHART_STYLE.width === 'narrow' ? 0.55 : CHART_STYLE.width === 'wide' ? 0.85 : 0.7;
-  const candleW = Math.max(1, Math.min(12, slot * _widthFactor));
+  const candleW = Math.max(1, Math.min(12, slot * candleWidthFactor()));
   const xAt = i => padL + edgePad + slot * (i + 0.5);
   const barXs = bars.map((_, i) => xAt(i));
   const barTimes = bars.map(b => new Date(b.date).getTime());
@@ -1494,35 +1493,18 @@ function loadChart(cfg, opts = {}) {
 
   const dec = cfg.tick_decimals;
 
-  // Candlesticks — style-aware: filled / hollow (up drawn as an outline) / line (close only); wick width.
-  const _wickW = CHART_STYLE.wick === 'thick' ? 2 : CHART_STYLE.wick === 'medium' ? 1.5 : 1;
+  // Candlesticks — style-aware: filled / hollow (up drawn as an outline) / line (close only);
+  // colours and outline come from candlePaint() (core.js), the shared definition.
   let candles = '';
   if (CHART_STYLE.candle === 'line') {
-    let dPath = '';
-    bars.forEach((d, i) => {
-      if (!Number.isFinite(d.close)) return;
-      dPath += `${dPath ? 'L' : 'M'}${xAt(i).toFixed(1)} ${pY(d.close).toFixed(1)}`;
-    });
-    if (dPath) candles = `<path d="${dPath}" fill="none" stroke="${CHART_THEME.bull}" stroke-width="1.5"/>`;
+    candles = candleLinePath(bars.map((d, i) => ({ x: xAt(i), y: pY(d.close) })));
   } else {
-    const hollow = CHART_STYLE.candle === 'hollow';
-    const border = CHART_STYLE.border;   // null | hex | 'darken' — candle-body outline colour
-    const _darken = (hex) => {
-      const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || ''); if (!m) return hex || '#000000';
-      const n = parseInt(m[1], 16), d = v => Math.max(0, Math.round(v * 0.66));
-      return '#' + ((1 << 24) | (d((n >> 16) & 255) << 16) | (d((n >> 8) & 255) << 8) | d(n & 255)).toString(16).slice(1);
-    };
     bars.forEach((d, i) => {
       const x = xAt(i);
       const up = d.close >= d.open;
-      const col = up ? CHART_THEME.bull : CHART_THEME.bear;
-      const wickCol = up ? CHART_THEME.bullWick : CHART_THEME.bearWick;
+      const { fill, stroke: strokeCol, strokeW, wick: wickStroke, wickW: _wickW, border } = candlePaint(up);
       const yHn = pY(d.high), yLn = pY(d.low);
       const bTopR = Math.min(pY(d.open), pY(d.close)), bBotR = Math.max(pY(d.open), pY(d.close));   // real body bounds
-      const fill = (hollow && up) ? 'none' : col;
-      const strokeCol = !border ? col : (border === 'darken' ? _darken(col) : border);   // body outline
-      const strokeW = border ? 1 : (hollow ? 1 : 0.5);
-      const wickStroke = border ? strokeCol : wickCol;   // wicks match the body outline when a border is set
       // Pixel-snap to keep 1px outlines crisp at integer DPR: a 1px stroke is crisp only when its
       // centre sits at integer+0.5. Bodies with a visible outline (hollow, or a border colour) align
       // their EDGES to .5; plain filled bodies align their fill edges to whole pixels.
@@ -1646,11 +1628,6 @@ function loadChart(cfg, opts = {}) {
     const dt = new Date(d.date);
     return dt >= firstDate && dt <= lastDate;
   };
-  function evenPaneX(index, count, inset = 0) {
-    if (count <= 1) return padL + edgePad + plotW / 2;
-    const usableW = Math.max(0, plotW - inset * 2);
-    return padL + edgePad + inset + usableW * index / (count - 1);
-  }
 
   const showVolume = showPanes && chartState.showVolume;
   const showSpread = showPanes && chartState.showSpread;
@@ -1863,13 +1840,19 @@ function loadChart(cfg, opts = {}) {
     const cotSpan = (cotHi - cotLo) || 1;
     const cotY = v => cotTop + (1 - (v - cotLo) / cotSpan) * cotH;
     const cotMid = cotHedgingActive ? cotY(cotThreshold) : cotY(0);
-    const cotStep = cotBars.length > 1 ? plotW / (cotBars.length - 1) : plotW;
-    const barW = Math.max(1, Math.min(14, cotStep * 0.55));
+    // Bars stay anchored to the SHARED time axis (xForDate) — like the OI line above and the
+    // spread pane below — but their spacing is evened out by cotBarLayout() in core.js: the
+    // first and last report keep their true x, the ones between are spread evenly across that
+    // span. Weekly reports otherwise land 4, 5 or 6 candles apart (holiday weeks, delayed
+    // releases), which left gaps varying by ~2.6x. See core.js for why this must NOT become an
+    // even division of the pane width.
+    const cotLayout = cotBarLayout(cotBars.map(d => xForDate(d.date)), plotW);
+    const barW = Math.max(1, Math.min(14, cotLayout.step * 0.55));
     let bars2 = '';
     cotBars.forEach((d, i) => {
       const net = cotValue(d);
       if (net === null || net === undefined) return;
-      const x = evenPaneX(i, cotBars.length, barW / 2), y = cotY(net), h = Math.abs(y - cotMid);
+      const x = cotLayout.xs[i], y = cotY(net), h = Math.abs(y - cotMid);
       const col = cotHedgingActive
         ? (net >= cotThreshold ? '#0ea679' : '#e53e3e')
         : (net >= 0 ? '#0ea679' : '#e53e3e');

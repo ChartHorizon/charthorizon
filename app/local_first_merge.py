@@ -36,6 +36,7 @@ except ImportError:
 
 # ---- cross-module dependencies (from the lower layers) ----
 from market_config import (
+    YF_HISTORY_GAP_WINDOW_DAYS,
     YF_TOTAL_VOLUME_LOOKAHEAD,
     YF_TOTAL_VOLUME_MAX_POINTS,
     YF_VOLUME_SUSPECT_LOOKBACK,
@@ -61,6 +62,7 @@ __all__ = [
     '_merge_oi_series',
     '_merge_volume_series',
     '_oi_series_from_cot',
+    '_recent_max_gap_days',
     '_safe_cache_token',
     '_series_dates',
     '_series_health',
@@ -134,6 +136,27 @@ def _series_dates(rows):
     return sorted(set(dates))
 
 
+def _recent_max_gap_days(rows, window_days=YF_HISTORY_GAP_WINDOW_DAYS):
+    """Largest hole in the series' own trailing `window_days`, anchored on its LAST bar.
+
+    This, not the whole-series gap, is what the gappiness gate judges. A fetch that came
+    back shredded is shredded near the end; a hole two decades back says nothing about
+    today's data and must not be allowed to veto it. Anchoring on each series' own last
+    bar (rather than on today) keeps the comparison like-for-like when one of the two is
+    already stale — which is exactly the case the gate has to decide.
+
+    Returns 0 for a series with fewer than two dates in the window.
+    """
+    dates = _series_dates(rows)
+    if len(dates) < 2:
+        return 0
+    cutoff = dates[-1] - timedelta(days=window_days)
+    recent = [d for d in dates if d >= cutoff]
+    if len(recent) < 2:
+        return 0
+    return max((cur - prev).days for prev, cur in zip(recent, recent[1:]))
+
+
 def _series_health(rows, *, kind="generic"):
     dates = _series_dates(rows)
     if not dates:
@@ -171,6 +194,10 @@ def _series_health(rows, *, kind="generic"):
         "start": dates[0].isoformat(),
         "end": dates[-1].isoformat(),
         "max_gap_days": max_gap,
+        # What the gappiness gate judges. Reported beside max_gap_days so the two can
+        # disagree visibly: "gappy long ago, clean where it counts" is a normal, healthy
+        # state for a market whose early Yahoo history is sparse.
+        "recent_gap_days": _recent_max_gap_days(rows),
     }
 
 
@@ -199,8 +226,13 @@ def _history_looks_worse(fresh_rows, previous_rows, *, kind):
     if kind == "seasonal" and fresh["years"] + 2 < previous["years"]:
         return True, fresh, previous, "fresh_seasonal_years_materially_shorter"
 
-    fresh_gap = fresh.get("max_gap_days") or 0
-    previous_gap = previous.get("max_gap_days") or 0
+    # Judged over the trailing window only (see _recent_max_gap_days). Judging the whole
+    # series let a single ancient hole veto every later refresh, permanently: the rejected
+    # fetch is the only thing that could ever extend the stored series, so once the stored
+    # window was short and clean and the fresh one long and old-gappy, the market froze for
+    # good. Platinum sat at 2026-06-12 for 81 days on a gap from 2007.
+    fresh_gap = fresh.get("recent_gap_days") or 0
+    previous_gap = previous.get("recent_gap_days") or 0
     if kind in {"price", "volume"} and fresh_gap > 21 and (not previous_gap or previous_gap <= 14):
         return True, fresh, previous, "fresh_history_has_large_gaps"
 

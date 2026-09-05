@@ -822,22 +822,45 @@ function fxTradingViewSymbol(baseCur, quoteCur) {
   return `FOREXCOM:${String(baseCur || '').toUpperCase()}${String(quoteCur || '').toUpperCase()}`;
 }
 
+// The widget has no runtime theme/style API — chart style and colors are baked in at
+// creation — so the active chart layout has to be translated into TradingView's own
+// vocabulary. Colors alone are NOT enough: "Black on White" paints bull and bear the
+// same black and separates them by the hollow up-body, so a candleStyle-only widget
+// rendered one solid black mass. TradingView chart styles: 1 = candles, 2 = line,
+// 9 = hollow candles.
+const FX_TV_STYLE = { filled: '1', line: '2', hollow: '9' };
+function fxTradingViewStyle() { return FX_TV_STYLE[CHART_STYLE.candle] || FX_TV_STYLE.filled; }
+
 function fxTradingViewOverrides() {
   // Grid is intentionally left at the TradingView default (no vert/horz grid
   // color overrides) so the widget keeps its original grid look. Background,
   // axis text, and candle colors stay aligned with the main Futures chart.
-  return {
+  const base = {
     'paneProperties.background': CHART_THEME.bg,
     'paneProperties.backgroundType': 'solid',
     'scalesProperties.textColor': CHART_THEME.text,
     'scalesProperties.lineColor': CHART_THEME.axis,
-    'mainSeriesProperties.candleStyle.upColor': CHART_THEME.bull,
-    'mainSeriesProperties.candleStyle.downColor': CHART_THEME.bear,
-    'mainSeriesProperties.candleStyle.borderUpColor': CHART_THEME.bull,
-    'mainSeriesProperties.candleStyle.borderDownColor': CHART_THEME.bear,
-    'mainSeriesProperties.candleStyle.wickUpColor': CHART_THEME.bullWick,
-    'mainSeriesProperties.candleStyle.wickDownColor': CHART_THEME.bearWick,
   };
+  if (CHART_STYLE.candle === 'line') {
+    return { ...base, 'mainSeriesProperties.lineStyle.color': CHART_THEME.bull, 'mainSeriesProperties.lineStyle.linewidth': 2 };
+  }
+  const up = candlePaint(true), down = candlePaint(false);
+  // Filled and hollow candles read from SEPARATE override namespaces (candleStyle /
+  // hollowCandleStyle) and the widget ignores the one its style isn't using — so write
+  // both, and a style the user switches to never falls back to TradingView's defaults.
+  const series = {};
+  for (const ns of ['candleStyle', 'hollowCandleStyle']) {
+    const k = `mainSeriesProperties.${ns}.`;
+    series[k + 'upColor'] = CHART_THEME.bull;
+    series[k + 'downColor'] = CHART_THEME.bear;
+    series[k + 'drawBorder'] = true;
+    series[k + 'borderUpColor'] = up.stroke;
+    series[k + 'borderDownColor'] = down.stroke;
+    series[k + 'drawWick'] = true;
+    series[k + 'wickUpColor'] = up.wick;
+    series[k + 'wickDownColor'] = down.wick;
+  }
+  return { ...base, ...series };
 }
 
 function fxTimeframeButtons(activeInterval) {
@@ -888,7 +911,7 @@ async function openFxPairChart(baseKey, quoteKey, baseCur, quoteCur, interval = 
       interval,
       timezone: 'Etc/UTC',
       theme: (typeof currentTheme === 'function' && currentTheme() === 'dark') ? 'dark' : 'light',
-      style: '1',
+      style: fxTradingViewStyle(),
       locale: 'en',
       toolbar_bg: CHART_THEME.bg,
       // Pull the background onto the futures-chart color (otherwise the dark-theme widget

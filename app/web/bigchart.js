@@ -24,7 +24,6 @@ let bigChartState = { key: null, tf: 'd1', interval: 'daily', range: '5y',
   // falls back to continuous for markets with no tradable contract (USDX proxy, crypto, indices).
   chartMode: 'contract', contractSymbol: null, contractLabel: null };
 let _bigChartInited = false;
-const BIGCHART_LAST_KEY = 'charthorizon.bigchartMarket.v1';
 
 // [id, interval, label, range, hidden]. The id is the button identity (6M/12M/D1 are all 'daily',
 // so interval alone can't distinguish them). 6M/12M are NOT shown as timeframe buttons (hidden:true)
@@ -333,6 +332,7 @@ async function setBigChartContractMode(mode) {
     bigChartState.contractLabel = null;
     renderBigChartContractBar();
     renderBigChart(cfg);
+    if (typeof restartLiveLayer === 'function') restartLiveLayer();   // the drawn symbol changed
   };
   if (mode !== 'frontMonth') { toContinuous(); return; }
 
@@ -357,6 +357,7 @@ async function setBigChartContractMode(mode) {
   bigChartState.contractLabel = lead.delivery_month_label || lead.label || lead.contract_symbol || lead.yf_symbol;
   renderBigChartContractBar();
   renderBigChart(cfg);
+  if (typeof restartLiveLayer === 'function') restartLiveLayer();     // the drawn symbol changed
 }
 
 function currentBigChartCfg() {
@@ -364,6 +365,35 @@ function currentBigChartCfg() {
   const cat = meta && catCache[meta.slug];
   return cat ? cat[bigChartState.key] : null;
 }
+
+// The symbol this tab is drawing right now — resolved through the SAME
+// getActiveChartSource() the renderer uses, state swap and all. live.js polls whatever this
+// returns, and loadChart's injectLivePoint splices the tick onto whatever getActiveChartSource
+// resolves; deriving the symbol a second way here is how the two would silently disagree
+// (poll the continuous, paint the front month, and the live candle never appears).
+function bigChartActiveSymbol() {
+  const cfg = currentBigChartCfg();
+  if (!cfg) return null;
+  const saved = chartState;
+  chartState = bigChartState;
+  try { return getActiveChartSource(cfg).symbol || null; }
+  finally { chartState = saved; }
+}
+
+// Floor for the maximized price pane. It is a floor, NOT a fit: with OI+COT open the panes alone
+// reserve 196px, so past some window height the stack cannot fit whatever we put here — which is
+// why .bigchart-main scrolls rather than clipping. (It used to clip, silently: 79px of axis and
+// legend gone at a 1536x730 window, 329px at 1536x480, and every viewport below ~854px tall drew
+// the identical chart because the old 280 floor had already bound.)
+// The number is chosen from where it stops fitting, not by feel. Everything outside the price
+// pane is fixed: head 152 + main padding 38 + chart chrome 93 + axis band 30 + panes 196 + 6
+// slack + the 58px header = 573, so the three-pane layout fits a viewport of 573 + floor.
+//   280 -> needs 853px   200 -> needs 773px   160 -> needs 733px
+// A maximised Edge window on a 1080p screen at 125% scaling — the reported setup — is about
+// 730 CSS px tall, so 160 is what makes that case fit with all three panes open. It only ever
+// binds when the window is that short AND OI+COT are both on; close one and the pane goes back
+// to filling the window. Do not raise it back without redoing that arithmetic.
+const BIGCHART_MIN_PRICE_H = 160;
 
 // Swap the global chartState for ours, render through the shared engine, restore.
 // loadChart is fully synchronous, so nothing observes the swapped value mid-flight.
@@ -395,10 +425,21 @@ function renderBigChart(cfg) {
       overhead = (svgR.top - bodyTop) + below + padBottom;
     }
     const mainPadBottom = main ? (parseFloat(getComputedStyle(main).paddingBottom) || 0) : 0;
-    const avail = window.innerHeight - bodyTop - mainPadBottom - 6;
+    // Height budget from .bigchart-main's OWN box, never window.innerHeight. Two reasons, both
+    // of which showed up only off a Mac: (1) .bigchart-main is scrollable now (see below), and
+    // innerHeight does not move when it scrolls, so the old form fed a shifting bodyTop into a
+    // fixed total and the chart grew every time you scrolled it; clientHeight + the body's offset
+    // WITHIN main cancel the scroll out. (2) On Windows the classic scrollbar is real layout,
+    // and innerHeight counts it while clientHeight does not — macOS's overlay bars hide that.
+    // main is locked to the viewport by .bigchart-layout{height:calc(100vh - 58px)}, so its
+    // clientHeight is the viewport height by construction.
+    const mainRect = main ? main.getBoundingClientRect() : null;
+    const offsetInMain = mainRect ? (bodyTop - mainRect.top + main.scrollTop) : 0;
+    const availBox = main ? main.clientHeight : (window.innerHeight - bodyTop);
+    const avail = availBox - offsetInMain - mainPadBottom - 6;
     // Leave room for any active indicator panes (Volume/Spread, plus OI+COT in D1/W1) so the
     // whole stack still fits the viewport with no page scroll. 30 = the svg's own axis/x-label band.
-    priceH = Math.max(280, Math.round(avail - overhead - 30 - panesHeight(bigChartState)));
+    priceH = Math.max(BIGCHART_MIN_PRICE_H, Math.round(avail - overhead - 30 - panesHeight(bigChartState)));
   }
   const saved = chartState;
   chartState = bigChartState;
@@ -406,6 +447,23 @@ function renderBigChart(cfg) {
     loadChart(cfg, { bodyId: 'bigchartBody', symId: 'bigchartSym', controls: false, panes: true, rollMarkers: false, priceH, wheelZoom: true, drawings: true, rerender: () => renderBigChart(cfg) });
   } finally {
     chartState = saved;
+  }
+  // The drawing strip is 15 fixed icon buttons — 538px of them. That is TALLER than the chart on
+  // any window below ~786px, and .bigchart-chartwrap is a stretch row, so the strip (not the
+  // chart) decided the pane's height and put a scrollbar over a chart that visibly fit. Cap it to
+  // the chart's own content height and let it scroll inside itself (CSS: overflow-y:auto). Measured
+  // after the render, so it tracks whatever the chart actually came out as. A cap above its natural
+  // height is a no-op, so on a tall window it simply stretches as before.
+  if (body) {
+    const strip = main && main.querySelector('.bigchart-drawbar');
+    const svgWrap = body.querySelector('.chart-svg-wrap');
+    const legendEl = svgWrap ? svgWrap.nextElementSibling : null;
+    const lastEl = legendEl || svgWrap;
+    if (strip && lastEl) {
+      const padB = parseFloat(getComputedStyle(body).paddingBottom) || 0;
+      const contentH = Math.round(lastEl.getBoundingClientRect().bottom - body.getBoundingClientRect().top + padB);
+      strip.style.maxHeight = contentH > 0 ? contentH + 'px' : '';
+    }
   }
   updateBigChartLatestBtn();
 }
@@ -463,7 +521,7 @@ async function selectBigChartMarket(key) {
   bigChartState.key = key;
   if (typeof drawState !== 'undefined') drawState.selectedId = null;   // drawings are per-market
   if (typeof closeDrawContextMenu === 'function') closeDrawContextMenu();
-  try { localStorage.setItem(BIGCHART_LAST_KEY, key); } catch (e) {}
+  setActiveMarket(key);   // one selection across Futures / Seasonals / Charts (core.js)
   const meta = INDEX[key];
   document.querySelectorAll('#bigchartSidebar .commodity-item').forEach(b => b.classList.remove('active'));
   document.getElementById('bigchart-nav-' + key)?.classList.add('active');
@@ -488,6 +546,10 @@ async function selectBigChartMarket(key) {
     setBigChartContractMode('frontMonth');     // preserve the mode: re-resolve & load this market's lead
   } else {
     renderBigChart(cfg);
+    // Point the live overlay at the new market. switchPage() also starts the layer, but it
+    // fires BEFORE openBigChart() has awaited the category — cfg is null at that moment, so
+    // that start finds no symbol. This is the point where the chart is actually on screen.
+    if (typeof restartLiveLayer === 'function') restartLiveLayer();
   }
 }
 
@@ -520,11 +582,10 @@ async function openBigChart() {
   renderBigChartIndicatorBar();
   renderBigChartTaBar();
   if (typeof renderDrawToolbar === 'function') renderDrawToolbar();
-  // Restore the last market, else fall back to the current Futures market, else the first.
+  // The market is the shared one: switchPage() has already set it from currentKey, which
+  // boot.js restores from LAST_MARKET_KEY. This tab therefore keeps no market of its own —
+  // the fallbacks only bite when the page is opened some other way.
   let key = bigChartState.key;
-  if (!key) {
-    try { key = localStorage.getItem(BIGCHART_LAST_KEY); } catch (e) {}
-  }
   if (!key || !INDEX[key]) {
     key = (typeof currentKey !== 'undefined' && INDEX[currentKey]) ? currentKey : Object.keys(INDEX)[0];
   }

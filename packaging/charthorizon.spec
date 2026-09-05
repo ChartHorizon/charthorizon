@@ -41,6 +41,11 @@ if sys.platform == "darwin":
     hiddenimports += ["AppKit", "Foundation", "objc"]
 elif sys.platform.startswith("win"):
     icon = os.path.join(ROOT, "packaging", "icons", "icon.ico")
+    # start.py's process-liveness probe (_pid_alive_windows) reaches kernel32 through
+    # ctypes.wintypes, imported inside the function. If it were missing from the bundle
+    # the probe would fall back to "alive" and a stale refresh.lock would wedge a refresh
+    # for LOCK_MAX_AGE again — the exact bug it exists to fix, silently.
+    hiddenimports += ["ctypes", "ctypes.wintypes"]
 else:
     icon = None
 

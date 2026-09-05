@@ -752,7 +752,7 @@ function wkDrawChart(el) {
   const edgePad = Math.max(24, Math.min(56, Math.round(innerW * 0.05)));
   const plotW = Math.max(120, innerW - edgePad * 2);
   const slot = plotW / n;
-  const candleW = Math.max(1, Math.min(12, slot * 0.7));
+  const candleW = Math.max(1, Math.min(12, slot * candleWidthFactor()));
   const xAt = i => padL + edgePad + slot * (i + 0.5);
   const barXs = bars.map((_, i) => xAt(i));
   const tms = bars.map(b => ms(b.date));
@@ -836,14 +836,25 @@ function wkDrawChart(el) {
     }
   });
 
-  // Candles (Futures theme: blue up / red down + lighter wicks).
+  // Candles — bodies from candlePaint() (core.js), the shared definition the Futures
+  // tab uses. Not CHART_THEME.bull/bear directly: a preset may separate up from down
+  // by the hollow body alone ("Black on White" paints both black), which an
+  // unconditional fill flattens into one solid mass.
   let candles = '';
-  for (let i = 0; i < n; i++) {
-    const b = bars[i], x = xAt(i), up = b.close >= b.open;
-    const col = up ? CHART_THEME.bull : CHART_THEME.bear, wickCol = up ? CHART_THEME.bullWick : CHART_THEME.bearWick;
-    const yO = pY(b.open), yC = pY(b.close);
-    candles += `<line x1="${x.toFixed(1)}" y1="${pY(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${pY(b.low).toFixed(1)}" stroke="${wickCol}" stroke-width="1"/>`
-      + `<rect x="${(x - candleW / 2).toFixed(1)}" y="${Math.min(yO, yC).toFixed(1)}" width="${candleW.toFixed(1)}" height="${Math.max(1, Math.abs(yC - yO)).toFixed(1)}" fill="${col}" stroke="${col}" stroke-width="0.5"/>`;
+  if (CHART_STYLE.candle === 'line') {
+    candles = candleLinePath(bars.map((b, i) => ({ x: xAt(i), y: pY(b.close) })));
+  } else {
+    for (let i = 0; i < n; i++) {
+      const b = bars[i], x = xAt(i), up = b.close >= b.open;
+      const { fill, stroke, strokeW, wick, wickW } = candlePaint(up);
+      const yH = pY(b.high), yL = pY(b.low);
+      const bodyTop = Math.min(pY(b.open), pY(b.close)), bodyBot = Math.max(pY(b.open), pY(b.close));
+      // Two guarded wick segments: a hollow body is transparent, so a single
+      // high→low line would be drawn straight through it.
+      if (yH < bodyTop) candles += `<line x1="${x.toFixed(1)}" y1="${yH.toFixed(1)}" x2="${x.toFixed(1)}" y2="${bodyTop.toFixed(1)}" stroke="${wick}" stroke-width="${wickW}"/>`;
+      if (bodyBot < yL) candles += `<line x1="${x.toFixed(1)}" y1="${bodyBot.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${wick}" stroke-width="${wickW}"/>`;
+      candles += `<rect x="${(x - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${Math.max(1, bodyBot - bodyTop).toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}"/>`;
+    }
   }
 
   // ── Lower panes (volume / OI / COT / calendar spread) — like the Futures tab
@@ -853,11 +864,6 @@ function wkDrawChart(el) {
   const firstDate = new Date(bars[0].date), lastDate = new Date(bars[n - 1].date);
   const inVisibleRange = d => { const dt = new Date(d.date); return dt >= firstDate && dt <= lastDate; };
   const xForDate = date => barXs[nearestIdx(new Date(date).getTime())];
-  const evenPaneX = (index, count, inset = 0) => {
-    if (count <= 1) return padL + edgePad + plotW / 2;
-    const usableW = Math.max(0, plotW - inset * 2);
-    return padL + edgePad + inset + usableW * index / (count - 1);
-  };
 
   // Volume pane (continuous: summed contract volumes; fallback: bar volume).
   const volumeTop = padT + priceH + gap;
@@ -945,13 +951,16 @@ function wkDrawChart(el) {
       const cotLo = -cotAbs, cotHi = cotAbs, cotSpan = (cotHi - cotLo) || 1;
       const cotY = v => cotTop + (1 - (v - cotLo) / cotSpan) * cotH;
       const cotMid = cotY(0);
-      const cotStep = cotBars.length > 1 ? plotW / (cotBars.length - 1) : plotW;
-      const barW = Math.max(1, Math.min(14, cotStep * 0.55));
+      // Same rule as the Futures pane (chart.js), through the same helper: anchored to the
+      // shared time axis at both ends, evenly spaced in between, never an even division of
+      // the pane width — see cotBarLayout() in core.js.
+      const cotLayout = cotBarLayout(cotBars.map(d => xForDate(d.date)), plotW);
+      const barW = Math.max(1, Math.min(14, cotLayout.step * 0.55));
       let cbars = '';
       cotBars.forEach((d, i) => {
         const net = cotValue(d);
         if (net === null || net === undefined) return;
-        const x = evenPaneX(i, cotBars.length, barW / 2), y = cotY(net), h = Math.abs(y - cotMid);
+        const x = cotLayout.xs[i], y = cotY(net), h = Math.abs(y - cotMid);
         cbars += `<rect x="${(x - barW / 2).toFixed(1)}" y="${Math.min(y, cotMid).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" fill="${net >= 0 ? '#0ea679' : '#e53e3e'}" opacity="0.7" rx="1"/>`;
       });
       cotSvg = `<line x1="${padL}" y1="${cotMid.toFixed(1)}" x2="${W - padR}" y2="${cotMid.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"/>${cbars}`

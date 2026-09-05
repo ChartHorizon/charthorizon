@@ -54,6 +54,7 @@ __all__ = [
     'REFRESH_FETCH_WORKERS',
     'YF_GATEWAY_CAPACITY',
     'YF_GATEWAY_REFILL_PER_SEC',
+    'YF_HISTORY_GAP_WINDOW_DAYS',
     'YF_LIQUID_CONTINUOUS_EMPTY_STOP',
     'YF_LIQUID_CONTINUOUS_FORWARD_MONTHS',
     'YF_LIQUID_CONTINUOUS_LOOKBACK_MONTHS',
@@ -119,6 +120,14 @@ YF_VOLUME_SUSPECT_RATIO = 0.15
 YF_VOLUME_SUSPECT_MIN_REFERENCE = 10000
 YF_VOLUME_SUSPECT_MIN_RUN = 3
 YF_VOLUME_SUSPECT_RECENT_DAYS = 420
+# The local-first gappiness gate judges a fresh fetch over THIS trailing window only,
+# anchored on the series' own last bar — never over its whole history. The gate exists
+# to spot a fetch that came back shredded, and that always shows near the end. Judging
+# the whole series instead let one ancient hole veto every future refresh: Yahoo's PL=F
+# carries 19 multi-week holes, all of them in 1997-2009 (the last ends 2009-11-27), so
+# platinum rejected a clean 20-year fetch every night from 2026-06-12 on and froze --
+# JSON and SQLite archive alike -- while data_quality still reported it as "ok".
+YF_HISTORY_GAP_WINDOW_DAYS = 1095   # 3 years
 YF_EOD_SETTLE_READY_ET = time(17, 30)  # a daily bar is only a settled EoD after this ET time (mirrors start.py)
 YF_EOD_BOARD_SETTLE_MIN_RATIO = 0.5    # a market's final bar fixes the board-wide settled date only if its volume is >= this fraction of its recent norm
 YF_LIQUID_CONTINUOUS_LOOKBACK_MONTHS = 12  # 12M covers the volume-led 6M/12M views; older single contracts are delisted at Yahoo, so the continuous fallback fills the rest (roll markers come from the expiry calendar)

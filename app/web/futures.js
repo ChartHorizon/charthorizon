@@ -1,18 +1,37 @@
 // `opts.priority === 'preload'` marks the request as cold-start warm-up rather than a user
 // action. The server cannot infer that, and without it the boot preload would compete with
 // on-screen charts as interactive — see the gateway's priority floors in yahoo_gateway.py.
-async function fetchContractHistory(contract, opts) {
-  if ((contract.chart_history || []).length) return contract.chart_history;
-  if (!contract.yf_symbol) throw new Error('No Yahoo symbol is available for this contract.');
+// In-flight map: the guard above only catches a history already ON the contract, never one
+// still in the air. The boot warm-up and switchCommodity() ask for the opening market's
+// front month in the same tick, and one symbol can sit on more than one contract object —
+// so concurrent callers share ONE request and each keeps its own reference to the rows.
+var _contractHistoryInFlight = {};   // yf_symbol -> Promise<rows>
 
+async function _fetchContractHistoryRows(symbol, opts) {
   const priority = (opts && opts.priority === 'preload') ? '&priority=preload' : '';
-  const url = `/api/contract-history?symbol=${encodeURIComponent(contract.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}${priority}`;
+  const url = `/api/contract-history?symbol=${encodeURIComponent(symbol)}&period=${CONTRACT_HISTORY_PERIOD}${priority}`;
   const res = await fetch(url);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(payload.error || 'Contract history could not be loaded.');
   }
-  contract.chart_history = payload.history || [];
+  return payload.history || [];
+}
+
+async function fetchContractHistory(contract, opts) {
+  if ((contract.chart_history || []).length) return contract.chart_history;
+  if (!contract.yf_symbol) throw new Error('No Yahoo symbol is available for this contract.');
+
+  const symbol = contract.yf_symbol;
+  let pending = _contractHistoryInFlight[symbol];
+  if (!pending) {
+    pending = _fetchContractHistoryRows(symbol, opts);
+    _contractHistoryInFlight[symbol] = pending;
+    // Free the slot once it settles, rejections included — otherwise one failed fetch
+    // sticks as a rejected promise that every later caller inherits for the life of the page.
+    pending.catch(() => {}).then(() => { delete _contractHistoryInFlight[symbol]; });
+  }
+  contract.chart_history = await pending;
   return contract.chart_history;
 }
 
@@ -175,6 +194,7 @@ function renderSpecs(cfg) {
 
 async function switchCommodity(key) {
   currentKey = key;
+  _overviewMarketDirty = false;   // this tab is drawing that market now (see setActiveMarket)
   try { localStorage.setItem(LAST_MARKET_KEY, key); } catch (e) {}
   const meta = INDEX[key];
   if (!meta) return;

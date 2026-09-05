@@ -15,6 +15,7 @@ var BOOT_HISTORY_CONCURRENCY = 6;     // parallel contract-history fetches durin
 var BOOT_REFRESH_POLL_MS = 1000;      // /api/refresh-status cadence while a refresh runs
 var _bootProgressTick = 0;            // bumped by _bootPhase; the stall watchdog watches it
 var _bootWatchdogTimer = null;
+var _bootRevealed = false;            // set on reveal; the background pass must not write to a splash that is gone
 
 // Card-mode: ONLY the content bot calls `?card=<key>`. It configures the futures chart
 // (front month · daily · 12M or `range=6m` · spread + COT hedging program) for the PNG
@@ -62,13 +63,16 @@ if (_cardKey === 'fx') {
       .finally(() => switchCommodity(_cardKey));
   }
 } else {
-  // Cold start: keep the splash up until the whole board is loaded, then reveal.
-  // Fire-and-forget (self-dismissing); runs only here, so bot PNGs are unaffected.
-  bootWarmup();
+  // Cold start: the splash lifts as soon as the market on screen is drawable; the rest of
+  // the board loads behind it. Fire-and-forget (self-dismissing); runs only here, so bot
+  // PNGs are unaffected. bootWarmup() MUST come after the currentKey restore below — its
+  // first phase is about exactly that market, and reading currentKey any earlier would warm
+  // the default one and reveal on a chart the user is not looking at.
   try {
     const _lastMarket = localStorage.getItem(LAST_MARKET_KEY);
     if (_lastMarket && INDEX[_lastMarket]) currentKey = _lastMarket;
   } catch (e) {}
+  bootWarmup();
   switchCommodity(currentKey);
   // Futures Strength heatmap at the bottom of the Futures tab — normal dashboard
   // only (the card-mode branches above never reach here, so bot PNGs are unchanged).
@@ -117,20 +121,23 @@ window.addEventListener('resize', () => {
 
 // ── Cold-start boot splash ───────────────────────────────────────────────────
 // Hold the splash (html.booting, set in <head> before first paint — normal dashboard only)
-// until the whole board is in hand, then fade it out. Every category, the screener and every
-// market's front-month history are loaded up front, so on reveal each tab opens populated and
-// no candle "pops in" afterwards. There is no timed reveal: a stalled warm-up surfaces an
-// "Open anyway" button instead (see the stall watchdog below).
-function _hasLiveQuote(sym) {
-  const q = (sym && typeof liveQuotes === 'object' && liveQuotes) ? liveQuotes[sym] : null;
-  return !!(q && Number.isFinite(q.price) && q.day);
-}
-
+// until the market that is about to BE on screen is drawable — its category file, the
+// screener, its front month's live price and history — then fade it out. The other markets
+// follow after the reveal (_bootLoadRest).
+// It used to hold for the whole board: nine category files (~63 MB), then a wait on any
+// running refresh, then 39 contract histories. Nothing popped in afterwards, but the open
+// cost up to ~90 s — and start.py kicks a refresh on every warm start, so that wait was the
+// normal case, not the exception. The trade is deliberate: click a market the background
+// pass has not reached yet and its front-month candles arrive a beat late (the continuous
+// series is already in the category JSON and paints at once).
+// There is no timed reveal: a stalled warm-up surfaces an "Open anyway" button instead
+// (see the stall watchdog below).
 function _revealBootSplash() {
   // Every exit from the splash runs through here — including the "Open anyway" button and
   // a warm-up hung on a fetch that never resolves — so this is where the watchdog is
   // stopped. Otherwise its 15s interval kept firing for the life of the page.
   _bootStopWatchdog();
+  _bootRevealed = true;   // from here on the background pass reports into nothing (see _bootPhase)
   // Draw the prefetched live quote onto the on-screen chart(s) FIRST, so today's candle is
   // actually standing the moment the splash lifts (not "pops in" a tick later).
   try { if (typeof liveActiveTargets === 'function') liveActiveTargets().repaint(); } catch (e) {}
@@ -159,19 +166,23 @@ function _bootStopWatchdog() {
 }
 
 function _bootOfferSkip() {
+  if (_bootRevealed) return;          // the user is already in; there is no exit left to offer
   const btn = document.getElementById('bootSplashSkip');
   if (btn) btn.hidden = false;
 }
 
 // ── Cold-start warm-up ───────────────────────────────────────────────────────
-// The splash stays up until every tab's data is in hand, then reveals. Page-aware
-// prefetching is gone: the dashboard used to open on a 12s deadline whether or not it was
-// ready, and everything else loaded while the user was already clicking.
+// Two passes: _bootOpeningMarket() holds the splash, _bootLoadRest() runs behind the open
+// dashboard. The total Yahoo cost is unchanged — ONE batch quote request for the board plus
+// up to 39 contract histories (zero once ff_data/contract_history/ is warm) — it simply no
+// longer stands in front of the reveal.
 //
-// Yahoo cost: phase 2 is up to 39 contract-history requests on a cold start (zero once
-// ff_data/contract_history/ is warm), phase 3 is ONE batch request for all the front-month
-// quotes. Both run at `preload` priority so a board refresh still outranks them.
+// Priority is the one thing that differs between the passes. The opening market asks as
+// `interactive`: it IS the chart on screen, and interactive is the only class the server
+// still serves while ff_data/refresh.lock is held. Everything after the reveal asks as
+// `preload`, so a board refresh outranks it.
 function _bootPhase(label, done, total) {
+  if (_bootRevealed) return;            // splash is gone: nowhere to report, nothing waiting on it
   const p = document.getElementById('bootSplashPhase');
   const c = document.getElementById('bootSplashProgress');
   if (p) p.textContent = label;
@@ -179,7 +190,10 @@ function _bootPhase(label, done, total) {
   _bootProgressTick += 1;                 // feeds the stall watchdog above
 }
 
-// Phase 1: every category + the screener. Local files, no Yahoo requests.
+// Every category + the screener. Local files, no Yahoo requests; whatever the opening
+// market already pulled in comes straight back out of catCache. Re-renders the watchlist
+// as it goes: watchlistQuote() reads the category payload, so a watched market from a
+// category this pass has not reached yet shows its name without a price until it lands.
 async function _bootLoadBoard() {
   const slugs = [...new Set(Object.keys(INDEX || {})
     .map(k => INDEX[k] && INDEX[k].slug).filter(Boolean))];
@@ -187,6 +201,7 @@ async function _bootLoadBoard() {
   _bootPhase('Loading market data', 0, slugs.length);
   for (const slug of slugs) {
     try { await loadCategory(slug); } catch (e) {}
+    try { if (typeof renderWatchlist === 'function') renderWatchlist(); } catch (e) {}
     _bootPhase('Loading market data', ++done, slugs.length);
   }
   if (typeof ensureScreenerData === 'function') {
@@ -194,28 +209,29 @@ async function _bootLoadBoard() {
   }
 }
 
-// Each market's LEAD (highest-volume) contract — what switchCommodity actually opens on, and
-// what the Weekly Outlook and Macro Shift both draw. Pure read of what phase 1 loaded; costs
+// A market's LEAD (highest-volume) contract — what switchCommodity actually opens on, and
+// what the Weekly Outlook and Macro Shift both draw. Pure read of a loaded category; costs
 // nothing, so the quote request can go before the histories.
+function _bootFrontContract(cfg) {
+  const contracts = (cfg && cfg.contracts) || [];
+  const idx = (typeof frontContractIndex === 'function') ? frontContractIndex(contracts) : -1;
+  return (idx >= 0 ? contracts[idx] : null)
+    || contracts.find(c => c && c.available && c.yf_symbol) || null;
+}
+
 function _bootFrontContracts() {
   const out = [];
   for (const key of Object.keys(INDEX || {})) {
     const meta = INDEX[key];
-    const cfg = meta && catCache[meta.slug] && catCache[meta.slug][key];
-    if (!cfg) continue;
-    const contracts = cfg.contracts || [];
-    const idx = (typeof frontContractIndex === 'function') ? frontContractIndex(contracts) : -1;
-    const front = (idx >= 0 ? contracts[idx] : null)
-      || contracts.find(c => c && c.available && c.yf_symbol) || null;
+    const front = _bootFrontContract(meta && catCache[meta.slug] && catCache[meta.slug][key]);
     if (front && front.yf_symbol) out.push(front);
   }
   return out;
 }
 
-// Phase 3: the cold contract histories, with BOUNDED concurrency. Strictly sequential took
-// ~4s per contract against real Yahoo — nearly three minutes for a full board, all of it
-// behind the splash — and the gateway rate-caps the outbound requests regardless, so
-// serialising bought nothing. Warm contracts cost nothing: fetchContractHistory returns
+// The cold contract histories, with BOUNDED concurrency. Strictly sequential took ~4s per
+// contract against real Yahoo — nearly three minutes for a full board — and the gateway
+// rate-caps the outbound requests regardless, so serialising bought nothing. Warm contracts cost nothing: fetchContractHistory returns
 // immediately when the history is already on the contract.
 async function _bootWarmHistories(fronts) {
   let done = 0;
@@ -233,23 +249,17 @@ async function _bootWarmHistories(fronts) {
   await Promise.all(Array.from({ length: BOOT_HISTORY_CONCURRENCY }, worker));
 }
 
-// Phase 0: a board refresh that is ALREADY running. start.py kicks one on every warm start
-// (the double-click path), before it serves — and the server gateway refuses anything
-// non-interactive while ff_data/refresh.lock exists. Phases 2 and 3 would then be declined
-// before they left the process, and the splash would count 39/39 against no-ops and reveal
-// an empty board. So we wait the refresh out and show ITS progress, which is what the user
-// is actually waiting for. Returns true if we waited at all.
+// A board refresh that is ALREADY running. start.py kicks one on every warm start (the
+// double-click path), before it serves — and the server gateway refuses anything
+// non-interactive while ff_data/refresh.lock exists. The Yahoo phases after this would be
+// declined before they left the process and would count 39/39 against no-ops, so wait it
+// out first. Any failure (endpoint missing, bad JSON) just returns and lets them run.
 //
-// That wait is legitimately minutes long, so "Open anyway" is offered IMMEDIATELY here
-// rather than after the 15s stall: the user must always be able to enter. Any failure
-// (endpoint missing, bad JSON) just returns and lets the phases run.
-//
-// The categories phase 1 already read are the pre-refresh ones; refreshing them here
-// would be a no-op (loadCategory serves catCache), and it is not this function's job —
-// startRefreshPolling() is watching the same refresh and reloads every loaded category
-// in place when it reports 'done'.
+// This no longer holds the splash — it runs after the reveal, and the user watches the very
+// same refresh in the watchlist progress bar, which is also what reloads every loaded
+// category in place when it reports 'done' (refresh.js). The categories read before it
+// finishes are the pre-refresh ones; replacing them is that reload's job, not ours.
 async function _bootWaitForRefresh() {
-  let offeredSkip = false;
   for (;;) {
     let status = null;
     try {
@@ -258,37 +268,83 @@ async function _bootWaitForRefresh() {
       status = await res.json();
     } catch (e) { return; }
     if (!status || status.state !== 'running') return;
-    if (!offeredSkip) { offeredSkip = true; _bootOfferSkip(); }
     _bootPhase('Updating market data', Number(status.done) || 0, Number(status.total) || 0);
     await new Promise(r => setTimeout(r, BOOT_REFRESH_POLL_MS));
   }
 }
 
-async function bootWarmup() {
-  if (!document.documentElement.classList.contains('booting')) return;  // card-mode / already revealed
-  window.__bootWarmupStarted = true;      // tells the inline net in index.html to stand down
-  _bootStartWatchdog();
+// The splash pass: the opening market's category file and the screener (both local), then
+// its front month's live price and its history (both Yahoo, both interactive). Nothing else
+// — every other market waits for _bootLoadRest().
+// switchCommodity() is issuing the same two requests for the same contract in the same
+// tick; the in-flight maps in core.js and futures.js collapse each pair into ONE request,
+// which is what lets this await them without paying for them twice.
+async function _bootOpeningMarket() {
+  const meta = INDEX[currentKey];
+  if (!meta) return;
+  _bootPhase('Loading ' + (meta.display_name || 'market'), 0, 0);
+  await loadCategory(meta.slug);
+  if (typeof ensureScreenerData === 'function') {
+    try { await ensureScreenerData(); } catch (e) {}   // 15 KB, local: the Screener tab and both heatmaps
+  }
+  const front = _bootFrontContract((catCache[meta.slug] || {})[currentKey]);
+  if (!front || !front.yf_symbol) return;              // no contract chain: the continuous series is enough
+  if (typeof livePrefetch === 'function') {
+    _bootPhase('Live price', 0, 0);
+    try { await livePrefetch([front.yf_symbol]); } catch (e) {}
+  }
+  if (typeof fetchContractHistory === 'function') {
+    _bootPhase('Front month · ' + (front.contract_symbol || front.yf_symbol), 0, 0);
+    try { await fetchContractHistory(front); } catch (e) {}
+  }
+}
+
+// The background pass: everything the splash no longer waits for. Order is unchanged from
+// when this ran in front of the reveal — quotes BEFORE histories, deliberately. The quote
+// phase is ONE request for the whole board; the history phase is up to 39. Warming
+// histories first drained the preload budget below its floor and the single most valuable
+// request of the whole warm-up was the one that got refused — the board came up with 1 of
+// 39 live prices.
+//
+// When a refresh finishes mid-pass, refresh.js clears catCache and rebuilds every contract
+// object, so rows warmed a moment earlier are discarded with the objects that held them —
+// measured: 44 histories fetched, 1 still attached afterwards. That is not the loss it
+// looks like. What this pass is really for is the SERVER-side cache in
+// ff_data/contract_history/, which the refresh had just emptied (clear_contract_history_cache)
+// and which survives any in-memory swap; refilling it turns the first click on a market from
+// a ~4s Yahoo fetch into a ~10ms local read. Choreographing the two passes around each other
+// would buy back only that 10ms.
+async function _bootLoadRest() {
+  // Let the reveal's fade finish first (CSS, 450ms). The category files below are ~57 MB of
+  // JSON and every parse blocks the main thread, which would otherwise land as a stutter
+  // across the one animation the user actually watches.
+  await new Promise(r => setTimeout(r, 500));
   try {
     await _bootLoadBoard();
-    // A refresh in flight declines every preload request below; wait it out first (and
-    // render its progress meanwhile) instead of counting phases that did nothing.
     await _bootWaitForRefresh();
     const fronts = _bootFrontContracts();
     const symbols = [...new Set(fronts.map(c => c.yf_symbol))];
-
-    // Quotes BEFORE histories, deliberately. The quote phase is ONE request for the whole
-    // board; the history phase is up to 39. Warming histories first drained the preload
-    // budget below its floor and the single most valuable request of the whole warm-up was
-    // the one that got refused — the board came up with 1 of 39 live prices.
     if (symbols.length && typeof livePrefetch === 'function') {
-      _bootPhase('Live prices', 0, symbols.length);
       await livePrefetch(symbols, { priority: 'preload' });   // ONE batch request for all
-      _bootPhase('Live prices', symbols.filter(_hasLiveQuote).length, symbols.length);
     }
     await _bootWarmHistories(fronts);
+  } catch (e) { /* background: a failure costs freshness here, never the open dashboard */ }
+}
+
+async function bootWarmup() {
+  if (!document.documentElement.classList.contains('booting')) return;  // card-mode / already revealed
+  window.__bootWarmupStarted = true;      // tells the inline net in index.html to stand down
+  // A config.js that could not be parsed (core.js). There is no board behind the splash
+  // to reveal — only an empty one — so hold it on the message core.js wrote instead. The
+  // line above is what keeps the 60s inline net from uncovering that empty board anyway.
+  if (window.__CONFIG_BROKEN) return;
+  _bootStartWatchdog();
+  try {
+    await _bootOpeningMarket();
   } catch (e) { /* fall through and reveal — a broken warm-up must never trap the user */ }
   _bootStopWatchdog();
   _revealBootSplash();
+  _bootLoadRest();                        // not awaited: the dashboard is open, this runs behind it
 }
 
 // Header clock (#clock + .hdr-date). Re-initialisable: the Settings tab calls it again
