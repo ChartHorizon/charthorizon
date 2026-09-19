@@ -79,6 +79,8 @@ YFINANCE_EOD_READY_ET = time(17, 30)
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
 LOCK_FILE = os.path.join("ff_data", "refresh.lock")
 LOCK_MAX_AGE = 1800  # seconds — a refresh never takes this long; older lock = stale
+RISK_ACK_FILE = os.path.join("ff_data", "risk_notice_ack.json")
+RISK_NOTICE_VERSION = 1   # bump to show the notice again after a material change
 
 # The SERVER gateway profile. The generator subprocess installs its own (see
 # commodity_dashboard.py) and must NOT be given lock_path — it is the process that holds
@@ -152,6 +154,67 @@ def _write_progress(**fields):
             raise
     except Exception:
         pass
+
+
+# ── The risk notice, acknowledged once per installation ──────────────────────────────
+# packaging/public/RISK-NOTICE.txt is the canonical wording. The Windows installer compiles
+# it in as a page that cannot be walked past unread; the dashboard shows a short form of it
+# on the FIRST launch of an installation and never again. On macOS and Linux that dialog is
+# the only place it appears at all — a .dmg and an AppImage have no installer to put a page
+# in front of.
+#
+# The acknowledgement is a FILE, deliberately not browser state: localStorage would ask
+# again after every cache clear and in every browser, and the content bot's headless
+# Chromium starts with an empty profile on every run, so it would meet the dialog before
+# every card it shoots. It lives in ff_data/ because that folder is gitignored (a dev run
+# must not offer the flag as a change) and sits inside DATA_ROOT, the only place a frozen
+# build may write.
+def risk_notice_payload():
+    """Whether this installation has acknowledged the current notice.
+
+    Anything unreadable counts as "not yet": a file truncated by a kill mid-write must read
+    as an unanswered question, never as an acceptance. A stored version BELOW the current
+    one does not count either — bumping RISK_NOTICE_VERSION is how a materially rewritten
+    notice gets shown again — while a higher one does, so a downgrade does not re-ask."""
+    version, accepted_at = 0, None
+    try:
+        with open(RISK_ACK_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            version = int(data.get("version") or 0)
+            accepted_at = data.get("accepted_at") or None
+    except (OSError, ValueError, TypeError):
+        pass
+    return {
+        "accepted": version >= RISK_NOTICE_VERSION,
+        "version": RISK_NOTICE_VERSION,
+        "accepted_at": accepted_at,
+    }
+
+
+def record_risk_notice_ack():
+    """Store the acknowledgement atomically (temp file → os.replace) and report the new
+    state. Raises on a failed write, and the endpoint answers 500: a 200 that stored
+    nothing would tell the page it never has to ask again, in a session where nothing was
+    kept. Being asked twice beats being asked never."""
+    os.makedirs("ff_data", exist_ok=True)
+    payload = {
+        "version": RISK_NOTICE_VERSION,
+        "accepted_at": datetime.now().isoformat(timespec="seconds"),
+        "app_version": app_version.APP_VERSION,
+    }
+    fd, tmp = tempfile.mkstemp(dir="ff_data", prefix=".ack_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, RISK_ACK_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return risk_notice_payload()
 
 
 # Windows process-liveness constants (winnt.h / winerror.h).
@@ -993,6 +1056,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/settled-eod":
             self._send_json(200, settled_eod_payload())
             return
+        if parsed.path == "/api/risk-notice":
+            self._send_json(200, risk_notice_payload())
+            return
         if parsed.path == "/api/contract-history":
             qs = urllib.parse.parse_qs(parsed.query)
             symbol = (qs.get("symbol") or [""])[0].strip()
@@ -1052,6 +1118,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # The manual button always runs. The generator still ingests settled
             # EoD only — never intraday.
             self._send_json(200, start_background_refresh("manual"))
+            return
+        if parsed.path == "/api/risk-notice-ack":
+            # A failure here is reported as one — see record_risk_notice_ack.
+            try:
+                payload = record_risk_notice_ack()
+            except Exception as e:
+                self._send_json(500, {"error": str(e), "accepted": False})
+                return
+            self._send_json(200, payload)
             return
         self._send_json(404, {"error": "not found"})
 

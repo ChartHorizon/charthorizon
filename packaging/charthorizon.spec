@@ -32,6 +32,15 @@ datas += [
     (os.path.join(ROOT, "app", "web"), "web"),
     (os.path.join(ROOT, "app", "index.html"), "."),
     (os.path.join(ROOT, "app", "loading.html"), "."),
+    # The two documents that must travel WITH a binary rather than be linked from it: the
+    # AGPL text the app is conveyed under, and the risk notice the installer shows and the
+    # dashboard repeats once on its first launch. Every OS gets them this way; the Windows
+    # installer additionally drops both next to the .exe, where a user will find them
+    # (charthorizon.iss), because the bundle copies land inside _internal/.
+    # The VM builds from its own C:\ch, so LICENSE must be copied over too — build_win.ps1
+    # refuses to build without it rather than letting PyInstaller fail three minutes in.
+    (os.path.join(ROOT, "LICENSE"), "."),
+    (os.path.join(ROOT, "packaging", "public", "RISK-NOTICE.txt"), "."),
 ]
 
 # ---- Bake in which recipe built this -------------------------------------------------

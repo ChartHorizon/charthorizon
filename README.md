@@ -8,6 +8,19 @@ browser, running entirely on your machine. No account. No cloud. Bring your own 
 [Weekly notes](https://chart-horizon.com/) ·
 [FX strength map](https://chart-horizon.com/fx/)
 
+## Risk notice
+
+**Educational and informational only.** ChartHorizon is not investment advice and makes
+no recommendation to buy or sell anything. Futures, forex and other leveraged derivatives
+carry a **substantial risk of loss** — you can lose more than your deposit. Seasonal, COT
+and structure signals are statistical: past results do not guarantee future ones. The data
+comes from free third-party sources, is end-of-day, and is provided **as is** without
+warranty. **The authors accept no liability for any loss or damage arising from use of this
+tool; you use it entirely at your own risk.**
+
+Full text: [`RISK-NOTICE.txt`](RISK-NOTICE.txt) — shown by the Windows installer, and once
+on the dashboard's first launch.
+
 ## Download
 
 Unsigned installers for the latest release:
@@ -16,7 +29,8 @@ Unsigned installers for the latest release:
 - **Windows** — `ChartHorizon-<version>-Windows-Setup.exe`
 - **Linux** — `ChartHorizon-<version>-x86_64.AppImage`
 
-Get them from the [Releases page](../../releases/latest).
+Download them from **[chart-horizon.com/dashboard](https://chart-horizon.com/dashboard/)** —
+the installers are hosted directly, not as GitHub Releases.
 
 ### Install & first launch
 
@@ -59,4 +73,4 @@ remarking on — same data, same signals, nothing to buy and no account to make.
 ## License
 
 Code: **AGPL-3.0** (`LICENSE`). The **ChartHorizon** name and logo are reserved —
-see `TRADEMARK.md`. Data sources and legal: see `DISCLAIMER.md`.
+see `TRADEMARK.md`. Data sources: see `DISCLAIMER.md`. Risk and liability: see `RISK-NOTICE.txt`.

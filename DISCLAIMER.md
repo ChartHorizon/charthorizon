@@ -16,5 +16,11 @@ or any exchange or data provider.
 
 ## Not financial advice
 
-For educational purposes only. Futures trading involves substantial risk of loss.
-Seasonal and positioning signals do not guarantee future results.
+For educational and informational purposes only — never investment advice or a
+recommendation. Futures trading involves a substantial risk of loss, and seasonal or
+positioning signals do not guarantee future results. Everything here is provided **as
+is**, without warranty; the authors accept **no liability** for any loss or damage
+arising from use of this tool.
+
+The full wording — the same text the Windows installer shows and the dashboard shows
+once on its first launch — is [`RISK-NOTICE.txt`](RISK-NOTICE.txt).

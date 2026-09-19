@@ -2537,6 +2537,13 @@ function bindChartControls(cfg) {
         chartState.chartMode = 'continuous';
         loadChart(cfg);
         renderTable(cfg);
+        // The drawn symbol changed, so the live overlay has to be re-pointed (live.js). Only
+        // the contract direction had this, through activateSelectedContract below; going the
+        // other way, the layer kept polling the front month. It coincides most days — the
+        // continuous series' live symbol IS usually the contract it settles on — but around a
+        // roll the two differ by a month, and then the layer polls one while the chart paints
+        // the other and no live candle ever appears.
+        if (typeof restartLiveLayer === 'function') restartLiveLayer();
       } else {
         activateSelectedContract(cfg);
       }
@@ -2547,6 +2554,7 @@ function bindChartControls(cfg) {
   });
   document.querySelectorAll('.ctrl-btn[data-rg]').forEach(b => {
     b.onclick = () => {
+      const modeBefore = chartState.chartMode;
       chartState.range = b.dataset.rg;
       if (chartState.range === '5y') {
         chartState.cotHedging = false;
@@ -2561,6 +2569,10 @@ function bindChartControls(cfg) {
         }
       }
       loadChart(cfg);
+      // A range change alone leaves the drawn symbol alone — but 5Y forces continuous above,
+      // and that does change it. Restart only on the flip, so the other range buttons don't
+      // re-fetch a quote (and re-show "Loading live…") for a symbol that never moved.
+      if (chartState.chartMode !== modeBefore && typeof restartLiveLayer === 'function') restartLiveLayer();
     };
   });
   document.querySelectorAll('input[data-cot-hedging]').forEach(b => {

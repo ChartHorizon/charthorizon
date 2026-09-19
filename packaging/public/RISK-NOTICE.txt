@@ -1,0 +1,60 @@
+ChartHorizon -- Risk Notice and Terms of Use
+============================================
+
+Please read this before installing or using ChartHorizon.
+
+
+RISK NOTICE. PLEASE READ.
+
+ChartHorizon is an independent, informational and educational tool.
+Nothing it shows is investment, financial, legal, or tax advice, and
+nothing is a recommendation, solicitation, or offer to buy or sell any
+futures contract, currency, security, or other financial instrument.
+Always do your own research and consult a licensed financial
+professional before making any trading decision.
+
+
+TRADING RISK.
+
+Trading futures, forex, options, and other leveraged derivatives carries
+a substantial risk of loss and is not suitable for every investor. You
+can lose some or all of your capital, and because these products are
+leveraged you may lose more than your initial deposit. Only trade with
+money you can afford to lose.
+
+
+NO PERFORMANCE GUARANTEE.
+
+Seasonal patterns, COT positioning, term-structure signals, screener
+scores, position-size estimates, and every other analytic shown are
+statistical and historical in nature. Past performance and any
+hypothetical or backtested results are not indicative of, and do not
+guarantee, future results.
+
+
+DATA AND WARRANTY. NO LIABILITY.
+
+Market data comes from free third-party sources (yfinance for prices and
+volume, the CFTC for COT and Open Interest). It is end-of-day rather
+than real-time, may be delayed, incomplete, or inaccurate, and is
+provided "as is" without warranty of any kind. Figures may differ from
+your broker's live quotes and contract specifications. The authors
+accept no liability for any loss or damage arising from use of this
+tool; you use it entirely at your own risk.
+
+ChartHorizon is not affiliated with, endorsed by, or sponsored by Yahoo,
+the CFTC, CME, ICE, or any exchange or data provider.
+
+
+LICENCE
+
+The program is free software, licensed under the GNU Affero General
+Public License, version 3 or later (AGPL-3.0-or-later). The full text
+ships beside the program as LICENSE.txt and is also available at
+https://www.gnu.org/licenses/agpl-3.0.html. The licence grants you
+rights and does not require your agreement in order to use the program;
+what you confirm here is that you have read the risk notice above.
+
+The ChartHorizon name and logo are reserved -- see TRADEMARK.md.
+
+Source code: https://github.com/ChartHorizon/charthorizon

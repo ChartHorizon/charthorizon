@@ -88,6 +88,10 @@ if (_cardKey === 'fx') {
     // dashboard only — card-mode branches above never reach here, so bot PNGs are
     // unchanged).
     if (typeof startRefreshPolling === 'function') startRefreshPolling();
+    // The risk notice, on the first launch of this installation and never again — asked
+    // once the splash has lifted, never over it (disclaimer.js). Only here, so the bot's
+    // card-mode exports never meet a dialog; it checks card mode itself as well.
+    if (typeof ensureRiskNotice === 'function') ensureRiskNotice();
 }
 
 // Responsive: redraw chart on resize (debounced)

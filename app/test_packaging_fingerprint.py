@@ -55,6 +55,7 @@ class FingerprintTests(unittest.TestCase):
         self._write("icons/icon.png", "not really a png")
         self._write("README.md", "how the recipes work\n")
         self._write("public/README.md", "the public readme\n")
+        self._write("public/RISK-NOTICE.txt", "please read this before installing\n")
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -89,6 +90,21 @@ class FingerprintTests(unittest.TestCase):
                   os.path.join(self.tree, "make_icons.py"))
         self.assertNotEqual(before, self._digest(),
                             "names are hashed too, or a rename would slip through")
+
+    def test_editing_the_installers_risk_notice_moves_the_digest(self):
+        # public/ is documentation with ONE exception: charthorizon.iss compiles
+        # RISK-NOTICE.txt in as the wizard's licence page and the spec ships it in the
+        # bundle, so its bytes are part of the built installer. A stale copy in the VM
+        # would otherwise put the previous notice in front of the user silently.
+        before = self._digest()
+        self._write("public/RISK-NOTICE.txt", "please read this, now with the 2027 wording\n")
+        self.assertNotEqual(before, self._digest())
+
+    def test_deleting_the_risk_notice_moves_the_digest(self):
+        before = self._digest()
+        os.unlink(os.path.join(self.tree, "public", "RISK-NOTICE.txt"))
+        self.assertNotEqual(before, self._digest(),
+                            "a listed extra that vanished must not silently drop out")
 
     def test_deleting_a_recipe_file_moves_the_digest(self):
         before = self._digest()

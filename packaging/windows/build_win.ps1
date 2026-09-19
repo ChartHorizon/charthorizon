@@ -38,6 +38,21 @@ if ($declared -ne $Version) {
     throw ("Version mismatch: app/app_version.py says '$declared', building '$Version'. " +
            "The source copy is stale -- re-run the robocopy from the Mac share first.")
 }
+# ---- Guard 3: the documents the installer conveys must be there -------------------
+# The installer compiles RISK-NOTICE.txt in as its licence page and drops both files next
+# to the .exe, and the spec puts both inside the bundle. LICENSE sits at the dashboard
+# ROOT -- one level above the two trees the VM mirrors -- so it needs a copy of its own:
+#     robocopy \\Mac\Home\charthorizon\dashboard C:\ch LICENSE
+# Unguarded, a missing LICENSE fails inside PyInstaller's datas minutes in, with an error
+# that names a path and not the fix.
+foreach ($doc in @("LICENSE", "packaging\public\RISK-NOTICE.txt")) {
+    if (-not (Test-Path $doc)) {
+        throw ("Missing $doc -- the installer conveys it with the binary. Copy it over " +
+               "(robocopy \\Mac\Home\charthorizon\dashboard C:\ch LICENSE for the licence, " +
+               "or re-run the packaging robocopy) and rebuild.")
+    }
+}
+
 Write-Host "Building ChartHorizon $Version  (interpreter: $target)"
 
 python packaging\build_icons.py
@@ -45,7 +60,7 @@ Assert-LastExitOk "build_icons.py"
 python -m PyInstaller packaging\charthorizon.spec --noconfirm --clean
 Assert-LastExitOk "PyInstaller"
 
-# ---- Guard 3: the frozen .exe must actually be x64 --------------------------------
+# ---- Guard 4: the frozen .exe must actually be x64 --------------------------------
 # Read the PE machine field off the PyInstaller output, NOT off the -Setup.exe: that
 # stub is Inno Setup's own and always reports 0x014C (i386) no matter what it wraps.
 $exe = "dist\ChartHorizon\ChartHorizon.exe"

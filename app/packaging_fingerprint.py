@@ -40,6 +40,15 @@ import os
 RECIPE_SUFFIXES = (".spec", ".py", ".ps1", ".iss", ".sh")
 SKIP_DIRS = frozenset({"icons", "public", "__pycache__"})
 
+# The one exception to "public/ is documentation": RISK-NOTICE.txt is COMPILED INTO the
+# Windows installer (charthorizon.iss, LicenseFile) and shipped inside the bundle
+# (charthorizon.spec), so its bytes decide what the installer puts in front of the user and
+# what the app installs beside itself. A stale copy in the VM would build an installer
+# showing the previous notice, quietly -- exactly the failure this digest exists to catch.
+# Relative to the packaging dir, posix-style; a path listed here that does not exist is
+# simply absent from the digest, so removing the file moves it too.
+RECIPE_EXTRA = ("public/RISK-NOTICE.txt",)
+
 FINGERPRINT_FILE = "packaging_fingerprint.txt"     # baked into the bundle root by the spec
 _DIGEST_CHARS = 12                                 # a fingerprint is read by eye, not by machine
 
@@ -55,6 +64,10 @@ def recipe_files(packaging_dir):
                 full = os.path.join(root, name)
                 rel = os.path.relpath(full, packaging_dir).replace(os.sep, "/")
                 found.append((rel, full))
+    for rel in RECIPE_EXTRA:
+        full = os.path.join(packaging_dir, *rel.split("/"))
+        if os.path.isfile(full):
+            found.append((rel, full))
     found.sort()
     return found
 

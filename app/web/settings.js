@@ -461,5 +461,9 @@ function renderSettingsAbout() {
     `<div class="set-hint">Latest release and release notes: ` +
       // Deliberately the bare link, not /from-dashboard: that one counts the logo clicks
       // in the banner and must not be diluted by a second entry point.
-      `<a class="set-about-link" href="https://chart-horizon.com/dashboard" target="_blank" rel="noopener">chart-horizon.com/dashboard</a></div>`;
+      `<a class="set-about-link" href="https://chart-horizon.com/dashboard" target="_blank" rel="noopener">chart-horizon.com/dashboard</a></div>` +
+    // The notice the first launch showed once, kept reachable afterwards — the installer's
+    // wizard page and RISK-NOTICE.txt beside the app are the other two copies of it.
+    `<div class="set-hint">Educational tool — not investment advice, and trading carries a ` +
+      `substantial risk of loss. <button type="button" class="set-notice-link" onclick="openRiskNotice()">Read the risk notice</button></div>`;
 }

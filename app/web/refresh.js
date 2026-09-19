@@ -204,6 +204,25 @@ async function applyRefreshedData(status) {
     if (typeof renderFuturesHeat === 'function') { try { renderFuturesHeat(); } catch (e) {} }
     if (typeof renderFxSection === 'function' && screenerData) { try { renderFxSection(); } catch (e) {} }
     if (typeof renderWatchlist === 'function') renderWatchlist();
+    // Re-point the live overlay at the board it now draws. A refresh IS a change of the drawn
+    // symbol — the continuous series' settled contract is re-stamped and the front month can
+    // roll — so by the rule in live.js it owes a restartLiveLayer(). Only some surfaces got one:
+    // the reload calls each tab's own load hook, and those restart the layer themselves
+    // (selectCurveContract, setBigChartContractMode, openSmt, applyScreenerView) — but the
+    // Futures tab's CONTINUOUS branch repaints through repaintOverviewThemed(), which only
+    // draws. Measured on 2026-09-19 across one refresh in that branch: zero startLiveLayer, zero
+    // ticks afterwards, and the repaint spliced the quote cached 90 s earlier. The candle then
+    // sat there until something else restarted the layer — a market click or a browser reload,
+    // which is how it was reported. Two halves of startLiveLayer() are what close it: it fetches
+    // a quote at once, and _liveForceRepaint makes that first tick repaint even when the price
+    // came back UNCHANGED (the plain `changed` guard skips it, and on a closed session the next
+    // unforced tick is 5 minutes out). It sits here rather than in that one branch so the
+    // guarantee is surface-independent: a tab added to _liveLayerPage() later gets it for free.
+    // The surfaces that DO restart themselves collapse into this one: two startLiveLayer() calls
+    // milliseconds apart, the second cancelling the first's still-pending kick — one fetch, one
+    // repaint, measured. Ordering matters and is why this is last: the layer must resolve its
+    // symbol from a chart already on screen (same note in bigchart.js selectBigChartMarket).
+    if (typeof restartLiveLayer === 'function') restartLiveLayer();
     // Remember what the page now shows so the heartbeat won't reload the same data again.
     // The status's own stamp, not the reloaded config's: if yet another run landed while this
     // reload was in progress, the next poll then still sees it as newer.
