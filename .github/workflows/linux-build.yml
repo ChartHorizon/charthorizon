@@ -1,0 +1,67 @@
+# Build the Linux AppImage — and nothing else.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT THE OLD RELEASE CI
+#   PyInstaller cannot cross-compile and there is no Linux machine here, so Linux is the
+#   one installer that cannot be built by hand. This workflow rents a Linux box for that
+#   single job. It is NOT the release.yml deleted on 2026-08-22:
+#     * workflow_dispatch only — no `v*` tag trigger,
+#     * the output is an Actions ARTIFACT, never a Release asset,
+#     * it holds no Cloudflare credentials.
+#   Hosting stays on R2 and the upload stays manual. Do not add a tag trigger or a
+#   release step here: that is the part both CLAUDE.md files say is not coming back.
+#
+# USAGE (from the monorepo, after bumping app/app_version.py)
+#   dashboard/tools/publish-dashboard.sh --tag v<ver>   # tag first — this builds FROM the tag
+#   gh workflow run linux-build.yml -R ChartHorizon/charthorizon -f version=<ver>
+#   gh run download -R ChartHorizon/charthorizon -n ChartHorizon-<ver>-linux -D <dir>
+#   ops/website-installers.sh <ver> --from-dir <dir> --only linux
+#   ...then set dl_linux/dl_size_linux in website/dashboard.html, in that order.
+name: linux-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version WITHOUT the leading v, e.g. 1.2.9"
+        required: true
+        type: string
+
+jobs:
+  appimage:
+    # NOT ubuntu-latest. An AppImage links against the runner's glibc and refuses to
+    # start on anything older, so this line sets the oldest Linux the build supports:
+    # 22.04 is glibc 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+), while 24.04 would be
+    # 2.39 and lock out every distro more than a release or two old.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Build from the published tag, not from the branch. /dashboard/ offers this
+          # mirror as the AGPL source these binaries were frozen from, so the binary and
+          # that source have to be the same tree. Tag before dispatching.
+          ref: v${{ inputs.version }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      # There is no requirements file. The app's third-party imports are yfinance,
+      # curl_cffi, pypdf and dateutil (pandas, numpy and requests arrive as their
+      # dependencies, spelled out here so a change upstream cannot silently drop one).
+      # pillow is build-only — packaging/build_icons.py needs it.
+      - name: Install build deps
+        run: pip install pyinstaller pillow yfinance pandas numpy curl_cffi pypdf python-dateutil
+
+      # No "write a version file" step: the number lives in app/app_version.py and is
+      # already committed. The deleted release.yml wrote app/version.py here, a file
+      # nothing has ever read — do not bring that back.
+      - name: Build
+        run: bash packaging/linux/build_appimage.sh "${{ inputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartHorizon-${{ inputs.version }}-linux
+          path: dist/ChartHorizon-${{ inputs.version }}-x86_64.AppImage
+          # The whole point of the run. A silent empty artifact would be discovered at
+          # the upload step, after the runner is gone.
+          if-no-files-found: error
