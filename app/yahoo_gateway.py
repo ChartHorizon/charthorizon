@@ -243,8 +243,41 @@ def _quote_day(row):
     return datetime.datetime.utcfromtimestamp(t + offset).strftime("%Y-%m-%d")
 
 
+def round_price(v):
+    """Round a price with precision scaled to its magnitude: the ONE rounding rule for every
+    price this app stores, serves or draws. At or above 1 it keeps 4 decimals; below that it
+    keeps more, so a tiny price is not collapsed. The Japanese Yen future trades near 0.0065,
+    and a flat 4 decimals turned every yen bar into open = high = low = close — a staircase on
+    every 6J card and a single-price live candle.
+
+    It lives here rather than in series_utils because start.py imports this module before the
+    launcher has installed dateutil, which series_utils needs. series_utils._round_price
+    delegates to it."""
+    av = abs(v)
+    if av >= 1:
+        nd = 4
+    elif av >= 0.01:
+        nd = 6
+    else:
+        nd = 8
+    return round(v, nd)
+
+
 def _num(v):
-    return round(float(v), 4) if isinstance(v, (int, float)) else None
+    return round_price(float(v)) if isinstance(v, (int, float)) else None
+
+
+def consistent_open(open_, high, low):
+    """A live bar's open, or None when it lies outside that bar's own high/low.
+
+    Such an open did not trade in that session. Yahoo serves one on a continuous symbol's
+    roll day: SB=F on 2026-09-10 carried SBV26's open (18.37) on SBH27's high/low
+    (19.64/19.30). None lets the overlay fall back to the last price instead of stretching
+    the candle down to a price that belongs to another contract. Without both edges there
+    is nothing to judge it by, so the open stands."""
+    if open_ is None or high is None or low is None:
+        return open_
+    return open_ if low <= open_ <= high else None
 
 
 class YahooGateway:
@@ -438,11 +471,13 @@ class YahooGateway:
                 day = _quote_day(row)
                 if not symbol or price is None or not day:
                     continue
+                high = _num(row.get("regularMarketDayHigh"))
+                low = _num(row.get("regularMarketDayLow"))
                 out[symbol] = {
                     "day": day, "price": price,
-                    "open": _num(row.get("regularMarketOpen")),
-                    "high": _num(row.get("regularMarketDayHigh")),
-                    "low": _num(row.get("regularMarketDayLow")),
+                    "open": consistent_open(_num(row.get("regularMarketOpen")), high, low),
+                    "high": high,
+                    "low": low,
                     "state": row.get("marketState"),
                 }
         return out

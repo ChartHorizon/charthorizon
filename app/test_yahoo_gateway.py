@@ -500,6 +500,49 @@ class BatchQuoteTest(unittest.TestCase):
         gw, _ = self._gw(raw=raw)
         self.assertEqual(gw.quotes(["DEAD.CME"]), {})
 
+    def test_a_quote_below_one_keeps_its_precision(self):
+        # The yen near 0.0065: a flat 4 decimals made every live candle a single price.
+        q = self._quote(symbol="6JZ26.CME", regularMarketPrice=0.006506,
+                        regularMarketOpen=0.006475, regularMarketDayHigh=0.006527,
+                        regularMarketDayLow=0.006468)
+        self.assertEqual((q["price"], q["open"], q["high"], q["low"]),
+                         (0.006506, 0.006475, 0.006527, 0.006468))
+
+    def test_one_rounding_rule_for_the_gateway_and_the_generator(self):
+        # Defined once, in this stdlib-only module: start.py imports it before the launcher
+        # has installed dateutil, so it cannot import series_utils. The generator delegates.
+        import series_utils
+        for v in (0.006506123, 0.65123412, 19.639999, 4680.6, -0.0000321):
+            self.assertEqual(series_utils._round_price(v), yg.round_price(v))
+        self.assertEqual(yg.round_price(19.639999), 19.64)
+        self.assertEqual(yg.round_price(0.65123412), 0.651234)
+        self.assertEqual(yg.round_price(0.006506123), 0.00650612)
+
+    def _quote(self, **row):
+        row = dict({"symbol": "SBH27.NYB", "regularMarketTime": 1787345998,
+                    "gmtOffSetMilliseconds": -14400000, "marketState": "REGULAR"}, **row)
+        gw, _ = self._gw(raw={"quoteResponse": {"result": [row]}})
+        return gw.quotes([row["symbol"]])[row["symbol"]]
+
+    def test_an_open_outside_the_days_own_range_is_dropped(self):
+        # An open below the day's own low never traded that day. SB=F's roll day produced
+        # exactly this (the open still belonged to the expiring month); the batch path holds
+        # the same line as the chart path, and the overlay falls back to the last price.
+        q = self._quote(regularMarketPrice=19.61, regularMarketOpen=18.37,
+                        regularMarketDayHigh=19.64, regularMarketDayLow=19.3)
+        self.assertIsNone(q["open"])
+        self.assertEqual((q["high"], q["low"], q["price"]), (19.64, 19.3, 19.61))
+
+    def test_an_open_on_the_edge_of_the_range_is_kept(self):
+        q = self._quote(regularMarketPrice=19.61, regularMarketOpen=19.3,
+                        regularMarketDayHigh=19.64, regularMarketDayLow=19.3)
+        self.assertEqual(q["open"], 19.3)
+
+    def test_an_open_with_no_range_to_judge_it_by_is_kept(self):
+        q = self._quote(regularMarketPrice=19.61, regularMarketOpen=18.37)
+        self.assertEqual(q["open"], 18.37)
+        self.assertIsNone(q["low"])
+
 
 if __name__ == "__main__":
     unittest.main()

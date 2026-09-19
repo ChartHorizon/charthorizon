@@ -13,6 +13,8 @@ import urllib.request
 import urllib.parse
 from datetime import date, datetime, time, timedelta
 from dateutil.relativedelta import relativedelta
+# The one price-rounding rule (see _round_price). yahoo_gateway imports only the stdlib: no cycle.
+from yahoo_gateway import round_price
 
 try:
     from zoneinfo import ZoneInfo
@@ -230,15 +232,12 @@ def _round_price(v):
     keep 4 decimals (unchanged); smaller instruments get more so tiny prices aren't
     collapsed. The Japanese Yen future trades ~0.0063 — rounding it to 4 decimals
     flattened every candle (open==high==low==close), which `_history_row_looks_tradable`
-    then dropped as non-tradable, leaving the JPY calendar spread empty."""
-    av = abs(v)
-    if av >= 1:
-        nd = 4
-    elif av >= 0.01:
-        nd = 6
-    else:
-        nd = 8
-    return round(v, nd)
+    then dropped as non-tradable, leaving the JPY calendar spread empty.
+
+    The rule itself is `yahoo_gateway.round_price`, shared with the server's contract-history
+    and live-quote paths. Until 2026-09-12 those kept their own flat 4 decimals and drew the
+    flattened yen this function had long stopped writing."""
+    return round_price(v)
 
 
 def _median(values):

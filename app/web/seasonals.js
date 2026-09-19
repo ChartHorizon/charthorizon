@@ -12,17 +12,7 @@ function seasonalMonthDay(dayIndex) {
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' });
 }
 
-function dayOfYearNoLeap(dateStr) {
-  const [year, month, day] = String(dateStr).slice(0, 10).split('-').map(Number);
-  if (!year || !month || !day || (month === 2 && day === 29)) return null;
-  const t = Date.UTC(2021, month - 1, day);
-  const start = Date.UTC(2021, 0, 1);
-  return Math.round((t - start) / 86400000);
-}
-
-function seasonalYear(dateStr) {
-  return Number(String(dateStr).slice(0, 4));
-}
+// dayOfYearNoLeap / seasonalYear live in core.js — the OI seasonal overlay reads the same grid.
 
 function localIsoDate(d = new Date()) {
   const y = d.getFullYear();
@@ -39,10 +29,15 @@ function currentSeasonalMarker() {
   return { date: iso, dayIndex, label: seasonalMonthDay(dayIndex) };
 }
 
+// A year with a hole longer than this between two of its bars is not a seasonal year: the hole is
+// flat-filled, so it draws a season that never traded (platinum 2006-2007: 63-day holes).
+// Mirrors SEASONAL_MAX_GAP_DAYS in screener.py.
+const SEASONAL_MAX_GAP_DAYS = 21;
+
 function buildSeasonalCurve(history, yearsRequested) {
   let rows = (history || [])
     .filter(row => row && row.date && Number.isFinite(Number(row.close)))
-    .map(row => ({ date: String(row.date).slice(0, 10), close: Number(row.close) }))
+    .map(row => ({ date: String(row.date).slice(0, 10), close: Number(row.close), open: Number(row.open), roll: !!row.roll }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
   if (!rows.length) return null;
 
@@ -57,6 +52,21 @@ function buildSeasonalCurve(history, yearsRequested) {
     const tooHigh = row.close > 2 * prev.close && row.close > 2 * next.close;
     return !(tooLow || tooHigh);
   });
+
+  // Roll-adjusted level. The generator marks the bars where the native =F switched contract
+  // (mark_seasonal_roll_days in screener.py); on those the overnight gap is the spread between
+  // two contracts, not the market, so the factor takes it back out and the bar moves by its own
+  // session (close / open, flat without an open). Unmarked history keeps its raw closes exactly.
+  // Same rule as _roll_adjusted_levels, so this chart draws the curves the screener votes on.
+  let factor = 1, prevClose = null;
+  rows = rows.filter(row => row.close > 0).map(row => {
+    if (row.roll && prevClose !== null) {
+      factor *= (Number.isFinite(row.open) && row.open > 0) ? prevClose / row.open : prevClose / row.close;
+    }
+    prevClose = row.close;
+    return { date: row.date, close: row.close * factor };
+  });
+  if (!rows.length) return null;
 
   const last = rows[rows.length - 1].date;
   const lastYear = seasonalYear(last);
@@ -77,7 +87,11 @@ function buildSeasonalCurve(history, yearsRequested) {
       const yrRows = byYear.get(year) || [];
       if (yrRows.length < 120) return false;
       const first = yrRows[0]?.date || '';
-      return Number(first.slice(5, 7)) <= 3;
+      if (Number(first.slice(5, 7)) > 3) return false;
+      for (let i = 1; i < yrRows.length; i++) {
+        if ((Date.parse(yrRows[i].date) - Date.parse(yrRows[i - 1].date)) / 86400000 > SEASONAL_MAX_GAP_DAYS) return false;
+      }
+      return true;
     });
   if (!selectedYears.length) return null;
 
@@ -173,14 +187,20 @@ function renderSeasonalChart(cfg, history) {
   months.forEach(([label, idx]) => {
     const x = xAt(idx);
     grid += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="#9aa6b5" stroke-width="1.1" stroke-dasharray="3,4" opacity="0.88"/>`;
-    grid += `<text x="${x.toFixed(1)}" y="${H-16}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${label}</text>`;
+    grid += `<text x="${x.toFixed(1)}" y="${H-16}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" text-anchor="middle">${label}</text>`;
   });
-  const yTicks = [yMin, 100, yMax];
-  yTicks.forEach(val => {
-    const y = yAt(val);
-    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="${val === 100 ? CHART_THEME.axis : CHART_THEME.grid}" stroke-dasharray="${val === 100 ? '4,3' : ''}"/>`;
-    grid += `<text x="${W-padR+8}" y="${(y+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(val-100).toFixed(1)}%</text>`;
-  });
+  // Round percentage steps (1 / 2 / 2.5 / 5 x 10^k) with 0% always among them. The axis used to
+  // label only its two extremes and 0%, which left the size of every move to guesswork.
+  const pctLo = yMin - 100, pctHi = yMax - 100;
+  const rawStep = (pctHi - pctLo) / 8;   // 4-8 labels whatever the range
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= rawStep);
+  const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+  for (let i = Math.ceil(pctLo / step); i * step <= pctHi + 1e-9; i++) {
+    const pct = i * step, y = yAt(100 + pct);
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="${i === 0 ? CHART_THEME.axis : CHART_THEME.grid}" stroke-dasharray="${i === 0 ? '4,3' : ''}"/>`;
+    grid += `<text x="${W-padR+8}" y="${(y+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${i === 0 ? '0' : (pct > 0 ? '+' : '') + pct.toFixed(decimals)}%</text>`;
+  }
 
   const paths = curves.map(curve => {
     let d = '';
@@ -207,7 +227,7 @@ function renderSeasonalChart(cfg, history) {
     currentDateSvg = `<g class="seasonal-current-date"><title>${esc(title)}</title>
       <line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(H-padB).toFixed(1)}" stroke="${markerStroke}" stroke-width="1" stroke-dasharray="3,5" opacity="${markerOpacity}"/>
       <rect x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}" width="${labelW.toFixed(1)}" height="14" rx="3" fill="#fde68a" stroke="#f59e0b" opacity="1"/>
-      <text x="${(labelX + labelW / 2).toFixed(1)}" y="${(labelY + 10).toFixed(1)}" font-size="8.5" fill="#334155" font-family="Geist" font-weight="600" text-anchor="middle">${esc(label)}</text>
+      <text x="${(labelX + labelW / 2).toFixed(1)}" y="${(labelY + 10).toFixed(1)}" font-size="8.5" fill="#334155" font-family="Geist, system-ui, sans-serif" font-weight="600" text-anchor="middle">${esc(label)}</text>
     </g>`;
   }
   const crosshairCurves = curves.map(curve => ({
@@ -226,7 +246,7 @@ function renderSeasonalChart(cfg, history) {
     const label = `${curve.labelKey || curve.key} (${curve.data.yearsUsed} yrs · ${curve.data.startYear}-${curve.data.endYear})`;
     const item = `<g transform="translate(${lx},${padT - 8})">
       <line x1="0" y1="0" x2="18" y2="0" stroke="${curve.color}" stroke-width="${curve.stroke}"/>
-      <text x="24" y="3" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${esc(label)}</text>
+      <text x="24" y="3" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${esc(label)}</text>
     </g>`;
     lx += 36 + label.length * 6.2;
     return item;
@@ -236,7 +256,8 @@ function renderSeasonalChart(cfg, history) {
   const dataEnd = cleanHistory[cleanHistory.length - 1].date;
   const meta = INDEX[seasonalState.key] || {};
   if (title) title.textContent = `${meta.display_name || cfg.display_name} Seasonality`;
-  if (metaEl) metaEl.textContent = `Data ${dataStart} to ${dataEnd} · yfinance continuous history · indexed to 100`;
+  const rollAdjusted = cleanHistory.some(row => row.roll);
+  if (metaEl) metaEl.textContent = `Data ${dataStart} to ${dataEnd} · yfinance continuous history${rollAdjusted ? ' · contract-roll gaps removed' : ''} · % from the year's first session`;
   document.getElementById('seasonalsTitle').textContent = meta.display_name || 'Seasonals';
 
   body.innerHTML = `<div class="seasonals-chart-wrap">
@@ -246,7 +267,7 @@ function renderSeasonalChart(cfg, history) {
       ${legend}
       ${paths}
       ${currentDateSvg}
-      <text x="${padL}" y="${H-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">Seasonal average performance from first trading day of year</text>
+      <text x="${padL}" y="${H-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">Seasonal average performance from first trading day of year</text>
     </svg>
   </div>`;
   bindSeasonalsCrosshair(body.querySelector('.seasonals-chart-wrap'), {

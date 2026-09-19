@@ -202,6 +202,23 @@ def _write_atomic(path, write_body):
         raise
 
 
+def _read_three_three_log(path):
+    """The 3/3 period log as it stands on disk, or {} when it is absent or unreadable.
+
+    It is MERGED into rather than rebuilt (see screener.merge_three_three_periods): the
+    reconstruction reaches only as far back as a market's calendar-spread series, which is
+    trimmed on every refresh, so anything older lives on in this file alone. It is also
+    rewritten on every refresh, which puts it in the same crash window as every other
+    payload here — a truncated log must degrade to "no history" and let the refresh
+    rebuild what it can, never take the refresh down with it."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return log if isinstance(log, dict) else {}
+
+
 def _write_refresh_progress(**fields):
     """Best-effort: merge fields into ff_data/refresh_progress.json (atomic write).
     Never raises — progress reporting must never break a refresh."""
@@ -246,6 +263,15 @@ def _gather_one_market(key, cfg, cot_all, count):
     continuous_contract = build_continuous_contract(
         cfg, chart_symbol, chart_history, total_volume_series=total_volume_series)
     continuous_contract["seasonal_history"] = seasonal_history
+    # Which contract each trailing bar of the native =F series settled on: the live overlay's
+    # source for this series. Private — generate_html turns it into `settled_contract` for the
+    # bar the written series actually ends on. A failure costs this market its live candle on
+    # the continuous chart, never the refresh.
+    try:
+        continuous_contract["_settled_by_date"] = resolve_settled_contracts(
+            cfg, chart_history, contracts)
+    except Exception as exc:
+        print(f"   ⚠  {cfg['display_name']}: settled contract not resolved ({exc})")
     cot_series = cot_all.get(cfg.get("cftc_code"), [])
     return key, {
         "config": cfg,
@@ -339,6 +365,30 @@ def _previous_fx_rates(config_path):
         return json.loads(raw).get("fxRates") or None
     except Exception:
         return None
+
+
+def _data_as_of_label(board_settled, dataset):
+    """The date `config.js` says the data is "as of" (`genDate`, echoed as `latest_eod`).
+
+    It used to be `date.today()`: the LOCAL calendar day the run finished, which is not a
+    date of the data at all. A refresh that ended after midnight in Europe labelled Friday's
+    session "Sep 12", a Saturday, in Settings and on every FX card. It is the board's settled
+    session now, or without a board vote the newest bar actually written. The format is
+    unchanged, so nothing that reads it has to change.
+    """
+    day = board_settled
+    if day is None:
+        for entry in (dataset or {}).values():
+            history = (entry.get("continuous_contract") or {}).get("history") or []
+            if not history:
+                continue
+            try:
+                last = date.fromisoformat(str(history[-1].get("date") or "")[:10])
+            except ValueError:
+                continue
+            if day is None or last > day:
+                day = last
+    return (day or date.today()).strftime("%b %d, %Y")
 
 
 def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_data"):
@@ -436,6 +486,14 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         # The board cap then enforces the same settled date across illiquid markets too.
         continuous["history"] = _cap_series_to_date(
             _drop_unsettled_tail(price_choice["series"]), board_settled)
+        # The contract the written series' last bar settled on — what the live overlay splices
+        # today's candle from (see resolve_settled_contracts). Looked up by the day the series
+        # ends on, never carried over to another day.
+        settled_contract = _settled_contract_for_history(
+            continuous["history"], continuous.pop("_settled_by_date", None),
+            previous_continuous.get("settled_contract"))
+        if settled_contract:
+            continuous["settled_contract"] = settled_contract
 
         fresh_seasonal_history = list(fresh_continuous.get("seasonal_history") or [])
         previous_seasonal_history = list(previous_continuous.get("seasonal_history") or [])
@@ -472,6 +530,16 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
                 or continuous.get("history")
                 or []
             )
+        # Mark the bars where the native =F switched contract, so every seasonal curve — screener,
+        # 3/3 log, Seasonals tab, content bot — takes the same roll gaps out (mark_seasonal_roll_days).
+        # Recomputed on every refresh, since the history itself is re-fetched once a year. Copies:
+        # the price history this may fall back to is never touched. A failure leaves the history
+        # unmarked, i.e. raw closes as before — never a lost refresh.
+        try:
+            continuous["seasonal_history"] = mark_seasonal_roll_days(
+                key, cfg, continuous.get("seasonal_history") or [])
+        except Exception as exc:
+            print(f"   ⚠  {cfg['display_name']}: seasonal roll days not marked ({exc})")
         existing_volume_series = previous_continuous.get("total_volume_series") or []
         fresh_volume_series = list(fresh_continuous.get("total_volume_series") or [])
         fresh_volume_series.extend(_cached_contract_volume_series(data_dir, cfg))
@@ -502,6 +570,7 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
                 "has_5y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 5,
                 "has_15y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 15,
                 "has_40y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 40,
+                "roll_adjusted_bars": sum(1 for r in continuous.get("seasonal_history", []) if r.get("roll")),
             },
             "volume": {
                 "health": _series_health(continuous.get("total_volume_series", []), kind="volume"),
@@ -555,6 +624,31 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     screener_rows = build_screener_summary(by_cat)
     _write_atomic(screener_path, lambda f: json.dump(screener_rows, f, ensure_ascii=False))
     print(f"   ✓ {screener_path}  ({len(screener_rows)} markets · screener signals)")
+
+    # The 3/3 period log behind the Weekly Outlook's shaded band and the content bot's
+    # card-mode markers. Written HERE, next to the screener rows it is scored against,
+    # because it used to be written by the bot alone: an on-screen feature then hung on a
+    # semi-automatic Telegram run, and markets that turned 3/3 afterwards drew no band at
+    # all while ones that had fallen to 2/3 kept theirs. Merged into the stored file, not
+    # rebuilt — see _read_three_three_log.
+    #
+    # Wrapped defensively for the same reason as the SQLite mirror below, and one more
+    # besides: this runs BEFORE config.js is written, so an exception here would end the
+    # refresh with every category JSON already replaced and no new config.js — the
+    # half-updated state _write_atomic exists to prevent, reached from another road again.
+    # A band that stops advancing is a cosmetic loss and self-healing: _write_atomic leaves
+    # the stored log untouched on a failure, and the next refresh merges into it as before.
+    try:
+        three_three_path = os.path.join(data_dir, "three_three_log.json")
+        three_three_log = build_three_three_log(
+            by_cat, screener_rows, previous=_read_three_three_log(three_three_path))
+        _write_atomic(three_three_path,
+                      lambda f: json.dump(three_three_log, f, ensure_ascii=False, indent=2))
+        active = sum(1 for e in three_three_log.values() if e.get("active"))
+        print(f"   ✓ {three_three_path}  ({len(three_three_log)} markets · {active} active 3/3)")
+    except Exception as exc:
+        print(f"   ⚠  3/3 period log skipped ({exc}) — the stored log is kept; the "
+              f"Weekly Outlook band may lag until the next refresh")
 
     # 2a) Mirror everything into the durable SQLite EoD archive. The dashboard
     #     keeps reading the JSON above; the database is the long-term store and
@@ -642,7 +736,8 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     # Stable default start instrument (independent of sidebar order): prefer WTI,
     # else fall back to the first available market.
     first_key = "wti_crude" if "wti_crude" in index else next(iter(index))
-    gen_date = date.today().strftime("%b %d, %Y")
+    # What the data is "as of" — the settled session, not the day the run happened to finish.
+    gen_date = _data_as_of_label(board_settled, dataset)
     data_version = datetime.now().strftime("%Y%m%d%H%M%S")
 
     config_path = os.path.join(data_dir, "config.js")
@@ -665,8 +760,10 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         "window.__CONFIG__ = " + json.dumps(config, ensure_ascii=False) + ";\n"))
     print(f"\n✓ Frontend config written: {config_path}")
     print(f"   (Static frontend: app/index.html + app/web/; data in ./{data_dir}/)")
+    # data_version rides along so an open page can tell THIS run from an earlier one over the
+    # same data (web/refresh.js): gen_date names only the settled session.
     _write_refresh_progress(state="done", done=len(COMMODITIES), current=None,
-                            category=None, latest_eod=gen_date)
+                            category=None, latest_eod=gen_date, data_version=data_version)
     return config_path
 
 

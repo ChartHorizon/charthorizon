@@ -160,7 +160,7 @@ function renderSmtControls() {
   const dtog = document.getElementById('smtDrawToggle');
   if (dtog) {
     dtog.classList.toggle('active', smtDraw);
-    dtog.textContent = smtDraw ? '✏ Trendline: On' : '✏ Trendline: Off';
+    dtog.innerHTML = lineIcon('pencil') + (smtDraw ? 'Trendline: On' : 'Trendline: Off');
   }
 }
 
@@ -237,8 +237,9 @@ async function smtLoadFrontContractBars(cfg, key) {
   return getContinuousContract(cfg).history || [];
 }
 
-// The yfinance symbol currently shown for `key` in Macro Shift: the front contract in
-// front-month mode (mirrors smtLoadFrontContractBars), else the native continuous.
+// The live symbol for `key` in Macro Shift: the front contract in front-month mode (mirrors
+// smtLoadFrontContractBars), else the contract the native continuous settles on — never `=F`
+// itself, whose still-forming bar comes from another contract (continuousLiveSymbol, chart.js).
 function smtActiveSymbol(key) {
   const cfg = smtCfg(key);
   if (!cfg) return null;
@@ -246,8 +247,7 @@ function smtActiveSymbol(key) {
     const front = smtFrontContract(cfg);
     if (front && front.yf_symbol) return front.yf_symbol;
   }
-  const cont = getContinuousContract(cfg);
-  return cont.yf_symbol || cont.tv_symbol || null;
+  return continuousLiveSymbol(cfg);
 }
 
 // Display-only live overlay for one SMT chart's bars (copy; never the persisted series;
@@ -256,10 +256,8 @@ function smtInjectLivePoint(bars, key) {
   if (!bars || !bars.length) return bars;
   if (document.body.classList.contains('card-mode')) return bars;
   if (smtState.interval === 'weekly') return bars;
-  if (typeof liveQuotes !== 'object' || !liveQuotes) return bars;
-  const sym = smtActiveSymbol(key);
-  const lp = sym && liveQuotes[sym];
-  if (!lp || !Number.isFinite(lp.price) || !lp.day) return bars;
+  const lp = liveQuoteFor(smtActiveSymbol(key), bars);   // null for a stale quote (chart.js)
+  if (!lp) return bars;
   const out = bars.slice();
   // Real live candle from the still-forming bar's intraday OHLC (shared with chart.js);
   // falls back to a flat point when Yahoo omits open/high/low.
@@ -449,7 +447,7 @@ function renderSmtChart(bars, opts) {
         `<line class="smt-price-line" x1="${padL}" y1="${cy.toFixed(1)}" x2="${tagX.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="5,4"/>` +
         `<g class="smt-price-line">` +
         `<rect x="${tagX.toFixed(1)}" y="${(tagY - 8).toFixed(1)}" width="${tagW.toFixed(1)}" height="16" rx="2.5" fill="${CHART_THEME.bg}" stroke="${CHART_THEME.axis}" stroke-width="1"/>` +
-        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist">${txt}</text>` +
+        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${txt}</text>` +
         `</g>`;
     }
   }
@@ -466,7 +464,7 @@ function renderSmtChart(bars, opts) {
     // Drop the label when it collides with the current-price tag at the same height.
     // Right-aligned (text-anchor=end) so long numbers are not clipped at the border.
     if (!(curY != null && Math.abs(+y - curY) < 9))
-      grid += `<text x="${(W - 4)}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${smtFmtPrice(lv)}</text>`;
+      grid += `<text x="${(W - 4)}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${smtFmtPrice(lv)}</text>`;
   }
 
   let dlabels = '';
@@ -474,8 +472,11 @@ function renderSmtChart(bars, opts) {
     const frac = (ax.n - 1) * (g / 5);
     const x = smtXAtFrac(ax, frac);
     const t = smtTimeAtFrac(ax, frac);
-    const iso = isNaN(t) ? '' : new Date(t).toISOString().slice(2, 10);
-    dlabels += `<text x="${x.toFixed(1)}" y="${H - 6}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${iso}</text>`;
+    const iso = isNaN(t) ? '' : fmtAxisDate(new Date(t).toISOString().slice(0, 10));
+    // The first label sits on the plot's left edge: centred there, its first characters fell outside
+    // the SVG ("25-09-15" read "5-09-15"), so it starts at the edge instead.
+    const anchor = g === 0 ? 'start' : 'middle';
+    dlabels += `<text x="${x.toFixed(1)}" y="${H - 6}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" text-anchor="${anchor}">${iso}</text>`;
   }
 
   // Quarter boundaries (Jan/Apr/Jul/Oct 1, UTC) as subtle vertical separators + labels,
@@ -490,7 +491,7 @@ function renderSmtChart(bars, opts) {
     while (qt <= d1) {
       const x = smtXAtTime(ax, qt), qn = Math.floor(qm / 3) + 1;
       qLines += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(padT + priceH).toFixed(1)}" stroke="${CHART_THEME.grid}" stroke-width="1" opacity="0.85"/>`;
-      qLabels += `<text x="${(x + 3).toFixed(1)}" y="${(padT + 11)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" opacity="0.55">Q${qn} '${String(qy).slice(2)}</text>`;
+      qLabels += `<text x="${(x + 3).toFixed(1)}" y="${(padT + 11)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" opacity="0.55">Q${qn} '${String(qy).slice(2)}</text>`;
       qm += 3; if (qm > 9) { qm -= 12; qy++; } qt = Date.UTC(qy, qm, 1);
     }
   }
@@ -512,7 +513,7 @@ function renderSmtChart(bars, opts) {
     + `<line class="smt-cross-h" x1="${padL}" y1="0" x2="${(W - padR).toFixed(1)}" y2="0" stroke="#64748b" stroke-width="1" stroke-dasharray="2,4" opacity="0" pointer-events="none"/>`
     + `<g class="smt-cross-date" opacity="0" pointer-events="none">`
     + `<rect class="smt-cross-date-bg" x="0" y="${(H - 15).toFixed(1)}" width="66" height="13" rx="3" fill="#0f172a"/>`
-    + `<text class="smt-cross-date-tx" x="0" y="${(H - 5).toFixed(1)}" font-size="9.5" font-family="Geist" fill="#ffffff" text-anchor="middle"></text>`
+    + `<text class="smt-cross-date-tx" x="0" y="${(H - 5).toFixed(1)}" font-size="9.5" font-family="Geist, system-ui, sans-serif" fill="#ffffff" text-anchor="middle"></text>`
     + `</g>`
     + `</svg>`;
 }
@@ -570,7 +571,7 @@ function bindSmtCrosshair() {
       if (lbl && smtAxis) {
         const xv = fracX * w;
         let iso = '';
-        try { iso = new Date(smtTimeAtX(smtAxis, xv)).toISOString().slice(0, 10); } catch (e) {}
+        try { iso = fmtAxisDate(new Date(smtTimeAtX(smtAxis, xv)).toISOString().slice(0, 10)); } catch (e) {}
         const tx = lbl.querySelector('.smt-cross-date-tx');
         const bg = lbl.querySelector('.smt-cross-date-bg');
         const lw = 66;
@@ -808,20 +809,22 @@ function smtExportName() {
 function setSmtBtnStatus(btnId, text, restore) {
   const btn = document.getElementById(btnId);
   if (!btn) return;
-  btn.textContent = text;
+  // The label is a span beside the icon (index.html): writing the button's own text wiped the icon.
+  const label = document.getElementById(btnId + 'Label') || btn;
+  label.textContent = text;
   btn.classList.add('copied');
-  setTimeout(() => { btn.textContent = restore; btn.classList.remove('copied'); }, 2400);
+  setTimeout(() => { label.textContent = restore; btn.classList.remove('copied'); }, 2400);
 }
 
 async function downloadSmtCharts() {
   try { triggerDownload(await smtPngBlob(), smtExportName()); }
-  catch (e) { console.error('Macro Shift export failed:', e); alert('Export failed: ' + e.message); }
+  catch (e) { console.error('Macro Shift export failed:', e); appNotice('Macro Shift export failed: ' + e.message); }
 }
 
 async function shareSmtCharts() {
   let blob;
   try { blob = await smtPngBlob(); }
-  catch (e) { console.error('Macro Shift share failed:', e); alert('Export failed: ' + e.message); return; }
+  catch (e) { console.error('Macro Shift share failed:', e); appNotice('Macro Shift export failed: ' + e.message); return; }
   const file = new File([blob], smtExportName(), { type: 'image/png' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file] }); return; }
@@ -851,8 +854,8 @@ async function shareSmtToX() {
     catch (e) {}
   }
   const win = window.open(composeUrl, '_blank');
-  if (!win) { setSmtBtnStatus('smtXBtn', 'Allow popups', 'X'); return; }
-  setSmtBtnStatus('smtXBtn', copied ? 'Copied · paste in X' : 'Opened X', 'X');
+  if (!win) { setSmtBtnStatus('smtXBtn', 'Allow popups', ''); return; }
+  setSmtBtnStatus('smtXBtn', copied ? 'Copied · paste in X' : 'Opened X', '');
 }
 
 // ── Cross-asset correlation calculator (Tools tab): Pearson correlation of daily

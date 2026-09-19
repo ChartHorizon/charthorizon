@@ -13,7 +13,7 @@
 // the engine reads the right state without threading a param through 500 lines.
 
 let bigChartState = { key: null, tf: 'd1', interval: 'daily', range: '5y',
-  showVolume: false, showOi: true, showCot: true, cotHedging: false, showSpread: false, showDividers: false, zoomAnchorRight: true,
+  showVolume: false, showOi: true, showCot: true, showOiSeasonal: false, cotHedging: false, showSpread: false, showDividers: false, zoomAnchorRight: true,
   // Active technical indicators (global, persisted): [{ id, type, params, color, visible }].
   // Loaded from localStorage in openBigChart so it survives reload and applies to every market.
   indicators: [],
@@ -31,6 +31,12 @@ let _bigChartInited = false;
 // Hedging Program is gated to 6m/12m, like the Futures tab). D1 over 20Y would be ~5000 candles in a
 // single SVG (heavy and unreadable), so daily caps at 5Y; the higher timeframes get the full history
 // (quarterly over 20Y ≈ 80 candles, monthly ≈ 240 — both comfortable).
+// Front Month on D1 opens on its last ~6 months of sessions. A contract's history reaches back to its
+// listing and most of it is thin: in the 2026-09-12 contract-history cache (40 contracts) volume first
+// reached a tenth of its own peak only 6 to 434 sessions before the end, 73 at the median, while D1 loads
+// up to 5 years (CLV26: 1064 candles, the first three years dotted strokes). Only the opening window
+// changes; the wheel zooms out and a double-click shows the whole history.
+const BIGCHART_FRONT_MONTH_BARS = 126;
 const BIGCHART_TFS = [
   ['6m', 'daily', '6M', '6m', true],
   ['12m', 'daily', '12M', '12m', true],
@@ -111,6 +117,8 @@ function renderBigChartIndicatorBar() {
         cftcTitle || 'Show or hide the Open Interest pane (CFTC weekly)', !oiCotAvail) +
     box('showCot', 'COT', bigChartState.showCot && oiCotAvail,
         cftcTitle || 'Show or hide the COT net-position pane (CFTC weekly)', !oiCotAvail) +
+    box('showOiSeasonal', 'OI Seasonal', bigChartState.showOiSeasonal && oiCotAvail,
+        cftcTitle || 'Overlay the 5-year seasonal average of Open Interest on the OI pane (re-based each January)', !oiCotAvail) +
     box('hedge6m', 'COT Hedge 6M', bigChartState.cotHedging && bigChartState.range === '6m',
         'COT Hedging Program over the trailing 6-month window (switches to 6M; green above midpoint, red below)') +
     box('hedge12m', 'COT Hedge 12M', bigChartState.cotHedging && bigChartState.range === '12m',
@@ -141,6 +149,10 @@ function toggleBigChartIndicator(key, on) {
     }
     return;
   }
+  // The overlay lives INSIDE the OI pane, so it cannot be the only thing switched on: checking it
+  // with OI off would tick a box and draw nothing. Unchecking OI leaves this flag alone — coming
+  // back to OI restores what was on, and the `showOi &&` gate in loadChart keeps it dormant.
+  if (key === 'showOiSeasonal' && on) bigChartState.showOi = true;
   bigChartState[key] = !!on;
   renderBigChartIndicatorBar();   // re-sync dependent toggles
   renderBigChart(currentBigChartCfg());
@@ -302,6 +314,18 @@ function setBigChartZoomAnchor(on) {
   bigChartState.zoomAnchorRight = !!on;
 }
 
+// The user's Continuous / Front Month pick, persisted so a reload keeps it. Kept apart from
+// bigChartState.chartMode on purpose: chartMode is what is DRAWN, and a market whose front
+// month cannot be loaded falls back to continuous for itself. While the pick was read off
+// chartMode, that one fallback switched every later market to continuous too, and every reload
+// reset the tab to Front Month — on a roll day those are two different contracts (sugar,
+// 2026-09-10: Front Month SBV26 at 18.64, Continuous SB=F already on SBH27 at 19.61).
+const BIGCHART_MODE_KEY = 'charthorizon.bigchartMode.v1';   // 'frontMonth' | 'continuous'
+
+function bigChartPreferredMode() {
+  try { return localStorage.getItem(BIGCHART_MODE_KEY) === 'continuous' ? 'continuous' : 'frontMonth'; } catch (e) { return 'frontMonth'; }
+}
+
 // Continuous / Front-Month toggle. "Front Month" = the highest-volume LEAD contract
 // (frontContractIndex — the actively-traded month, not the nearest by calendar). Disabled for
 // markets with no tradable contract (USDX proxy, crypto, indices).
@@ -313,7 +337,7 @@ function renderBigChartContractBar() {
   const hasFront = idx >= 0 && cfg && cfg.contracts && cfg.contracts[idx] && !!cfg.contracts[idx].yf_symbol;
   const mode = bigChartState.chartMode === 'contract' ? 'frontMonth' : 'continuous';
   const btn = (val, label, disabled, title) =>
-    `<button class="fx-timeframe-btn${mode === val ? ' active' : ''}${disabled ? ' disabled' : ''}" type="button" ${disabled ? 'disabled' : ''} onclick="setBigChartContractMode('${val}')" title="${title}">${label}</button>`;
+    `<button class="fx-timeframe-btn${mode === val ? ' active' : ''}${disabled ? ' disabled' : ''}" type="button" ${disabled ? 'disabled' : ''} onclick="setBigChartContractMode('${val}', true)" title="${title}">${label}</button>`;
   bar.innerHTML =
     btn('continuous', 'Continuous', false, 'Native front-month continuous series') +
     btn('frontMonth', 'Front Month', !hasFront,
@@ -323,7 +347,10 @@ function renderBigChartContractBar() {
 // Switch the visible source. Front-month lazy-loads the lead contract's own daily history via
 // /api/contract-history (cached on the contract), then drives the engine's contract mode. Falls
 // back to continuous when there is no tradable contract or the fetch yields nothing.
-async function setBigChartContractMode(mode) {
+// `persist` marks the user's own click. The internal calls only re-resolve a market, so their
+// fallback must never be recorded as the user's pick.
+async function setBigChartContractMode(mode, persist) {
+  if (persist) { try { localStorage.setItem(BIGCHART_MODE_KEY, mode === 'frontMonth' ? 'frontMonth' : 'continuous'); } catch (e) {} }
   const cfg = currentBigChartCfg();
   if (!cfg) return;
   const toContinuous = () => {
@@ -366,17 +393,18 @@ function currentBigChartCfg() {
   return cat ? cat[bigChartState.key] : null;
 }
 
-// The symbol this tab is drawing right now — resolved through the SAME
+// The live symbol for what this tab is drawing right now — resolved through the SAME
 // getActiveChartSource() the renderer uses, state swap and all. live.js polls whatever this
-// returns, and loadChart's injectLivePoint splices the tick onto whatever getActiveChartSource
-// resolves; deriving the symbol a second way here is how the two would silently disagree
-// (poll the continuous, paint the front month, and the live candle never appears).
+// returns, and loadChart's injectLivePoint splices the tick from getActiveChartSource's
+// liveSymbol; deriving the symbol a second way here is how the two would silently disagree
+// (poll the continuous, paint the front month, and the live candle never appears). On the
+// continuous series it is the contract the series settles on, not `=F` — see chart.js.
 function bigChartActiveSymbol() {
   const cfg = currentBigChartCfg();
   if (!cfg) return null;
   const saved = chartState;
   chartState = bigChartState;
-  try { return getActiveChartSource(cfg).symbol || null; }
+  try { return getActiveChartSource(cfg).liveSymbol || null; }
   finally { chartState = saved; }
 }
 
@@ -444,7 +472,8 @@ function renderBigChart(cfg) {
   const saved = chartState;
   chartState = bigChartState;
   try {
-    loadChart(cfg, { bodyId: 'bigchartBody', symId: 'bigchartSym', controls: false, panes: true, rollMarkers: false, priceH, wheelZoom: true, drawings: true, rerender: () => renderBigChart(cfg) });
+    const initialBars = bigChartState.chartMode === 'contract' && bigChartState.tf === 'd1' ? BIGCHART_FRONT_MONTH_BARS : 0;
+    loadChart(cfg, { bodyId: 'bigchartBody', symId: 'bigchartSym', controls: false, panes: true, rollMarkers: false, priceH, wheelZoom: true, initialBars, drawings: true, rerender: () => renderBigChart(cfg) });
   } finally {
     chartState = saved;
   }
@@ -542,15 +571,11 @@ async function selectBigChartMarket(key) {
   // A fast re-click may have moved on to a different market while we awaited the fetch.
   if (bigChartState.key !== key) return;
   renderBigChartContractBar();                 // reflect this market's front-month availability
-  if (bigChartState.chartMode === 'contract') {
-    setBigChartContractMode('frontMonth');     // preserve the mode: re-resolve & load this market's lead
-  } else {
-    renderBigChart(cfg);
-    // Point the live overlay at the new market. switchPage() also starts the layer, but it
-    // fires BEFORE openBigChart() has awaited the category — cfg is null at that moment, so
-    // that start finds no symbol. This is the point where the chart is actually on screen.
-    if (typeof restartLiveLayer === 'function') restartLiveLayer();
-  }
+  // The user's pick, never the previous market's chartMode, which may only be that market's
+  // fallback. Both paths render and point the live overlay at the new market. switchPage() also
+  // starts the layer, but it fires BEFORE openBigChart() has awaited the category — cfg is null
+  // at that moment, so that start finds no symbol. This is the point where the chart is on screen.
+  setBigChartContractMode(bigChartPreferredMode());
 }
 
 // Live, full-resolution resize. While the window is being dragged the browser fires a
@@ -574,6 +599,9 @@ async function openBigChart() {
   if (!_bigChartInited) {
     initBigChartSidebar();
     bigChartState.indicators = _loadBigChartIndicators();   // global, persisted; ready before first render
+    // The persisted pick, before the contract bar below first renders. Otherwise the bar shows
+    // the Front Month default until selectBigChartMarket() has loaded the category.
+    bigChartState.chartMode = bigChartPreferredMode() === 'continuous' ? 'continuous' : 'contract';
     _bigChartInited = true;
   }
   applyBigChartSidebar();

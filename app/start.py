@@ -27,6 +27,7 @@ import webbrowser
 
 import app_version
 import live_cache
+import packaging_fingerprint
 import yahoo_gateway
 
 try:
@@ -299,15 +300,43 @@ def _platform_label():
     return sys.platform
 
 
+def packaging_recipe():
+    """Which build recipe produced this binary, or None when it cannot be told.
+
+    Frozen: the digest packaging/charthorizon.spec baked in at build time, read back out
+    of the bundle. The Windows installer is built in a VM from its own copy of the tree,
+    and a build from a STALE packaging/ succeeds quietly from the previous recipe — so the
+    baked value is the previous one, and the Mac's tools/packaging-fingerprint.py, which
+    reads the live tree, no longer agrees with it. That disagreement is the whole point;
+    see app/packaging_fingerprint.py for why the definition lives in app/.
+
+    Source: computed live from the sibling packaging/ tree, so a dev run reports exactly
+    what a correct build of it would bake — which is what makes the chain testable without
+    building an installer at all."""
+    try:
+        if FROZEN:
+            path = os.path.join(APP_DIR, packaging_fingerprint.FINGERPRINT_FILE)
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip() or None
+        return packaging_fingerprint.packaging_fingerprint(
+            os.path.join(APP_DIR, os.pardir, "packaging"))
+    except (OSError, ValueError):
+        return None
+
+
 def version_payload():
     """Build info for the Settings tab's About card. Read from the RUNNING process,
     never from ff_data/config.js: a freshly installed version must report itself
-    before (and even if) the first refresh rewrites the data folder."""
+    before (and even if) the first refresh rewrites the data folder.
+
+    `packaging` rides along for the release check only — it is deliberately NOT shown in
+    the About card, which a non-technical user reads."""
     return {
         "version": app_version.APP_VERSION,
         "build": "installer" if FROZEN else "source",
         "python": "%d.%d.%d" % sys.version_info[:3],
         "platform": _platform_label(),
+        "packaging": packaging_recipe(),
     }
 
 
@@ -402,8 +431,16 @@ def _eastern_now():
     return datetime.now(tz.gettz("America/New_York"))
 
 
+def _is_session_day(day):
+    """A US futures session: a weekday that is not an exchange holiday. The holiday table is
+    the generator's own (calendar_utils); imported lazily, like yfinance, because this module
+    runs before the launcher has installed dateutil."""
+    from calendar_utils import _is_business_day
+    return _is_business_day(day)
+
+
 def _latest_business_day_on_or_before(day):
-    while day.weekday() >= 5:
+    while not _is_session_day(day):
         day -= timedelta(days=1)
     return day
 
@@ -413,21 +450,35 @@ def _previous_business_day(day):
 
 
 def _latest_settled_eod_date(now_et=None):
-    """Latest business date whose settled EoD bar should already exist from yfinance.
+    """Latest session date whose settled EoD bar should already exist from yfinance.
 
     This is the settle cutoff for the contract-history endpoint's unsettled-tail
     guard (`_drop_unsettled_tail`) — a still-forming bar is never served. We use
     17:30 ET as a practical delay buffer after the US futures close; before that,
-    today's bar has not settled yet, so the previous business day is the latest
-    settled date.
+    today's bar has not settled yet, so the previous session is the latest settled date.
+
+    It is a REQUIREMENT as well as a trim: the contract-history cache refetches a history
+    that ends before it, and card mode refuses to export a candle behind it
+    (`/api/settled-eod`). That is why exchange holidays count here. Trimming past a date
+    with no bar is harmless; demanding a Labor Day bar would refuse every card all evening.
     """
     now_et = now_et or _eastern_now()
     today = now_et.date()
-    if today.weekday() >= 5:
+    if not _is_session_day(today):
         return _latest_business_day_on_or_before(today)
     if now_et.time() < YFINANCE_EOD_READY_ET:
         return _previous_business_day(today)
     return today
+
+
+def settled_eod_payload(now_et=None):
+    """`/api/settled-eod`: the session a card export has to reach. Card mode compares the
+    drawn series' last candle against it, and the Hedgers' Ledger asks before shooting at
+    all — the 2026-09-11 issue was shot at 17:27 ET and every card ended on Thursday."""
+    return {
+        "settled_eod": _latest_settled_eod_date(now_et).isoformat(),
+        "settle_ready_et": YFINANCE_EOD_READY_ET.strftime("%H:%M"),
+    }
 
 
 def _parse_date(value):
@@ -495,7 +546,7 @@ def start_background_refresh(trigger="manual"):
         _write_progress(state="running", trigger=trigger, total=None, done=0,
                         current=None, category=None,
                         started_at=datetime.now().isoformat(timespec="seconds"),
-                        finished_at=None, latest_eod=None, error=None)
+                        finished_at=None, latest_eod=None, data_version=None, error=None)
         try:
             threading.Thread(target=_run_locked_refresh, daemon=True).start()
         except Exception:
@@ -611,24 +662,55 @@ def _history_rows(symbol, period, priority=yahoo_gateway.PRIORITY_INTERACTIVE):
         # the second clause then drops NaN volumes.
         rows.append({
             "date": idx.strftime("%Y-%m-%d"),
-            "open": round(float(o), 4),
-            "high": round(float(h), 4),
-            "low": round(float(l), 4),
-            "close": round(float(c), 4),
+            # One rounding rule for every price path. A flat 4 decimals turned each yen bar
+            # (~0.0065) into open = high = low = close, and a card drew 6J as a staircase.
+            "open": yahoo_gateway.round_price(float(o)),
+            "high": yahoo_gateway.round_price(float(h)),
+            "low": yahoo_gateway.round_price(float(l)),
+            "close": yahoo_gateway.round_price(float(c)),
             "volume": int(volume) if volume is not None and volume == volume else None,
         })
     return _drop_unsettled_tail(_trim_leading_flat(rows))
+
+
+# How long a history that should reach the settled session but does not (Yahoo has not posted
+# the bar yet, or the contract did not trade) stands before it is asked for again. Without a
+# floor, every open chart and every card export would re-ask Yahoo from 17:30 ET until it lands.
+CONTRACT_HISTORY_RETRY_SECONDS = 600
+
+
+def _contract_history_is_current(payload, cutoff, now_ts):
+    """True when a cached history needs no refetch for the session settled at `cutoff`.
+
+    The cache used to be reused until the next --refresh wiped the folder, with no record of
+    which settle it was built for. A history fetched before 17:30 ET correctly ends on the
+    previous session — and then went on being served after the settle. On 2026-09-11 the open
+    dashboard preloaded every front month at 17:26 ET, straight after a refresh, so every card
+    exported that evening would have ended on Thursday until the next refresh.
+
+    Current means the last bar reaches the settled session, or this settle was already asked
+    for less than CONTRACT_HISTORY_RETRY_SECONDS ago. A file written before this rule carries
+    no `settled_through` and is judged by its last bar alone."""
+    history = payload.get("history") or []
+    last = _parse_date(history[-1].get("date")) if history else None
+    if last is not None and last >= cutoff:
+        return True
+    return (payload.get("settled_through") == cutoff.isoformat()
+            and now_ts - float(payload.get("fetched_at") or 0) < CONTRACT_HISTORY_RETRY_SECONDS)
 
 
 def get_contract_history(symbol, period="5y",
                          priority=yahoo_gateway.PRIORITY_INTERACTIVE):
     """Fetch and cache the history of a single futures contract."""
     cache_path = _contract_history_cache_path(symbol, period)
+    now = _eastern_now()
+    cutoff = _latest_settled_eod_date(now)
+    cached = None
     with _contract_cache_lock:
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    cached = json.load(f)
             except (ValueError, OSError):
                 # Corrupt/truncated cache file (e.g. a crash mid-write): discard and
                 # rebuild it instead of answering 500 on every call.
@@ -636,6 +718,8 @@ def get_contract_history(symbol, period="5y",
                     os.remove(cache_path)
                 except OSError:
                     pass
+    if isinstance(cached, dict) and _contract_history_is_current(cached, cutoff, now.timestamp()):
+        return cached
 
     # Network fetch deliberately outside the lock (slow) — only the FS ops are serialized.
     history = _history_rows(symbol, period, priority=priority)
@@ -645,13 +729,18 @@ def get_contract_history(symbol, period="5y",
         "source": "yfinance",
         "contract_type": "single_expiry_month",
         "history": history,
+        # Which settle this answer was built for, and when: _contract_history_is_current.
+        "settled_through": cutoff.isoformat(),
+        "fetched_at": now.timestamp(),
     }
     # NEVER cache an empty result: that happens mostly during a refresh (cache just
     # cleared + Yahoo throttled by that refresh). Caching the empty answer would leave the
     # contract blank until the next refresh ("No chart history"). This way the next call
-    # fetches fresh — as soon as Yahoo answers again, the history is there.
+    # fetches fresh — as soon as Yahoo answers again, the history is there. An outdated
+    # cache we were trying to replace is still served meanwhile: an older chart beats a
+    # blank one, and card mode refuses to export it anyway.
     if not history:
-        return payload
+        return cached if isinstance(cached, dict) and cached.get("history") else payload
     with _contract_cache_lock:
         cache_dir = os.path.dirname(cache_path)
         try:
@@ -694,20 +783,23 @@ def _live_quote_row(symbol, session=None):
         return None
 
     def _px(v):
-        # round like the settled series; drop missing/NaN so the frontend can fall back.
-        return round(float(v), 4) if v is not None and v == v else None
+        # Round like the settled series (one rule, yahoo_gateway.round_price); drop missing/NaN
+        # so the frontend can fall back. A flat 4 decimals made the yen's live candle one price.
+        return yahoo_gateway.round_price(float(v)) if v is not None and v == v else None
 
     # The still-forming 1d bar already carries today's intraday Open/High/Low/Close, so
     # the live overlay can paint a REAL candle (not a flat single-price mark). Display-only;
     # persisted nowhere.
     # idx is yfinance's native tz; "day" is a display label only and uses the same
     # strftime convention as _history_rows, so it lines up with the settled series.
+    # An open outside the bar's own range is dropped: on an =F roll day it is the old month's.
+    high, low = _px(row.get("High")), _px(row.get("Low"))
     return {
         "day": idx.strftime("%Y-%m-%d"),
-        "price": round(float(close), 4),
-        "open": _px(row.get("Open")),
-        "high": _px(row.get("High")),
-        "low": _px(row.get("Low")),
+        "price": yahoo_gateway.round_price(float(close)),
+        "open": yahoo_gateway.consistent_open(_px(row.get("Open")), high, low),
+        "high": high,
+        "low": low,
     }
 
 
@@ -816,6 +908,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         return
 
+    def log_request(self, code="-", size="-"):
+        """Report the page's own files failing to arrive — and nothing else.
+
+        Every other request stays silent (log_message above). But a page whose script did
+        not arrive boots into a blank board: the first launch of a fresh Windows 1.2.8
+        install did that once (2026-09-13), a reload fixed it, and with every request line
+        silenced nothing was left to say which file had failed or why. So a failed response
+        for index.html, loading.html or web/* is printed with its cause — send_head()
+        answers any OSError from open() with a 404, and that error is still the one being
+        handled while this runs, so a sharing violation and a missing file read differently.
+        ff_data/ and /api/ keep their silence: loading.html polls ff_data/config.js with a
+        404 through a whole first run.
+        """
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            return
+        if status < 400:
+            return
+        path = urllib.parse.urlparse(getattr(self, "path", "")).path   # unset if the request line never parsed
+        if not (path in ("/", "/index.html", "/loading.html") or path.startswith("/web/")):
+            return
+        cause = sys.exc_info()[1]
+        detail = f" ({type(cause).__name__}: {cause})" if cause is not None else ""
+        warn(f"{path} could not be served: HTTP {status}{detail}")
+
     def translate_path(self, path):
         # Default roots the path at cwd (== DATA_ROOT). In dev APP_DIR == DATA_ROOT, so
         # this is a no-op. Frozen: keep ff_data/* in the writable DATA_ROOT, but serve the
@@ -871,6 +989,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/version":
             self._send_json(200, version_payload())
+            return
+        if parsed.path == "/api/settled-eod":
+            self._send_json(200, settled_eod_payload())
             return
         if parsed.path == "/api/contract-history":
             qs = urllib.parse.parse_qs(parsed.query)

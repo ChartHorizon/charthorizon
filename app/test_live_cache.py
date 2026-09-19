@@ -5,7 +5,10 @@
 
 import pathlib
 import re
+import sys
+import types
 import unittest
+from unittest import mock
 
 import live_cache as lc
 
@@ -415,6 +418,71 @@ class BatchTest(unittest.TestCase):
         c = self._cache(fetch, clk)
         c.get_many(["CL=F"], priority=lc.PRIORITY_INTERACTIVE)
         self.assertEqual(seen, [lc.PRIORITY_INTERACTIVE])
+
+
+class LiveQuoteRowTest(unittest.TestCase):
+    """start.py's per-symbol chart path (`_live_quote_row`) — the only live source for a
+    continuous (`=F`) symbol. yfinance is swapped for a module whose Ticker hands back a real
+    DataFrame, so the frame handling is the real thing and nothing leaves the process."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pandas as pd
+            import start
+        except Exception as exc:                        # pragma: no cover
+            raise unittest.SkipTest("start.py/pandas not importable here: %s" % exc)
+        cls.pd = pd
+        cls.start = start
+        import yahoo_gateway
+        cls.yg = yahoo_gateway
+        cls._saved_gateway = yahoo_gateway._instance    # start.py configures one on import
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.yg._instance = cls._saved_gateway
+
+    def _quote_row(self, bars):
+        idx = self.pd.DatetimeIndex([b[0] for b in bars], tz="America/New_York", name="Date")
+        frame = self.pd.DataFrame(
+            [{"Open": o, "High": h, "Low": l, "Close": c, "Volume": v,
+              "Dividends": 0.0, "Stock Splits": 0.0} for _, o, h, l, c, v in bars],
+            index=idx)
+
+        class Ticker:
+            def __init__(self, symbol, session=None):
+                pass
+            def history(self, period, interval="1d"):
+                return frame
+
+        fake = types.ModuleType("yfinance")
+        fake.Ticker = Ticker
+        with mock.patch.dict(sys.modules, {"yfinance": fake}):
+            return self.start._live_quote_row("SB=F")
+
+    def test_a_roll_day_bar_loses_the_open_it_kept_from_the_old_month(self):
+        # SB=F on 2026-09-10 as Yahoo served it: high/low/close were already SBH27's, the open
+        # was still SBV26's 18.37 — below the day's own low. Painted as-is, the overlay
+        # stretched it into an 18.37 -> 19.64 candle that never traded.
+        q = self._quote_row([("2026-09-09", 18.139999, 18.469999, 18.08, 18.4, 133711),
+                             ("2026-09-10", 18.370001, 19.639999, 19.299999, 19.6, 30411)])
+        self.assertEqual(q, {"day": "2026-09-10", "price": 19.6, "open": None,
+                             "high": 19.64, "low": 19.3})
+
+    def test_an_ordinary_bar_keeps_its_open(self):
+        # SBV26 the same day: its open lies inside its own range.
+        q = self._quote_row([("2026-09-09", 18.139999, 18.469999, 18.08, 18.4, 133711),
+                             ("2026-09-10", 18.370001, 18.690001, 18.299999, 18.639999, 28471)])
+        self.assertEqual(q, {"day": "2026-09-10", "price": 18.64, "open": 18.37,
+                             "high": 18.69, "low": 18.3})
+
+    def test_a_yen_bar_keeps_its_precision(self):
+        # 6JU26 on 2026-09-11. The yen trades near 0.0065, and a flat 4 decimals made the live
+        # candle open = high = low = close = 0.0065 — the staircase the card path drew too.
+        q = self._quote_row([("2026-09-10", 0.006516, 0.006525, 0.006466, 0.006481, 322861),
+                             ("2026-09-11", 0.006475, 0.006527, 0.006468, 0.006506, 222233)])
+        self.assertEqual(q, {"day": "2026-09-11", "price": 0.006506, "open": 0.006475,
+                             "high": 0.006527, "low": 0.006468})
 
 
 class LiveFetchManyTest(unittest.TestCase):

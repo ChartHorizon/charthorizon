@@ -66,6 +66,7 @@ __all__ = [
     '_safe_cache_token',
     '_series_dates',
     '_series_health',
+    '_settled_contract_for_history',
     '_slug',
     '_volume_series_from_history',
 ]
@@ -252,6 +253,27 @@ def _choose_fresh_or_previous_series(fresh_rows, previous_rows, *, kind):
         "fresh": fresh_health,
         "previous": previous_health,
     }
+
+
+def _settled_contract_for_history(history, by_date, previous=None):
+    """The `settled_contract` written beside a continuous series: the contract its LAST
+    written bar settled on, stamped with that bar's date — or None.
+
+    `by_date` is this run's resolve_settled_contracts() answer for the fresh fetch. The
+    written series can end a bar or two earlier (unsettled tail dropped, board cap) or be the
+    stored series outright (fresh fetch rejected), so the lookup is by the day the series
+    actually ends on. A kept stored series keeps its stored contract only while that contract
+    describes the same day. Anything else is None, and the live overlay then shows no candle
+    rather than one taken from a contract the series is not on."""
+    if not history:
+        return None
+    last_day = str(history[-1].get("date") or "")[:10]
+    symbol = (by_date or {}).get(last_day)
+    if symbol:
+        return {"yf_symbol": symbol, "date": last_day}
+    if previous and previous.get("yf_symbol") and previous.get("date") == last_day:
+        return {"yf_symbol": previous["yf_symbol"], "date": last_day}
+    return None
 
 
 def _choose_fresh_or_previous_contracts(fresh_contracts, previous_contracts):

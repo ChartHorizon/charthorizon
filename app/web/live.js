@@ -128,7 +128,7 @@ function liveResolveVariants(cfg) {
     ? contracts.findIndex((c, i) => i > frontIdx && c && c.yf_symbol)
     : -1;
   return {
-    activeSym: src.symbol,
+    activeSym: src.liveSymbol,       // the polled symbol; on the continuous series not `=F` (chart.js)
     contSym, frontSym, frontContract,
     frontIdx, nextIdx
   };

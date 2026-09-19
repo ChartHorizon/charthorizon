@@ -43,7 +43,6 @@ __all__ = [
     'MONTH_CODES',
     'MONTH_NAMES',
     'SPREAD_MAX_GAP_DAYS',
-    'SPREAD_MIN_PAIR_POINTS',
     'SPREAD_ROLL_CONFIRM_DAYS',
     'SPREAD_SPIKE_REVERT_PCT',
     'YF_CONTRACT_LOOKAHEAD',
@@ -115,6 +114,10 @@ YF_QUOTE_MAX_STALE_DAYS = 10
 # (rows[-21:-1]). At 15 that median saw 14 bars, not 20 — so the tail must be at least
 # YF_VOLUME_SUSPECT_LOOKBACK + 1 = 21. 24 leaves room for rows dropped as NaN.
 YF_QUOTE_TAIL_BARS = 24
+# How many trailing settled bars of a native =F series resolve_settled_contracts places on a
+# single contract. The written series can end a bar or two before the fetched one (the
+# unsettled tail, the board-wide cap), and whichever bar it ends on must still find its contract.
+YF_SETTLED_CONTRACT_TRAILING_BARS = 5
 YF_VOLUME_SUSPECT_LOOKBACK = 20
 YF_VOLUME_SUSPECT_RATIO = 0.15
 YF_VOLUME_SUSPECT_MIN_REFERENCE = 10000
@@ -141,7 +144,6 @@ REFRESH_FETCH_WORKERS = 4  # parallel yfinance fetches during a board refresh; c
                            # margin under rate limits. Set to 1 to force the sequential path.
 SPREAD_SPIKE_REVERT_PCT = 0.02       # drop a one-day calendar-spread value that spikes >this fraction of the front price and reverts next day
 SPREAD_MAX_GAP_DAYS = 7              # keep only the most recent calendar-spread run without a gap larger than this (drops the sparse older backfill; Yahoo only serves the current contracts)
-SPREAD_MIN_PAIR_POINTS = 10   # below this many points the current front/next pair is a blank pane, so ONE preceding pair is kept for context (consumers break the line at the pair change)
 SPREAD_ROLL_CONFIRM_DAYS = 2  # a higher volume lead becomes the spread's front only after holding this many sessions; mid-roll the two nearest months flip back and forth daily
 
 # Generator gateway profile. Deliberately looser than the server's live profile

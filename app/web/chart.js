@@ -1,3 +1,8 @@
+// Share of the plot width held free to the right of the newest candle on the Charts tab, so
+// drawings have somewhere to go past the last bar. Every other chart in the app renders with
+// no margin at all (see loadChart) and is pixel-identical to before.
+const CHART_DRAW_RIGHT_MARGIN = 0.12;
+
 const CHART_EXPORT_CSS = `
   text { font-family: 'Geist', system-ui, sans-serif; }
 `;
@@ -18,6 +23,11 @@ const CARD_RISK_DISCLAIMER =
 // PNGs) and in-app downloads match the on-screen look. Card-mode runs in dark, so
 // the exported cards are dark/navy; light keeps the original white card.
 function exportPalette() {
+  // Blog cards in the website's newsprint (PAPER_CARD_COLORS in core.js): the category takes the
+  // gold-ink of the paper's datelines, and the wordmark recedes to muted ink instead of orange.
+  if (typeof _isPaperCard === 'function' && _isPaperCard()) {
+    return { bg: '#fbfbf9', cat: '#7d641e', name: '#17150f', sym: '#736b5c', brand: '#736b5c', meta: '#736b5c', sep: '#ddd9d0', strong: '#17150f' };
+  }
   const dark = typeof currentTheme === 'function' && currentTheme() === 'dark';
   return dark
     ? { bg: '#0e1822', cat: '#f9b03a', name: '#f3f6fa', sym: '#8493a6', brand: '#f97316', meta: '#8493a6', sep: '#243240', strong: '#f3f6fa' }
@@ -25,9 +35,13 @@ function exportPalette() {
 }
 
 // Latest data date represented in a chart's history -> "Jun 01, 2026" (UTC), or null when unknown.
-function exportAsOfDate(cfg) {
+// `drawn`: read the series the chart actually draws (getActiveChartSource), not the continuous
+// one. The Futures/card export needs it — card mode draws the front contract, and around a roll
+// the two end on different days: the 2026-09-11 cards said "Data as of Sep 09" over a Sep 10
+// candle. The Seasonals export keeps the continuous series its curves are built from.
+function exportAsOfDate(cfg, drawn = false) {
   if (!cfg) return null;
-  const hist = (getContinuousContract(cfg).history) || [];
+  const hist = (drawn ? getActiveChartSource(cfg).history : getContinuousContract(cfg).history) || [];
   let iso = null;
   for (let i = hist.length - 1; i >= 0; i--) { if (hist[i] && hist[i].date) { iso = String(hist[i].date).slice(0, 10); break; } }
   if (!iso) return null;
@@ -85,7 +99,7 @@ function getChartExportContext(kind = null) {
     category: (meta.category || '').toUpperCase(),
     name: meta.display_name || 'Chart',
     symbol: document.getElementById('chartSym')?.textContent || '',
-    asOf: exportAsOfDate(getCurrentCfg()),
+    asOf: exportAsOfDate(getCurrentCfg(), true),
     // Card-mode: only the Telegram/social cards get a risk disclaimer + seasonal runway
     // in the export footer band (the normal in-app export stays clean).
     cardMode: document.body.classList.contains('card-mode'),
@@ -141,7 +155,7 @@ function buildExportSvg(kind = null) {
     <style>${CHART_EXPORT_CSS}</style>
     <rect x="0" y="0" width="${w}" height="${totalH}" fill="${pal.bg}"/>
     <text x="${pad}" y="20" font-size="11" font-weight="600" letter-spacing="1" fill="${pal.cat}">${escapeXml(ctx.category)}</text>
-    <text x="${pad}" y="42" font-size="20" font-family="'Geist', system-ui, sans-serif" fill="${pal.name}">${escapeXml(ctx.name)}</text>
+    <text x="${pad}" y="42" font-size="20" font-weight="700" font-family="Geist, system-ui, sans-serif" fill="${pal.name}">${escapeXml(ctx.name)}</text>
     <text x="${w - pad}" y="20" font-size="10" fill="${pal.sym}" text-anchor="end">${escapeXml(ctx.symbol)}</text>
     <text x="${w - pad}" y="42" font-size="11" font-weight="700" fill="${pal.brand}" text-anchor="end">${EXPORT_BRAND}</text>
     ${ctx.asOf ? `<text x="${pad}" y="60" font-size="10" fill="${pal.meta}">Data as of ${escapeXml(ctx.asOf)}</text>` : ''}
@@ -192,9 +206,15 @@ function svgPaint(el, prop, fallback = null) {
 }
 
 function svgOpacity(el) {
-  const cssOpacity = parseNum(window.getComputedStyle(el).opacity, 1);
-  const attrOpacity = el.hasAttribute('opacity') ? parseNum(el.getAttribute('opacity'), 1) : 1;
-  return cssOpacity * attrOpacity;
+  // ONE source, not two multiplied. An SVG `opacity` presentation attribute IS a
+  // (lowest-priority) CSS declaration, so getComputedStyle already returns it —
+  // reading both and multiplying SQUARED every translucent element in the PNG
+  // export: the card-mode 3/3 band shipped at 0.04 instead of 0.2 (invisible once a
+  // card is scaled into a video insert), the COT bars at 0.49 instead of 0.7. The
+  // attribute is only a fallback for a computed value the browser won't hand over.
+  const css = window.getComputedStyle(el).opacity;
+  if (Number.isFinite(Number.parseFloat(css))) return parseNum(css, 1);
+  return el.hasAttribute('opacity') ? parseNum(el.getAttribute('opacity'), 1) : 1;
 }
 
 function applyStrokeStyle(ctx, el) {
@@ -336,7 +356,14 @@ function drawSvgNode(ctx, node) {
   const tag = node.tagName.toLowerCase();
   if (tag === 'style' || tag === 'title') return;
   const cls = node.getAttribute('class') || '';
-  if (cls.includes('chart-crosshair-layer') || cls.includes('chart-hit-zone')) return;
+  // The live dot too, as buildExportSvg already removes it: it pulses (SMIL opacity 1 -> 0.2), and
+  // the computed opacity read below put it into each PNG at whatever phase the export caught.
+  if (cls.includes('chart-crosshair-layer') || cls.includes('chart-hit-zone') || cls.includes('chart-live-dot')) return;
+  // Only what the browser actually paints. The measure tool's layer sits in every chart at
+  // display:none, and its two circles carry no cx/cy (so 0,0) and no fill (so black): drawn
+  // anyway, they put a black dot in the plot's top-left corner of every PNG, bot cards included.
+  const css = window.getComputedStyle(node);
+  if (css.display === 'none' || css.visibility === 'hidden') return;
 
   ctx.save();
   ctx.globalAlpha *= svgOpacity(node);
@@ -361,7 +388,7 @@ function drawExportHeader(ctx, w, exportCtx = getChartExportContext()) {
   ctx.textAlign = 'left';
   ctx.fillText(exportCtx.category, pad, 20);
   ctx.fillStyle = pal.name;
-  ctx.font = '20px Georgia, serif';
+  ctx.font = '700 20px Geist, system-ui, sans-serif';   /* the on-screen chart name's face, not a serif */
   ctx.fillText(exportCtx.name, pad, 42);
   ctx.textAlign = 'right';
   ctx.fillStyle = pal.sym;
@@ -438,8 +465,45 @@ function chartSvgToCanvas(targetWidth = CHART_EXPORT_WIDTH, kind = null) {
 }
 
 // Render the current chart to a high-resolution PNG blob.
+// The session a market card must reach, from the server that owns the settle rule
+// (`settled_eod_payload` in start.py: 17:30 ET, weekends and exchange holidays skipped).
+async function cardSettledEod() {
+  const res = await fetch('/api/settled-eod', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`SETTLE_UNKNOWN /api/settled-eod answered ${res.status}`);
+  const payload = await res.json();
+  if (!payload || !payload.settled_eod) throw new Error('SETTLE_UNKNOWN /api/settled-eod gave no date');
+  return String(payload.settled_eod).slice(0, 10);
+}
+
+// The last candle the chart actually draws. Not exportAsOfDate(cfg): that reads the continuous
+// series, and card mode draws the front contract — the two disagree around every roll.
+function drawnLastBarIso(cfg) {
+  const hist = (cfg && getActiveChartSource(cfg).history) || [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i] && hist[i].date) return String(hist[i].date).slice(0, 10);
+  }
+  return null;
+}
+
+// A market card whose last candle is behind the settled EoD is refused, loudly. The 2026-09-11
+// Hedgers' Ledger shipped Thursday's candles under a note about Friday's release: shot three
+// minutes before the settle, off a contract cache that did not know which settle it was built
+// for. STALE_CARD lets the bot-side capture tell this apart from a render failure. Card mode
+// only, and only a market card: the FX pair card draws a synthetic series, and the in-app
+// export stays the user's own business.
+async function assertCardNotStale(kind) {
+  if (!document.body.classList.contains('card-mode') || window.__fxPairCard || kind === 'seasonals') return;
+  const cfg = (typeof getCurrentCfg === 'function') ? getCurrentCfg() : null;
+  if (!cfg) return;
+  const settled = await cardSettledEod();
+  const drawn = drawnLastBarIso(cfg);
+  if (!drawn || drawn < settled) {
+    throw new Error(`STALE_CARD ${currentKey}: last candle ${drawn || 'none'} is behind the settled EoD ${settled}`);
+  }
+}
+
 function chartSvgToPngBlob(targetWidth = CHART_EXPORT_WIDTH, kind = null) {
-  return new Promise((resolve, reject) => {
+  return assertCardNotStale(kind).then(() => new Promise((resolve, reject) => {
     try {
       const canvas = chartSvgToCanvas(targetWidth, kind);
       const ctx = canvas.getContext('2d');
@@ -454,7 +518,7 @@ function chartSvgToPngBlob(targetWidth = CHART_EXPORT_WIDTH, kind = null) {
     } catch (e) {
       reject(e);
     }
-  });
+  }));
 }
 
 function triggerDownload(blob, filename) {
@@ -492,9 +556,9 @@ async function downloadChart(kind = 'overview') {
     console.error('Chart download failed:', e);
     try {
       triggerDownload(chartSvgBlob(kind), chartExportName('svg', kind));
-      alert('PNG export failed, so ChartHorizon downloaded an SVG instead.');
+      appNotice('PNG export failed, so the chart was saved as an SVG instead.');
     } catch (_) {
-      alert('Chart export failed: ' + e.message);
+      appNotice('Chart export failed: ' + e.message);
     }
   }
 }
@@ -505,7 +569,7 @@ async function shareChart(kind = 'overview') {
     blob = await chartSvgToPngBlob(CHART_EXPORT_WIDTH, kind);
   } catch (e) {
     console.error('Share export failed:', e);
-    alert('Chart export failed: ' + e.message);
+    appNotice('Chart export failed: ' + e.message);
     return;
   }
 
@@ -596,6 +660,7 @@ let chartState = {
   cotHedging: false,
   showVolume: false,  // default off: yfinance volume still has too many API-side gaps/errors
   showSpread: false,  // calendar-spread pane: advanced metric, off by default
+  showOiSeasonal: false,  // OI seasonal overlay: opt-in, and `=== true` everywhere so card mode never draws it
   chartMode: 'continuous',
   contractSymbol: null,
   contractLabel: null
@@ -701,7 +766,7 @@ function _renderTaPane(ind, data, geo) {
     if (rf.value < lo || rf.value > hi) return;
     const y = yFn(rf.value).toFixed(1);
     svg += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.6"/>`
-      + `<text x="${W - padR + 5}" y="${(+y + 3).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${rf.label}</text>`;
+      + `<text x="${W - padR + 5}" y="${(+y + 3).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist, system-ui, sans-serif">${rf.label}</text>`;
   });
   if (data.zero) {
     const zy = yFn(0).toFixed(1);
@@ -725,10 +790,10 @@ function _renderTaPane(ind, data, geo) {
   // Auto-scaled panes (MACD/ATR) label their own hi/lo at the right axis; fixed 0–100 panes
   // (RSI/Stoch) rely on the ref-line labels instead.
   if (!data.domain) {
-    svg += `<text x="${W - padR + 5}" y="${(top + 8).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${hi.toFixed(pdec)}</text>`
-      + `<text x="${W - padR + 5}" y="${(bottom - 2).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist">${lo.toFixed(pdec)}</text>`;
+    svg += `<text x="${W - padR + 5}" y="${(top + 8).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist, system-ui, sans-serif">${hi.toFixed(pdec)}</text>`
+      + `<text x="${W - padR + 5}" y="${(bottom - 2).toFixed(1)}" font-size="9" fill="${txt}" font-family="Geist, system-ui, sans-serif">${lo.toFixed(pdec)}</text>`;
   }
-  const heading = `<text x="${padL}" y="${(top - 8).toFixed(1)}" font-size="10" font-weight="600" fill="${indicatorColor(ind)}" font-family="Geist" letter-spacing="0.05em">${esc(indicatorChipLabel(ind).toUpperCase())}</text>`;
+  const heading = `<text x="${padL}" y="${(top - 8).toFixed(1)}" font-size="10" font-weight="600" fill="${indicatorColor(ind)}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em">${esc(indicatorChipLabel(ind).toUpperCase())}</text>`;
   const cross = { top, h, yFn, dec: pdec, legend: data.legend };
   return { svg, heading, cross };
 }
@@ -838,6 +903,34 @@ function getSelectedContract(cfg) {
   return cfg.contracts.find(c => c.yf_symbol === chartState.contractSymbol) || null;
 }
 
+// The symbol whose still-forming bar is spliced onto the CONTINUOUS series — deliberately not
+// the `=F` symbol itself. One Yahoo answer for an `=F` chart prices its settled bars off the
+// nearest contract and its still-forming bar off the next: on 2026-09-11 all 12 markets checked
+// split that way (SB=F settled SBV26 at 18.73, forming SBH27 at 19.15), so the live candle drew a
+// +5 % roll and an up day while both months fell 3 % (coffee: -9.8 %). The generator records the
+// contract the written series settles on (`settled_contract`, stamped with its last bar's date);
+// a file written before that falls back to the one listed contract whose settled close is the
+// series' last close. null = no live candle: yesterday's close is honest, a bar from another
+// contract is not. An index quote (DX-Y.NYB) is a single instrument and polls itself.
+function continuousLiveSymbol(cfg) {
+  const cont = getContinuousContract(cfg);
+  const sym = cont.yf_symbol || cont.tv_symbol || null;
+  if (!sym || !/=F$/.test(sym)) return sym;
+  const hist = cont.history || [];
+  const last = hist[hist.length - 1];
+  if (!last) return null;
+  const settled = cont.settled_contract;
+  if (settled && settled.yf_symbol && settled.date === String(last.date).slice(0, 10)) return settled.yf_symbol;
+  const close = Number(last.close);
+  if (!Number.isFinite(close)) return null;
+  const hits = (cfg.contracts || []).filter(c => c && c.yf_symbol && c.last !== null && c.last !== undefined
+    && Math.abs(Number(c.last) - close) <= Math.max(1e-9, Math.abs(close) * 1e-7));
+  return hits.length === 1 ? hits[0].yf_symbol : null;
+}
+
+// `symbol` names what is drawn; `liveSymbol` is what the live overlay polls and splices onto it.
+// They differ only for the continuous series (see continuousLiveSymbol). Every live path —
+// loadChart, the Charts tab's poll target, live.js — reads liveSymbol off this one function.
 function getActiveChartSource(cfg) {
   const continuous = getContinuousContract(cfg);
   const selected = getSelectedContract(cfg);
@@ -846,6 +939,7 @@ function getActiveChartSource(cfg) {
       mode: 'contract',
       label: selected.delivery_month_label || selected.label || selected.contract_symbol || selected.yf_symbol,
       symbol: selected.yf_symbol || selected.contract_symbol,
+      liveSymbol: selected.yf_symbol || selected.contract_symbol,
       displaySymbol: selected.contract_symbol || selected.yf_symbol,
       history: selected.chart_history || selected.history || [],
       contract: selected
@@ -855,6 +949,7 @@ function getActiveChartSource(cfg) {
     mode: 'continuous',
     label: continuous.label || 'Continuous Contract',
     symbol: continuous.yf_symbol || continuous.tv_symbol || 'Continuous',
+    liveSymbol: continuousLiveSymbol(cfg),
     displaySymbol: continuous.yf_symbol || continuous.tv_symbol || 'Continuous',
     displayMode: chartDisplayMode(continuous),
     format: continuous.format || 'continuous_front_month',
@@ -923,6 +1018,136 @@ function normalizeSpreadSeries(series) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
+// ── Calendar-spread pane: ONE drawing, used by the Futures / Charts pane (loadChart) and the
+// Weekly Outlook (wkDrawChart in screener.js). Each used to keep its own copy of the scale and
+// the labels, and both grew the same zero-label collision at once.
+
+// What the pane draws: the run of the pair trading today — the spread of the current front
+// month, which starts over at every roll. The generator writes nothing else since 2026-09-12
+// (`_trailing_same_pair_spread`); a category file written before could still carry ONE
+// preceding pair, which sat at an unrelated level behind the break and read as a broken line
+// (sugar, 2026-09-09: Oct/Mar at -0.99, Mar/May at +0.63). `series` is date-sorted.
+function currentPairSpread(series) {
+  const last = series[series.length - 1];
+  let start = series.length;
+  while (start > 0 && series[start - 1].front_contract === last.front_contract
+         && series[start - 1].next_contract === last.next_contract) start--;
+  return series.slice(start);
+}
+
+// A spread moves in whole price steps, and where one leg barely trades they are coarse: the
+// 10Y's Dec/Mar pair sat on three levels (5.5, 6 and 6.5 32nds) for its first eleven sessions
+// after the 2026-08-27 roll, its March leg settling off the calendar spread at ~100 lots a day.
+// Scaled tightly around the data, ONE tick filled the whole pane and read as a crash. So the
+// scale spans at least this many of the series' own steps. Measured 2026-09-11 that reaches
+// 10Y (2 steps), 30Y (3) and JPY (4), and any pair only a few sessions past its roll, whose few
+// steps are all it has; corn (9), CHF (10) and everything finer scale as before.
+const SPREAD_MIN_SCALE_STEPS = 8;
+
+// The smallest step the series moves in. A difference under 1% of the largest move is rounding
+// residue, not a step (0.1874 against 0.1875 on legs rounded to four places).
+function spreadStepQuantum(vals) {
+  const steps = [];
+  for (let i = 1; i < vals.length; i++) {
+    const d = Math.abs(vals[i] - vals[i - 1]);
+    if (d > 0) steps.push(d);
+  }
+  if (!steps.length) return 0;
+  const residue = Math.max(...steps) * 0.01;
+  return Math.min(...steps.filter(d => d > residue));
+}
+
+// Scale tightly around the REAL values (do NOT force 0), with padding, so the line unfolds
+// across the whole box instead of touching the frame (cf. the CAD bug) — but never narrower
+// than SPREAD_MIN_SCALE_STEPS steps. Forcing 0 would glue a consistently positive/negative
+// spread (e.g. USD index ~+0.26) to the border as a flat band. The zero line is ALWAYS returned
+// for orientation: at its true position when 0 is inside the window, otherwise pinned to the
+// nearer edge, where its distance is deliberately NOT to scale.
+function spreadPaneScale(vals, top, height) {
+  const dataLo = Math.min(...vals), dataHi = Math.max(...vals);
+  const span = Math.max(dataHi - dataLo, spreadStepQuantum(vals) * SPREAD_MIN_SCALE_STEPS);
+  const pad = (span || Math.abs(dataHi) || 1) * 0.12;
+  const lo = (dataLo + dataHi) / 2 - span / 2 - pad;
+  const rng = (span + 2 * pad) || 1;
+  const y = v => top + (1 - (v - lo) / rng) * height;
+  const zeroYraw = y(0);
+  const zeroY = Math.max(top, Math.min(top + height, zeroYraw));
+  return { top, height, dataLo, dataHi, y, zeroY, zeroPinned: zeroYraw !== zeroY };
+}
+
+// Above the zero line the spread is a premium (backwardation), at or below it a discount
+// (contango): the same `> 0` the screener's structure signal reads (screener.py), so the
+// colour of the line can never disagree with the signal.
+function spreadSideColor(v) {
+  return v > 0 ? CHART_THEME.spreadPremium : CHART_THEME.spreadDiscount;
+}
+
+// SVG path data per side, split exactly where the line crosses zero. The line also breaks
+// across a gap of more than 7 days, so missing days aren't bridged, and at a change of contract
+// pair — connecting two pairs would draw the step between two different horizons as a move in
+// the spread. The pane passes one pair only (currentPairSpread); the pair break is the guard.
+function spreadPanePaths(points, zeroY) {
+  const d = { premium: '', discount: '' };
+  const xy = (x, y) => x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+  let side = null;
+  points.forEach((p, i) => {
+    const prev = points[i - 1];
+    const s = p.value > 0 ? 'premium' : 'discount';
+    const brk = !prev || (new Date(p.date) - new Date(prev.date)) > 7 * 864e5 || p.pair !== prev.pair;
+    if (brk) {
+      d[s] += 'M' + xy(p.x, p.y);
+    } else if (s !== side) {
+      // Opposite sides, so 0 lies between the two values: zeroY is not pinned here and
+      // prev.value - p.value cannot be 0.
+      const cx = prev.x + prev.value / (prev.value - p.value) * (p.x - prev.x);
+      d[side] += 'L' + xy(cx, zeroY);
+      d[s] += 'M' + xy(cx, zeroY) + 'L' + xy(p.x, p.y);
+    } else {
+      d[s] += 'L' + xy(p.x, p.y);
+    }
+    side = s;
+  });
+  return d;
+}
+
+// Right-edge labels: high, low and zero. Whenever 0 lay outside the data, the pinned zero label
+// sat ~6 px from the low (or high) label in 10 px type and covered it — on nearly every market.
+// High and low are pushed apart where they would touch, and the zero label is left out where
+// it would land on either; the line's colour already says which side of zero it is on.
+function spreadPaneLabels(scale, x, dec, edge = Infinity) {
+  const GAP = 11;
+  // A label too long for the margin (the yen's "-0.0000440" at seven decimals) is right-aligned to
+  // the chart's edge instead of running past it; every label that fits is written exactly as before.
+  const label = (y, txt) => {
+    const atEdge = x + txt.length * 6.2 > edge;
+    return `<text x="${atEdge ? edge : x}" y="${(y + 3).toFixed(1)}" font-size="10"${atEdge ? ' text-anchor="end"' : ''} fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${txt}</text>`;
+  };
+  const hiTxt = scale.dataHi.toFixed(dec), loTxt = scale.dataLo.toFixed(dec);
+  const single = hiTxt === loTxt;
+  let yHi = scale.y(scale.dataHi), yLo = scale.y(scale.dataLo);
+  if (!single && yLo - yHi < GAP) {
+    const mid = (yHi + yLo) / 2;
+    yHi = mid - GAP / 2; yLo = mid + GAP / 2;
+  }
+  const zeroFree = Math.abs(scale.zeroY - yHi) >= GAP && (single || Math.abs(scale.zeroY - yLo) >= GAP);
+  return label(yHi, hiTxt) + (single ? '' : label(yLo, loTxt)) + (zeroFree ? label(scale.zeroY, '0') : '');
+}
+
+// The pane itself: frame, zero line, the line coloured by side, dots and labels. `points` are
+// {date, x, y, value, pair} sorted by x, their y taken from `scale`.
+function spreadPaneSvg(points, scale, left, right, dec, edge) {
+  const { top, height, zeroY } = scale;
+  const paths = spreadPanePaths(points, zeroY);
+  const line = (d, col) => d
+    ? `<path d="${d}" fill="none" stroke="${col}" stroke-width="1.5" opacity="0.85"/>` : '';
+  return `<line x1="${left}" y1="${top}" x2="${right}" y2="${top}" stroke="${CHART_THEME.grid}"/>`
+    + `<line x1="${left}" y1="${top + height}" x2="${right}" y2="${top + height}" stroke="${CHART_THEME.grid}"/>`
+    + `<line x1="${left}" y1="${zeroY.toFixed(1)}" x2="${right}" y2="${zeroY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"${scale.zeroPinned ? ' opacity="0.65"' : ''}/>`
+    + (points.length > 1 ? line(paths.premium, CHART_THEME.spreadPremium) + line(paths.discount, CHART_THEME.spreadDiscount) : '')
+    + points.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.6" fill="${spreadSideColor(p.value)}" opacity="0.5"/>`).join('')
+    + spreadPaneLabels(scale, right + 5, dec, edge);
+}
+
 function normalizeVolumeSeries(series) {
   const byDate = new Map();
   (series || []).forEach(row => {
@@ -974,7 +1199,7 @@ function bindChartCrosshair(wrap, cfg) {
     const _i = cfg.bars.indexOf(bar);
     const prevClose = _i > 0 ? cfg.bars[_i - 1].close : bar.open;
     const chg = prevClose ? (bar.close - prevClose) / prevClose * 100 : 0;
-    const chgCol = chg > 0 ? 'var(--up)' : chg < 0 ? 'var(--down)' : 'var(--muted)';
+    const chgCol = chg > 0 ? 'var(--up-text)' : chg < 0 ? 'var(--down-text)' : 'var(--muted)';
     const chgStr = `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`;
     ohlcReadout.innerHTML =
       `<span class="ohlc-k">O</span> ${formatPrice(bar.open)}  ` +
@@ -1132,7 +1357,7 @@ function bindChartCrosshair(wrap, cfg) {
       hideEl(priceLabel);
     }
 
-    setLabel(dateLabel, (bar.date || '').slice(2), x, cfg.axisY + 12, 'center');
+    setLabel(dateLabel, fmtAxisDate(bar.date), x, cfg.axisY + 12, 'center');
     if (vol) {
       showPoint(volumeDot, vol, CHART_THEME.volume);
       setLabel(volumeLabel, `VOL ${compact(vol.value)}`, cfg.W - 4, clamp(vol.y, cfg.volumeTop + 9, cfg.volumeTop + cfg.volumeH - 9), 'right');
@@ -1142,7 +1367,12 @@ function bindChartCrosshair(wrap, cfg) {
     }
     if (oi) {
       showPoint(oiDot, oi, CHART_THEME.oi);
-      setLabel(oiLabel, `OI ${compact(oi.value)}`, cfg.W - 4, clamp(oi.y, cfg.oiTop + 9, cfg.oiTop + cfg.oiH - 9), 'right');
+      // With the seasonal overlay on, the reading that matters is the distance to it, not the
+      // level: "411K · +6% vs seasonal" is the whole point of the indicator.
+      const seas = oi.seasonal;
+      const dev = Number.isFinite(seas) && seas > 0 ? (oi.value / seas - 1) * 100 : null;
+      const devText = dev === null ? '' : ` · ${dev >= 0 ? '+' : ''}${dev.toFixed(0)}% vs seas`;
+      setLabel(oiLabel, `OI ${compact(oi.value)}${devText}`, cfg.W - 4, clamp(oi.y, cfg.oiTop + 9, cfg.oiTop + cfg.oiH - 9), 'right');
     } else {
       showPoint(oiDot, null);
       hideEl(oiLabel);
@@ -1155,7 +1385,7 @@ function bindChartCrosshair(wrap, cfg) {
       hideEl(cotLabel);
     }
     if (spread && inSpread) {
-      showPoint(spreadDot, spread, CHART_THEME.spread);
+      showPoint(spreadDot, spread, spread.color);
       setLabel(spreadLabel, `SPR ${Number(spread.value).toFixed(cfg.dec)}`, cfg.W - 4, clamp(spread.y, cfg.spreadTop + 9, cfg.spreadTop + cfg.spreadH - 9), 'right');
     } else {
       showPoint(spreadDot, null);
@@ -1320,12 +1550,26 @@ function liveBarOHLC(lp) {
   return { open: o, high: Math.max(hi, o, p), low: Math.min(lo, o, p), close: p };
 }
 
-function injectLivePoint(bars, symbol) {
+// The live quote worth splicing onto `history` — the DAILY series it would extend, before any
+// aggregation — or null. A quote dated before that series' last bar is not today's forming bar:
+// a contract that did not trade reports its last TRADE day (PLU26 on 2026-09-11 quoted 09-09 at
+// 1904.5 after settling at 1797.1 on 09-10), and splicing it appended a stale bar behind the
+// settled one. Shared by loadChart, smt.js and the Weekly Outlook (screener.js).
+function liveQuoteFor(symbol, history) {
+  if (typeof liveQuotes !== 'object' || !liveQuotes) return null;
+  const lp = symbol && liveQuotes[symbol];
+  if (!lp || !Number.isFinite(lp.price) || !lp.day) return null;
+  const rows = history || [];
+  const last = rows[rows.length - 1];
+  if (last && String(lp.day).slice(0, 10) < String(last.date).slice(0, 10)) return null;
+  return lp;
+}
+
+function injectLivePoint(bars, symbol, history) {
   if (!bars || !bars.length) return bars;
   if (document.body.classList.contains('card-mode')) return bars;
-  if (typeof liveQuotes !== 'object' || !liveQuotes) return bars;
-  const lp = symbol && liveQuotes[symbol];
-  if (!lp || !Number.isFinite(lp.price) || !lp.day) return bars;
+  const lp = liveQuoteFor(symbol, history || bars);
+  if (!lp) return bars;
 
   const out = bars.slice();
   const c = liveBarOHLC(lp);       // real candle: {open, high, low, close}, missing legs filled
@@ -1366,6 +1610,7 @@ function injectLivePoint(bars, symbol) {
 //   priceH          — fixed price-pane height (the Charts tab fills the viewport)
 //   wheelZoom       — enable mouse-wheel zoom: slice the visible bars to state.[zoomStart,zoomEnd]
 //                     and attach a cursor-anchored wheel handler + dblclick-to-reset (default off)
+//   initialBars     — with wheelZoom: a new view opens on its newest N bars instead of all (default: all)
 //   rerender        — repaint callback the wheel handler calls (default: loadChart(cfg, opts));
 //                     the Charts tab passes () => renderBigChart(cfg) so its state-swap/maximize path runs
 // The maximized "Charts" tab calls with {controls:false, panes:true, rollMarkers:false, wheelZoom:true}
@@ -1396,7 +1641,7 @@ function loadChart(cfg, opts = {}) {
   }
 
   let bars = getChartBars(cfg);
-  bars = injectLivePoint(bars, chartSource.symbol);
+  bars = injectLivePoint(bars, chartSource.liveSymbol, fullHist);
 
   // Mouse-wheel zoom (Charts tab): slice the full bar set to the saved visible window. The
   // window auto-resets when the underlying view changes (market / interval / range / mode) so
@@ -1409,7 +1654,12 @@ function loadChart(cfg, opts = {}) {
     const N0 = fullBars.length;
     st._zoomN = N0;                                 // full bar count for this view — read by the Charts tab's "jump to latest" button
     const sig = `${st.key}|${st.interval}|${st.range}|${st.chartMode}|${st.contractSymbol || ''}`;
-    if (st._zoomSig !== sig) { st.zoomStart = null; st.zoomEnd = null; st._zoomSig = sig; }
+    if (st._zoomSig !== sig) {
+      st.zoomStart = null; st.zoomEnd = null; st._zoomSig = sig;
+      // Only the opening window moves (opts.initialBars): every bar stays loaded, the wheel zooms out
+      // and a double-click shows all of them.
+      if (opts.initialBars && N0 > opts.initialBars) { st.zoomStart = N0 - opts.initialBars; st.zoomEnd = N0 - 1; }
+    }
     if (N0 > 3 && Number.isFinite(st.zoomStart) && Number.isFinite(st.zoomEnd)) {
       const zs = Math.max(0, Math.min(st.zoomStart, N0 - 2));
       const ze = Math.max(zs + 1, Math.min(st.zoomEnd, N0 - 1));
@@ -1438,7 +1688,12 @@ function loadChart(cfg, opts = {}) {
   const volumeH = PANE_H.volume, oiH = PANE_H.oi, cotH = PANE_H.cot, spreadH = PANE_H.spread, gap = PANE_GAP;
   const innerW = W - padL - padR;
   const edgePad = Math.max(24, Math.min(56, Math.round(innerW * 0.05)));
-  const plotW = Math.max(120, innerW - edgePad * 2);
+  // Empty space kept to the RIGHT of the newest candle, so a drawing can be dragged into the
+  // future instead of stopping dead at the last bar. Charts tab only: opts.drawings is set by
+  // renderBigChart alone, so the Futures tab, Macro Shift, the Weekly Outlook and card-mode
+  // keep their exact old geometry -- which is what keeps the content bot's PNGs byte-stable.
+  const rightMargin = opts.drawings ? Math.round(innerW * CHART_DRAW_RIGHT_MARGIN) : 0;
+  const plotW = Math.max(120, innerW - edgePad * 2 - rightMargin);
   const n = bars.length;
 
   if (!n) {
@@ -1559,7 +1814,7 @@ function loadChart(cfg, opts = {}) {
         `<line class="chart-price-line" x1="${padL}" y1="${cy.toFixed(1)}" x2="${tagX.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="5,4"/>` +
         `<g class="chart-price-line">` +
         `<rect x="${tagX.toFixed(1)}" y="${(tagY - 8).toFixed(1)}" width="${tagW.toFixed(1)}" height="16" rx="2.5" fill="${CHART_THEME.bg}" stroke="${CHART_THEME.axis}" stroke-width="1"/>` +
-        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist">${txt}</text>` +
+        `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagY + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${txt}</text>` +
         `</g>`;
     }
   }
@@ -1583,7 +1838,7 @@ function loadChart(cfg, opts = {}) {
       const x = xForDate(r.date);
       rollLines += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${(padT + priceH).toFixed(1)}" stroke="#64748b" stroke-width="1" stroke-dasharray="5,4" opacity="0.38"/>`;
       if (r.code && x - lastLabelX >= 24) {
-        rollLabels += `<text x="${(x + 2).toFixed(1)}" y="${(padT + priceH - 4).toFixed(1)}" font-size="9" font-weight="600" fill="#475569" font-family="Geist">${r.code}</text>`;
+        rollLabels += `<text x="${(x + 2).toFixed(1)}" y="${(padT + priceH - 4).toFixed(1)}" font-size="9" font-weight="600" fill="#475569" font-family="Geist, system-ui, sans-serif">${r.code}</text>`;
         lastLabelX = x;
       }
     }
@@ -1619,7 +1874,7 @@ function loadChart(cfg, opts = {}) {
     // Right-aligned (text-anchor=end) at the right edge so long numbers (BTC: "100000.00")
     // are not clipped at the border.
     if (!(curY != null && Math.abs(+y - curY) < 9))
-      roundLevels += `<text x="${W-4}" y="${(+y+3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${lv.toFixed(dec)}</text>`;
+      roundLevels += `<text x="${W-4}" y="${(+y+3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${lv.toFixed(dec)}</text>`;
   }
 
   // ── OI and COT panes in daily and weekly views (CFTC data is weekly) ──
@@ -1672,18 +1927,14 @@ function loadChart(cfg, opts = {}) {
   const cotLabel = (cot[0] && (cot[0].cot_label || cot[0].cotLabel)) || 'Commercial Net';
   const cotReport = (cot[0] && cot[0].cot_report) || 'CFTC';
   const latestCotDate = cot.length ? cot[cot.length - 1].date : null;
-  const cotValue = d => (d.cot_net !== undefined && d.cot_net !== null) ? d.cot_net : d.comm_net;
+  const cotValue = cotNetOf;   // core.js — the one definition, shared with the Weekly Outlook
   const cotHedgingActive = chartState.cotHedging && (chartState.range === '6m' || chartState.range === '12m');
+  // The program window is the selected range here (6M or 12M); the Weekly Outlook draws the
+  // fixed 6M one, because that is what the screener's COT Hedging column reports. Both go
+  // through cotHedgeWindow() in core.js — see the note there.
   function trailingCotWindow(series, range) {
     if (!series.length || (range !== '6m' && range !== '12m')) return [];
-    const last = new Date(series[series.length - 1].date);
-    const days = RANGE_DAYS[range] || 365;
-    const cutoff = new Date(last);
-    cutoff.setDate(cutoff.getDate() - days);
-    return series.filter(d => {
-      const dt = new Date(d.date);
-      return dt >= cutoff && dt <= last;
-    });
+    return cotHedgeWindow(series, RANGE_DAYS[range] || 365);
   }
   const hedgeCot = cotHedgingActive ? trailingCotWindow(cot, chartState.range) : [];
   const cotBars = (cotHedgingActive ? hedgeCot : visCot).filter(inVisibleRange);
@@ -1774,10 +2025,10 @@ function loadChart(cfg, opts = {}) {
         <line x1="${padL}" y1="${volumeTop}" x2="${W-padR}" y2="${volumeTop}" stroke="${CHART_THEME.grid}"/>
         <line x1="${padL}" y1="${volumeBase}" x2="${W-padR}" y2="${volumeBase}" stroke="${CHART_THEME.grid}"/>
         ${volumeBarsSvg}
-        <text x="${W-padR+5}" y="${(volumeTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(volumeMax/1000).toFixed(0)}K</text>`
-        : `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No volume data in this range</text>`;
+        <text x="${W-padR+5}" y="${(volumeTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(volumeMax/1000).toFixed(0)}K</text>`
+        : `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No volume data in this range</text>`;
     } else {
-      volumeSvg = `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No volume data in this range</text>`;
+      volumeSvg = `<text x="${padL}" y="${volumeTop+volumeH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No volume data in this range</text>`;
     }
   }
 
@@ -1788,12 +2039,38 @@ function loadChart(cfg, opts = {}) {
   const latestOiPoint = oiPoints.length ? oiPoints[oiPoints.length - 1] : null;
   const latestOiDate = latestOiPoint?.date || latestCotDate;
   const oiHeading = 'CFTC WEEKLY TOTAL';
-  const oiLegend = `Open Interest: CFTC weekly total${latestOiDate ? ' · report date ' + latestOiDate : ''}`;
+
+  // Seasonal-tendency overlay (opt-in). Built from the FULL OI history — the curve needs whole
+  // years, not the visible slice — and projected onto the drawn points, so it lands on the pane's
+  // own contract scale. `=== true` on purpose: the Futures tab carries no OI/COT flags (undefined
+  // !== false keeps those panes on), and card mode renders through this same state, so anything
+  // looser would put a new line on the content bot's PNGs.
+  const showOiSeasonal = showOi && chartState.showOiSeasonal === true && typeof buildOiSeasonalCurve === 'function';
+  let oiSeasonalCurve = null, oiSeasonalPoints = [];
+  if (showOiSeasonal) {
+    // The FULL OI history, twice: the curve needs whole years, and its level is the trailing year
+    // of reports — neither may come from the visible slice, or the same line would draw
+    // differently at 6M and at 12M.
+    const oiAll = useDailyOi ? dailyOi : cot.filter(d => d.oi != null);
+    oiSeasonalCurve = buildOiSeasonalCurve(oiAll, OI_SEASONAL_YEARS);
+    if (oiSeasonalCurve) {
+      oiSeasonalPoints = oiSeasonalOverlay(oiPoints, oiSeasonalCurve, oiSeasonalLevel(oiAll, oiSeasonalCurve));
+    }
+  }
+  const oiSeasonalYears = oiSeasonalPoints.length ? `${oiSeasonalCurve.yearsUsed}Y` : null;   // 4Y while the archive is short of five
+
+  const oiLegend = `Open Interest: CFTC weekly total${latestOiDate ? ' · report date ' + latestOiDate : ''}`
+    + (oiSeasonalPoints.length
+        ? ` · Seasonal: average of ${oiSeasonalCurve.yearsUsed} complete years (${oiSeasonalCurve.startYear}-${oiSeasonalCurve.endYear}), at this market's current annual OI level`
+        : (showOiSeasonal ? ' · Seasonal: not enough complete years on file' : ''));
 
   // OI pane (oiTop precomputed via the stack-cursor)
   if (showOi && oiPoints.length) {
+    // The seasonal projection is on the pane's own scale, so the scale has to hold it too — a
+    // year that runs well under its usual path would otherwise draw the overlay into the frame.
+    const oiSeasonalVals = oiSeasonalPoints.filter(Boolean).map(sp => sp.value);
     const oiVals = oiPoints.map(d => d.oi);
-    const oiMin = Math.min(...oiVals), oiMax = Math.max(...oiVals);
+    const oiMin = Math.min(...oiVals, ...oiSeasonalVals), oiMax = Math.max(...oiVals, ...oiSeasonalVals);
     const oiRng = oiMax - oiMin;
     const oiY = v => oiTop + (oiRng ? (1 - (v - oiMin) / oiRng) * oiH : oiH / 2);
     let oiPath = '';
@@ -1801,7 +2078,8 @@ function loadChart(cfg, opts = {}) {
       date: d.date,
       x: xForDate(d.date),
       y: oiY(d.oi),
-      value: d.oi
+      value: d.oi,
+      seasonal: oiSeasonalPoints[i] ? oiSeasonalPoints[i].value : null
     })).sort((a, b) => a.x - b.x);
     let oiDots = '';
     oiPoints.forEach((d, i) => {
@@ -1815,24 +2093,44 @@ function loadChart(cfg, opts = {}) {
     // Which sources appear in view (used by the legend next to the OI heading).
     presentOiSources = new Set(oiPoints.map(d => d.source || (useDailyOi ? 'daily' : 'cftc_cot')));
 
+    // The seasonal line, on the same x positions as the OI line so the two read point by point.
+    // ONE unbroken line: the curve carries no anchor, so the only `M` after the first is a point
+    // the curve cannot speak for (a leap-day report), which is a hole and must not be bridged.
+    // It ran broken at every January while each year was re-anchored — reported on gold, silver
+    // and cotton, where the line sits close to the pane edge and the hole reads as a defect.
+    let oiSeasonalPath = '';
+    let oiSeasonalPen = false;
+    oiSeasonalPoints.forEach((sp, i) => {
+      const pt = sp ? crosshairOiPoints[i] : null;
+      if (!pt || !Number.isFinite(pt.x)) { oiSeasonalPen = false; return; }
+      oiSeasonalPath += (oiSeasonalPen ? 'L' : 'M')
+        + pt.x.toFixed(1) + ',' + oiY(sp.value).toFixed(1) + ' ';
+      oiSeasonalPen = true;
+    });
+    const oiSeasonalSvg = oiSeasonalPath
+      ? `<path d="${oiSeasonalPath}" fill="none" stroke="${CHART_THEME.oiSeasonal}" stroke-width="1.5" stroke-dasharray="5,3" stroke-linecap="round" opacity="0.9"/>`
+      : '';
+
     oiSvg = `
       <line x1="${padL}" y1="${oiTop}" x2="${W-padR}" y2="${oiTop}" stroke="${CHART_THEME.grid}"/>
       <line x1="${padL}" y1="${oiTop+oiH}" x2="${W-padR}" y2="${oiTop+oiH}" stroke="${CHART_THEME.grid}"/>
       ${oiPoints.length > 1 ? `<path d="${oiPath}" fill="none" stroke="${CHART_THEME.oi}" stroke-width="1.5" opacity="0.8"/>` : ''}
+      ${oiSeasonalSvg}
       ${oiDots}
-      <text x="${W-padR+5}" y="${(oiTop+5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMax/1000).toFixed(0)}K</text>
-      <text x="${W-padR+5}" y="${(oiTop+oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMin/1000).toFixed(0)}K</text>`;
+      <text x="${W-padR+5}" y="${(oiTop+5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(oiMax/1000).toFixed(0)}K</text>
+      <text x="${W-padR+5}" y="${(oiTop+oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(oiMin/1000).toFixed(0)}K</text>`;
   } else if (showOi) {
-    oiSvg = `<text x="${padL}" y="${oiTop+oiH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No Open Interest data in this range</text>`;
+    oiSvg = `<text x="${padL}" y="${oiTop+oiH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No Open Interest data in this range</text>`;
   }
 
   // COT pane (report-dependent net position; cotTop precomputed via the stack-cursor)
   if (showCot && cotBars.length) {
     const thresholdSource = cotHedgingActive ? hedgeCot : cotBars;
     const cotVals = thresholdSource.map(cotValue).filter(v => v !== null && v !== undefined);
-    const cotMin = cotVals.length ? Math.min(...cotVals) : -1;
-    const cotMax = cotVals.length ? Math.max(...cotVals) : 1;
-    const cotThreshold = (cotMin + cotMax) / 2;
+    // Midpoint of the window, through core.js — the same level the Weekly Outlook draws and
+    // screener.py's cot_hedge signal reads.
+    const lv = cotHedgeLevels(thresholdSource) || { min: -1, max: 1, threshold: 0 };
+    const cotMin = lv.min, cotMax = lv.max, cotThreshold = lv.threshold;
     const cotAbs = cotVals.length ? (Math.max(...cotVals.map(Math.abs)) || 1) : 1;
     const cotPad = Math.max(1, (cotMax - cotMin) * 0.08);
     const cotLo = cotHedgingActive ? cotMin - cotPad : -cotAbs;
@@ -1849,27 +2147,32 @@ function loadChart(cfg, opts = {}) {
     const cotLayout = cotBarLayout(cotBars.map(d => xForDate(d.date)), plotW);
     const barW = Math.max(1, Math.min(14, cotLayout.step * 0.55));
     let bars2 = '';
+    // Paper cards (core.js PAPER_CARD_COLORS) draw the bars in the website's bull/bear; the app
+    // keeps its own green/red in both themes, which is why these stay literals rather than tokens.
+    const paperCard = typeof _isPaperCard === 'function' && _isPaperCard();
+    const cotUp = paperCard ? PAPER_CARD_COLORS['--chart-bull'] : '#0ea679';
+    const cotDown = paperCard ? PAPER_CARD_COLORS['--chart-bear'] : '#e53e3e';
     cotBars.forEach((d, i) => {
       const net = cotValue(d);
       if (net === null || net === undefined) return;
       const x = cotLayout.xs[i], y = cotY(net), h = Math.abs(y - cotMid);
       const col = cotHedgingActive
-        ? (net >= cotThreshold ? '#0ea679' : '#e53e3e')
-        : (net >= 0 ? '#0ea679' : '#e53e3e');
+        ? (net >= cotThreshold ? cotUp : cotDown)
+        : (net >= 0 ? cotUp : cotDown);
       crosshairCotPoints.push({ date: d.date, x, y, value: net, color: col });
       bars2 += `<rect x="${(x-barW/2).toFixed(1)}" y="${Math.min(y,cotMid).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1,h).toFixed(1)}" fill="${col}" opacity="0.7" rx="1"/>`;
     });
     const upperLabel = cotHedgingActive ? cotMax : cotAbs;
     const lowerLabel = cotHedgingActive ? cotMin : -cotAbs;
-    const midLabel = cotHedgingActive ? `<text x="${W-padR+5}" y="${(cotMid+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.bull}" font-family="Geist">${(cotThreshold/1000).toFixed(0)}K</text>` : '';
+    const midLabel = cotHedgingActive ? `<text x="${W-padR+5}" y="${(cotMid+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.bull}" font-family="Geist, system-ui, sans-serif">${(cotThreshold/1000).toFixed(0)}K</text>` : '';
     cotSvg = `
       <line x1="${padL}" y1="${cotMid.toFixed(1)}" x2="${W-padR}" y2="${cotMid.toFixed(1)}" stroke="${cotHedgingActive ? CHART_THEME.bull : CHART_THEME.axis}" stroke-dasharray="4,3"/>
       ${bars2}
-      <text x="${W-padR+5}" y="${(cotTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(upperLabel/1000).toFixed(0)}K</text>
+      <text x="${W-padR+5}" y="${(cotTop+8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(upperLabel/1000).toFixed(0)}K</text>
       ${midLabel}
-      <text x="${W-padR+5}" y="${(cotTop+cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(lowerLabel/1000).toFixed(0)}K</text>`;
+      <text x="${W-padR+5}" y="${(cotTop+cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(lowerLabel/1000).toFixed(0)}K</text>`;
   } else if (showCot) {
-    cotSvg = `<text x="${padL}" y="${cotTop+cotH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No CFTC COT data in this range</text>`;
+    cotSvg = `<text x="${padL}" y="${cotTop+cotH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No CFTC COT data in this range</text>`;
   }
 
   // Calendar-spread pane (front minus next contract; negative = contango).
@@ -1879,54 +2182,21 @@ function loadChart(cfg, opts = {}) {
     // spreadTop precomputed via the stack-cursor (stacks below COT / OI / Volume / price as present).
     // Settled EoD only: the pane ends at the last closed bar. No live/forming point is
     // appended (the price line keeps its live candle; the spread deliberately does not).
-    let spreadSeries = normalizeSpreadSeries(cfg.calendar_spread_series || []);
+    let spreadSeries = currentPairSpread(normalizeSpreadSeries(cfg.calendar_spread_series || []));
     spreadSeries = spreadSeries.filter(inVisibleRange);
     if (spreadSeries.length) {
-      const spVals = spreadSeries.map(d => d.spread);
-      const dataLo = Math.min(...spVals), dataHi = Math.max(...spVals);
-      // Scale tightly around the REAL values (do NOT force 0), with padding, so the line
-      // unfolds across the whole box instead of touching the frame (cf. the CAD bug).
-      // Forcing 0 would glue a consistently positive/negative spread (e.g. USD index
-      // ~+0.26) to the border as a flat band instead of using the window.
-      const pad = ((dataHi - dataLo) || Math.abs(dataHi) || 1) * 0.12;
-      const spLo = dataLo - pad, spHi = dataHi + pad;
-      const spRng = (spHi - spLo) || 1;
-      const spreadY = v => spreadTop + (1 - (v - spLo) / spRng) * spreadH;
-      // ALWAYS show the zero line for orientation: at its true position when 0 is inside
-      // the window, otherwise pinned to the nearer edge (line above 0 = premium /
-      // backwardation, below = contango). When 0 is pinned the distance is deliberately
-      // NOT to scale — the line should fill the window dynamically.
-      const zeroYraw = spreadY(0);
-      const zeroY = Math.max(spreadTop, Math.min(spreadTop + spreadH, zeroYraw));
-      const zeroPinned = zeroYraw !== zeroY;
+      // Only the pair trading today, its scale, colour by side of zero and labels:
+      // currentPairSpread / spreadPaneScale / spreadPaneSvg (next to normalizeSpreadSeries),
+      // shared with the Weekly Outlook.
+      const sp = spreadPaneScale(spreadSeries.map(d => d.spread), spreadTop, spreadH);
       crosshairSpreadPoints = spreadSeries.map(d => ({
-        date: d.date, x: xForDate(d.date), y: spreadY(d.spread), value: d.spread,
+        date: d.date, x: xForDate(d.date), y: sp.y(d.spread), value: d.spread,
+        color: spreadSideColor(d.spread),
         pair: `${d.front_contract || ''}-${d.next_contract || ''}`
       })).sort((a, b) => a.x - b.x);
-      // Break the line across gaps (>7 days) so missing days aren't bridged, and at a
-      // change of contract pair: right after a roll the generator keeps one preceding
-      // pair for context (SPREAD_MIN_PAIR_POINTS), and connecting the two would draw
-      // the step between two different horizons as a move in the spread.
-      let spPath = '', prevTime = null, prevPair = null;
-      crosshairSpreadPoints.forEach((p, i) => {
-        const t = new Date(p.date).getTime();
-        const brk = prevTime !== null && ((t - prevTime) > 7 * 864e5 || p.pair !== prevPair);
-        spPath += (i === 0 || brk ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ' ';
-        prevTime = t; prevPair = p.pair;
-      });
-      const spDots = crosshairSpreadPoints.map(p =>
-        `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.6" fill="${CHART_THEME.spread}" opacity="0.5"/>`).join('');
-      spreadSvg = `
-        <line x1="${padL}" y1="${spreadTop}" x2="${W-padR}" y2="${spreadTop}" stroke="${CHART_THEME.grid}"/>
-        <line x1="${padL}" y1="${spreadTop+spreadH}" x2="${W-padR}" y2="${spreadTop+spreadH}" stroke="${CHART_THEME.grid}"/>
-        <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W-padR}" y2="${zeroY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"${zeroPinned ? ' opacity="0.65"' : ''}/>
-        <text x="${W-padR+5}" y="${(zeroY+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">0</text>
-        ${spreadSeries.length > 1 ? `<path d="${spPath}" fill="none" stroke="${CHART_THEME.spread}" stroke-width="1.5" opacity="0.85"/>` : ''}
-        ${spDots}
-        <text x="${W-padR+5}" y="${(spreadY(dataHi)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataHi.toFixed(dec)}</text>
-        <text x="${W-padR+5}" y="${(spreadY(dataLo)+3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataLo.toFixed(dec)}</text>`;
+      spreadSvg = spreadPaneSvg(crosshairSpreadPoints, sp, padL, W-padR, dec, W - 4);
     } else {
-      spreadSvg = `<text x="${padL}" y="${spreadTop+spreadH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No calendar-spread data in this range (fills in over time)</text>`;
+      spreadSvg = `<text x="${padL}" y="${spreadTop+spreadH/2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No calendar-spread data in this range (fills in over time)</text>`;
     }
   }
 
@@ -1952,7 +2222,7 @@ function loadChart(cfg, opts = {}) {
         // Label the year on yearly dividers and on the January (year-start) daily divider; other
         // monthly dividers stay unlabeled to avoid clutter when bars are dense.
         const label = yearly ? String(yr) : (mo === 0 ? String(yr) : '');
-        if (label) dividerLabels += `<text x="${(barXs[i] - slot / 2 + 3).toFixed(1)}" y="${(padT + 10).toFixed(1)}" font-size="9" fill="${CHART_THEME.text}" font-family="Geist" opacity="0.85">${label}</text>`;
+        if (label) dividerLabels += `<text x="${(barXs[i] - slot / 2 + 3).toFixed(1)}" y="${(padT + 10).toFixed(1)}" font-size="9" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" opacity="0.85">${label}</text>`;
       }
       prevKey = key;
     });
@@ -1962,43 +2232,48 @@ function loadChart(cfg, opts = {}) {
   for (let g = 0; g <= 5; g++) {
     const i = Math.round((n-1) * g / 5);
     const x = xAt(i).toFixed(1);
-    xLabels += `<text x="${x}" y="${totalH-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
+    xLabels += `<text x="${x}" y="${totalH-4}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" text-anchor="middle">${fmtAxisDate(bars[i].date)}</text>`;
   }
   const intervalLabel = { daily:'Daily', weekly:'Weekly', monthly:'Monthly', quarterly:'Quarterly' }[chartState.interval] || 'Daily';
   const rangeLabel = { '6m':'6 Months', '12m':'12 Months', '5y':'5 Years', '20y':'20 Years', 'max':'Max History' }[chartState.range] || '';
 
   // Source legend, placed to the right of the OI heading.
-  const oiHeadingText = `OPEN INTEREST (${oiHeading})`;
+  const oiHeadingText = `OPEN INTEREST (${oiHeading}${oiSeasonalYears ? ` · SEASONAL ${oiSeasonalYears} AVG` : ''})`;
   // width at 10px Geist 600 incl. 0.05em letter-spacing, plus a comfortable gap
   const oiHeadingWidth = oiHeadingText.length * (6.8 + 0.5) + 28;
   const oiLegendStartX = padL + oiHeadingWidth;
   const legendDefs = [];
   if (presentOiSources.has('cftc_cot') || !useDailyOi)
     legendDefs.push({ mark: `<circle cx="0" cy="-3" r="2.3" fill="${CHART_THEME.oiCftc}" opacity="0.6"/>`, label: 'CFTC weekly' });
+  if (oiSeasonalYears)
+    legendDefs.push({
+      mark: `<line x1="-2" y1="-3" x2="12" y2="-3" stroke="${CHART_THEME.oiSeasonal}" stroke-width="1.5" stroke-dasharray="5,3"/>`,
+      label: `seasonal ${oiSeasonalYears} average`
+    });
   let oiHeadingLegend = '';
   if (legendDefs.length > 1) {
     let lx = oiLegendStartX;
     oiHeadingLegend = legendDefs.map(d => {
-      const g = `<g transform="translate(${lx.toFixed(1)},${(oiTop - 8).toFixed(1)})">${d.mark}<text x="7" y="0" font-size="9" fill="${CHART_THEME.text}" font-family="Geist">${d.label}</text></g>`;
+      const g = `<g transform="translate(${lx.toFixed(1)},${(oiTop - 8).toFixed(1)})">${d.mark}<text x="7" y="0" font-size="9" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${d.label}</text></g>`;
       lx += 18 + d.label.length * 5.0;
       return g;
     }).join('');
   }
 
   const volumePaneSvg = showVolume ? `
-        <text x="${padL}" y="${volumeTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">VOLUME (${volumeHeading})</text>
+        <text x="${padL}" y="${volumeTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em">VOLUME (${volumeHeading})</text>
         ${volumeSvg}` : '';
 
   const panesSvg = showPanes ? `
         ${volumePaneSvg}
         ${taPaneHeadings}
         ${taPanesSvg}
-        ${showOi ? `<text x="${padL}" y="${oiTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">${oiHeadingText}</text>
+        ${showOi ? `<text x="${padL}" y="${oiTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em">${oiHeadingText}</text>
         ${oiHeadingLegend}
         ${oiSvg}` : ''}
-        ${showCot ? `<text x="${padL}" y="${cotTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">COT · ${cotLabel.toUpperCase()}${cotHedgingActive ? ` · ${chartState.range.toUpperCase()} HEDGING PROGRAM` : ''}</text>
+        ${showCot ? `<text x="${padL}" y="${cotTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em">COT · ${cotLabel.toUpperCase()}${cotHedgingActive ? ` · ${chartState.range.toUpperCase()} HEDGING PROGRAM` : ''}</text>
         ${cotSvg}` : ''}
-        ${showSpread ? `<text x="${padL}" y="${spreadTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em">CALENDAR SPREAD · FRONT - NEXT (&lt;0 = CONTANGO)</text>` : ''}
+        ${showSpread ? `<text x="${padL}" y="${spreadTop-8}" font-size="10" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em">CALENDAR SPREAD · FRONT - NEXT (&lt;0 = CONTANGO)</text>` : ''}
         ${spreadSvg}` : '';
 
   const chartKind = chartSource.mode === 'contract'
@@ -2009,9 +2284,12 @@ function loadChart(cfg, opts = {}) {
   const sectionPanes = paneBits.length
     ? ` · with ${paneBits.join(', ')}${cotHedgingActive && showCot ? ' · COT Hedging Program' : ''}`
     : '';
+  // Zoomed in, the count says how much of the range is on screen: "5 Years (126 of 1064 Candles)".
+  const zoomedIn = wheelZoom && Number.isFinite(st.zoomStart) && Number.isFinite(st.zoomEnd) && n < fullBars.length;
+  const candleCount = zoomedIn ? `${n} of ${fullBars.length} Candles` : `${n} Candles`;
   const sectionLabel = showPanes
-    ? `${chartKind} · ${intervalLabel} · ${rangeLabel} (${n} Candles)${sectionPanes}`
-    : `${chartKind} · ${intervalLabel} · ${rangeLabel} (${n} Candles)`;
+    ? `${chartKind} · ${intervalLabel} · ${rangeLabel} (${candleCount})${sectionPanes}`
+    : `${chartKind} · ${intervalLabel} · ${rangeLabel} (${candleCount})`;
 
   const hedgingLegend = cotHedgingActive
     ? `COT Hedging Program ${chartState.range.toUpperCase()} trailing: green above midpoint, red below &nbsp;·&nbsp;`
@@ -2067,7 +2345,7 @@ function loadChart(cfg, opts = {}) {
         ${xLabels}
       </svg>
     </div>
-    <div style="font-size:0.65rem;color:var(--muted);margin-top:0.6rem;line-height:1.5">${legend}</div>`;
+    <div style="font-size:0.625rem;color:var(--muted);margin-top:0.6rem;line-height:1.5">${legend}</div>`;
   bindChartCrosshair(body.querySelector('.chart-svg-wrap'), {
     W, totalH, padL, padR, padT, priceH, axisY,
     volumeTop, volumeH, oiTop, oiH, cotTop, cotH, spreadTop, spreadH,
@@ -2086,12 +2364,27 @@ function loadChart(cfg, opts = {}) {
     // Continuous date<->x mapping (bars are evenly spaced by INDEX, not real time): interpolate
     // between the two surrounding bars, extrapolate (nearest gap's slope) outside the range. This
     // is what lets a line drawn on D1 land correctly on 3M or extend off-screen when scrolled.
+    // OUTSIDE the bar range the slope cannot come from the two outermost bars' own gap: a
+    // Fri->Mon gap is three days where a weekday gap is one, so the same future date would land
+    // up to 3x further right depending purely on which weekday the series happens to end on, and
+    // a drawing anchored past the last candle would jump from session to session. The MEAN gap
+    // over a trailing window is stable and still tracks real calendar time. Bars are evenly
+    // spaced by index, so the pixel step per bar is exactly `slot`.
+    const EXTRAP_BARS = 60;
+    const _meanGapMs = (i0, i1) => {
+      const steps = i1 - i0;
+      const g = steps > 0 ? (barTimes[i1] - barTimes[i0]) / steps : 0;
+      return g > 0 ? g : 864e5;                                  // degenerate series -> one day per bar
+    };
+    const _mBars = barTimes.length;
+    const _gapLeft = _mBars > 1 ? _meanGapMs(0, Math.min(_mBars - 1, EXTRAP_BARS)) : 864e5;
+    const _gapRight = _mBars > 1 ? _meanGapMs(Math.max(0, _mBars - 1 - EXTRAP_BARS), _mBars - 1) : 864e5;
     const _xForTime = (t) => {
       const m = barTimes.length;
       if (!m) return padL;
       if (m === 1) return barXs[0];
-      if (t <= barTimes[0]) return barXs[0] + (t - barTimes[0]) * ((barXs[1] - barXs[0]) / ((barTimes[1] - barTimes[0]) || 1));
-      if (t >= barTimes[m - 1]) return barXs[m - 1] + (t - barTimes[m - 1]) * ((barXs[m - 1] - barXs[m - 2]) / ((barTimes[m - 1] - barTimes[m - 2]) || 1));
+      if (t <= barTimes[0]) return barXs[0] + (t - barTimes[0]) * (slot / _gapLeft);
+      if (t >= barTimes[m - 1]) return barXs[m - 1] + (t - barTimes[m - 1]) * (slot / _gapRight);
       let lo = 0, hi = m - 1;
       while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (barTimes[mid] <= t) lo = mid; else hi = mid; }
       const f = (t - barTimes[lo]) / ((barTimes[hi] - barTimes[lo]) || 1);
@@ -2101,8 +2394,8 @@ function loadChart(cfg, opts = {}) {
       const m = barXs.length;
       if (!m) return 0;
       if (m === 1) return barTimes[0];
-      if (x <= barXs[0]) return barTimes[0] + (x - barXs[0]) * ((barTimes[1] - barTimes[0]) / ((barXs[1] - barXs[0]) || 1));
-      if (x >= barXs[m - 1]) return barTimes[m - 1] + (x - barXs[m - 1]) * ((barTimes[m - 1] - barTimes[m - 2]) / ((barXs[m - 1] - barXs[m - 2]) || 1));
+      if (x <= barXs[0]) return barTimes[0] + (x - barXs[0]) * (_gapLeft / slot);
+      if (x >= barXs[m - 1]) return barTimes[m - 1] + (x - barXs[m - 1]) * (_gapRight / slot);
       let lo = 0, hi = m - 1;
       while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (barXs[mid] <= x) lo = mid; else hi = mid; }
       const f = (x - barXs[lo]) / ((barXs[hi] - barXs[lo]) || 1);
@@ -2116,9 +2409,19 @@ function loadChart(cfg, opts = {}) {
       yForPrice: (p) => padT + ((pHi - p) / pSpan) * priceH,
       priceFromY: (y) => { const yc = Math.max(padT, Math.min(padT + priceH, y)); return pHi - ((yc - padT) / priceH) * pSpan; },
       xForTime: _xForTime, timeForX: _timeForX,
-      snapDate: (x) => { const b = bars[nearestBarIndexByTime(_timeForX(x))]; return b ? b.date : null; },
+      // Anchors snap to a real candle inside the series. Past the newest bar there IS no candle
+      // to snap to, so the extrapolated time is kept verbatim -- that is what lets a drawing be
+      // anchored in the future at all (the right margin above is the room to do it in). Without
+      // this every x right of the last bar collapsed onto that bar's date.
+      snapDate: (x) => {
+        const t = _timeForX(x);
+        if (t > barTimes[barTimes.length - 1]) return new Date(t).toISOString();
+        const b = bars[nearestBarIndexByTime(t)];
+        return b ? b.date : null;
+      },
       snapDateAny: (t) => {
         if (!_fullBarTimes.length) return null;
+        if (t > _fullBarTimes[_fullBarTimes.length - 1]) return new Date(t).toISOString();   // future: nothing to snap to
         let best = 0, d = Math.abs(_fullBarTimes[0] - t);
         for (let i = 1; i < _fullBarTimes.length; i++) { const e = Math.abs(_fullBarTimes[i] - t); if (e < d) { d = e; best = i; } }
         return fullBars[best].date;
@@ -2214,6 +2517,10 @@ function renderChartControls() {
         <input type="checkbox" data-show-spread ${chartState.showSpread ? 'checked' : ''}>
         <span>Spread</span>
       </label>
+      <label class="cot-filter-box" title="Overlay the 5-year seasonal average of Open Interest on the OI pane (re-based each January)">
+        <input type="checkbox" data-show-oi-seasonal ${chartState.showOiSeasonal ? 'checked' : ''}>
+        <span>OI Seasonal</span>
+      </label>
       <label class="cot-filter-box ${hedgeSupported ? '' : 'disabled'}" title="Only 6M and 12M">
         <input type="checkbox" data-cot-hedging ${chartState.cotHedging && hedgeSupported ? 'checked' : ''} ${hedgeSupported ? '' : 'disabled'}>
         <span>COT Hedging Program</span>
@@ -2264,6 +2571,9 @@ function bindChartControls(cfg) {
   });
   document.querySelectorAll('input[data-show-spread]').forEach(b => {
     b.onchange = () => { chartState.showSpread = b.checked; loadChart(cfg); };
+  });
+  document.querySelectorAll('input[data-show-oi-seasonal]').forEach(b => {
+    b.onchange = () => { chartState.showOiSeasonal = b.checked; loadChart(cfg); };
   });
 }
 

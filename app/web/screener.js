@@ -1,7 +1,11 @@
 let screenerData = null;
-function resetScreenerData() { screenerData = null; }
+// An in-place refresh reload (refresh.js) drops both files the generator rewrites for the
+// screener: screener.json and the 3/3 period log. The log used to survive it, so the Weekly
+// Outlook drew fresh signals over the previous run's band, entry marker and "Active since"
+// line until the browser was reloaded.
+function resetScreenerData() { screenerData = null; _wkThreeThreeLog = null; }
 let screenerSort = { col: 'category', dir: 1 };
-const screenerFilters = { seasonal: new Set(), cot_hedge: new Set(), structure: new Set() };
+const screenerFilters = { setup: new Set(), seasonal: new Set(), cot_hedge: new Set(), structure: new Set() };
 let screenerView = 'daily';   // 'daily' (live screener) | 'weekly' (3/3 + 2/3 outlook)
 let screenerWeekSel = 0;      // Weekly Outlook: 0 = this week, 1 = next week
 
@@ -33,9 +37,9 @@ function loadScreenerState() {
   try { st = JSON.parse(localStorage.getItem(SCREENER_STATE_KEY) || 'null'); } catch (e) { st = null; }
   if (!st) return;
   if (st.view === 'weekly' || st.view === 'daily') screenerView = st.view;
-  if (st.sort && st.sort.col && ['category', 'display_name', 'seasonal', 'cot_hedge', 'structure'].includes(st.sort.col)) screenerSort = { col: st.sort.col, dir: st.sort.dir === -1 ? -1 : 1 };
+  if (st.sort && st.sort.col && ['category', 'display_name', 'score', 'seasonal', 'cot_hedge', 'structure'].includes(st.sort.col)) screenerSort = { col: st.sort.col, dir: st.sort.dir === -1 ? -1 : 1 };
   if (st.filters) {
-    for (const sig of ['seasonal', 'cot_hedge', 'structure']) {
+    for (const sig of ['setup', 'seasonal', 'cot_hedge', 'structure']) {
       screenerFilters[sig].clear();
       (st.filters[sig] || []).forEach(v => screenerFilters[sig].add(v));
     }
@@ -52,19 +56,40 @@ function onScreenerInput() {
   renderScreener();
 }
 
+// In flight beside the cache, keyed by _dataReloadNonce — the guard loadCategory() has
+// (core.js). An in-place refresh reload resets screenerData and bumps the nonce, and a fetch
+// still out from before that carries the old file. Unguarded, it landed after the reset:
+// either ahead of the reload's own ensureScreenerData(), which then returned early on it, or
+// behind it, overwriting the fresh file. Both left the Screener, the Weekly Outlook and both
+// heatmaps on pre-refresh signals until a browser reload.
+let _screenerInFlight = null;   // { nonce, promise }
+
 async function ensureScreenerData(statusEl = null) {
   if (screenerData) return true;
   if (statusEl) statusEl.innerHTML = '<div class="screener-empty">Loading screener…</div>';
-  try {
-    const res = await fetch(`${DATA_DIR}/screener.json?v=${DATA_VERSION}&r=${_dataReloadNonce}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('not found');
-    screenerData = await res.json();
-    populateScreenerCategories();
-    return true;
-  } catch (e) {
+  const nonce = _dataReloadNonce;
+  let pending = _screenerInFlight;
+  if (!pending || pending.nonce !== nonce) {
+    const entry = {
+      nonce,
+      promise: fetch(`${DATA_DIR}/screener.json?v=${DATA_VERSION}&r=${nonce}`, { cache: 'no-store' })
+        .then(res => { if (!res.ok) throw new Error('not found'); return res.json(); }),
+    };
+    entry.promise.catch(() => {}).then(() => { if (_screenerInFlight === entry) _screenerInFlight = null; });
+    _screenerInFlight = pending = entry;
+  }
+  let data = null;
+  try { data = await pending.promise; } catch (e) {}
+  if (nonce !== _dataReloadNonce) return ensureScreenerData(statusEl);   // a refresh landed meanwhile: load its file
+  if (!data) {
     if (statusEl) statusEl.innerHTML = '<div class="screener-empty">Screener data was not found. Please refresh the data once.</div>';
     return false;
   }
+  if (!screenerData) {
+    screenerData = data;
+    populateScreenerCategories();
+  }
+  return true;
 }
 
 async function openScreener() {
@@ -127,6 +152,19 @@ function sigBadge(v) {
   return '<span class="sig sig-na">–</span>';
 }
 
+// The Setup column reads the generator's signed `score` (screener_score, -3…+3), never a recount:
+// |score| 3 is a full setup, 2 is two signals aligned with the third neutral, and a 2-against-1
+// split sums to ±1 and shows none. Dots plus an arrow, so the direction is not carried by colour.
+function setupScore(r) { return Number.isFinite(r.score) ? r.score : 0; }
+function setupBadge(r) {
+  const s = setupScore(r), n = Math.abs(s);
+  if (n < 2) return '<span class="setup setup-none">–</span>';
+  const word = s > 0 ? 'bullish' : 'bearish';
+  const dots = [0, 1, 2].map(i => `<span class="wk-dot${i < n ? ' on' : ''}"></span>`).join('');
+  const title = n === 3 ? `All three signals ${word}` : `Two signals ${word}, one neutral`;
+  return `<span class="setup ${s > 0 ? 'bull' : 'bear'}${n === 3 ? ' full' : ''}" title="${title}"><span class="wk-dots">${dots}</span>${n}/3 ${s > 0 ? '▲' : '▼'}</span>`;
+}
+
 function sortScreener(col) {
   if (screenerSort.col === col) screenerSort.dir *= -1;
   else screenerSort = { col, dir: (col === 'display_name' || col === 'category') ? 1 : -1 };
@@ -141,6 +179,9 @@ function filteredScreenerRows() {
   return screenerData.filter(r => {
     if (catF && r.category !== catF) return false;
     if (q && !(r.display_name || '').toLowerCase().includes(q)) return false;
+    const setup = Math.abs(setupScore(r));
+    if (screenerFilters.setup.has('full') && setup !== 3) return false;
+    if (screenerFilters.setup.has('near') && setup < 2) return false;
     for (const sig of ['seasonal', 'cot_hedge', 'structure']) {
       const set = screenerFilters[sig];
       if (set.size && !set.has(r[sig])) return false;
@@ -171,18 +212,21 @@ function renderScreenerFilters() {
   const bar = document.getElementById('screenerFilterBar');
   if (!bar) return;
   const groups = [
+    ['setup', 'Setup', [['full', '3/3'], ['near', '2/3+']]],
     ['seasonal', 'Seasonals', [['bullish', 'Bullish'], ['bearish', 'Bearish'], ['neutral', 'Neutral']]],
     ['cot_hedge', 'COT Hedging', [['bullish', 'Bullish'], ['bearish', 'Bearish']]],
     ['structure', 'Term Structure', [['premium', 'Premium'], ['discount', 'Discount']]],
   ];
+  const restoreFocus = keepFocusIn(bar);   // a chip toggled from the keyboard is replaced below
   bar.innerHTML = groups.map(([sig, label, opts]) => `<div class="filter-group">
       <span class="filter-group-label">${label}</span>
       ${opts.map(([val, txt]) => {
         const on = screenerFilters[sig].has(val);
-        const tone = val === 'neutral' ? 'neu' : (val === 'bullish' || val === 'premium') ? 'bull' : 'bear';
-        return `<button type="button" class="filter-chip ${tone}${on ? ' on' : ''}" onclick="toggleScreenerFilter('${sig}','${val}')">${txt}</button>`;
+        const tone = sig === 'setup' ? 'setup' : val === 'neutral' ? 'neu' : (val === 'bullish' || val === 'premium') ? 'bull' : 'bear';
+        return `<button type="button" class="filter-chip ${tone}${on ? ' on' : ''}" data-focus-key="chip-${sig}-${val}" aria-pressed="${on}" onclick="toggleScreenerFilter('${sig}','${val}')">${txt}</button>`;
       }).join('')}
     </div>`).join('');
+  restoreFocus();
 }
 
 function screenerToggleWatch(key, event) {
@@ -235,6 +279,7 @@ function renderScreener() {
       const va = txt(a.display_name), vb = txt(b.display_name);
       return va < vb ? -dir : va > vb ? dir : 0;
     }
+    if (col === 'score') return (setupScore(a) - setupScore(b)) * dir;
     if (col === 'seasonal' || col === 'cot_hedge' || col === 'structure') {
       return (sigRank(a[col]) - sigRank(b[col])) * dir;
     }
@@ -245,34 +290,42 @@ function renderScreener() {
   const cats = Object.keys(groups).sort((a, b) => catRank(a) - catRank(b));
 
   const arrow = c => col === c ? `<span class="arrow">${dir > 0 ? '▲' : '▼'}</span>` : '';
-  const th = (c, label) => `<th onclick="sortScreener('${c}')">${label}${arrow(c)}</th>`;
+  const th = (c, label) => `<th tabindex="0" data-focus-key="sort-${c}" aria-sort="${col === c ? (dir > 0 ? 'ascending' : 'descending') : 'none'}" onclick="sortScreener('${c}')">${label}${arrow(c)}</th>`;
   const starCell = r => {
     const inWatch = watchlist.includes(r.key);
-    return `<td class="screener-star"><button type="button" class="wl-star${inWatch ? ' on' : ''}" onclick="screenerToggleWatch('${r.key}', event)" title="${inWatch ? 'Remove from watchlist' : 'Add to watchlist'}">${inWatch ? '★' : '☆'}</button></td>`;
+    return `<td class="screener-star"><button type="button" class="wl-star${inWatch ? ' on' : ''}" data-focus-key="star-${r.key}" aria-pressed="${inWatch}" aria-label="Watchlist: ${esc(r.display_name || r.key)}" onclick="screenerToggleWatch('${r.key}', event)" title="${inWatch ? 'Remove from watchlist' : 'Add to watchlist'}">${inWatch ? '★' : '☆'}</button></td>`;
   };
 
   const bodyHtml = cats.map(cat => {
-    const head = `<tr class="screener-cat-head"><td colspan="5">${CAT_ICONS[cat] || ''} ${esc(cat)}</td></tr>`;
-    const items = groups[cat].slice().sort(withinSort).map(r => `<tr class="screener-row" onclick="openScreenerMarket('${r.key}')">
+    const head = `<tr class="screener-cat-head"><td colspan="6">${catIcon(cat)}${esc(cat)}</td></tr>`;
+    const items = groups[cat].slice().sort(withinSort).map(r => {
+      const s = setupScore(r);
+      const full = Math.abs(s) === 3 ? (s > 0 ? ' setup-full-bull' : ' setup-full-bear') : '';
+      return `<tr class="screener-row${full}" tabindex="0" data-focus-key="row-${r.key}" onclick="openScreenerMarket('${r.key}')">
         ${starCell(r)}
         <td><span class="screener-name">${esc(r.display_name || r.key)}</span></td>
+        <td>${setupBadge(r)}</td>
         <td>${sigBadge(r.seasonal)}</td>
         <td>${sigBadge(r.cot_hedge)}</td>
         <td class="sig-structure">${sigBadge(r.structure)}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
     return head + items;
   }).join('');
 
+  const restoreFocus = keepFocusIn(body);   // sorting or starring from the keyboard re-renders the table
   body.innerHTML = `<table>
     <thead><tr>
       <th></th>
       ${th('display_name', 'Market')}
+      ${th('score', 'Setup')}
       ${th('seasonal', 'Seasonals')}
       ${th('cot_hedge', 'COT Hedging')}
       ${th('structure', 'Term Structure')}
     </tr></thead>
     <tbody>${bodyHtml}</tbody>
   </table>`;
+  restoreFocus();
 }
 
 function openScreenerMarket(key) {
@@ -303,7 +356,7 @@ function screenerAlignedCount(r, dir) {
 // reading the generator's `score`: the Weekly Outlook feeds it rows whose seasonal has
 // been projected to a future week (projectSeasonal), which the generator never scored.
 // It also needs `missing` to decide whether a seasonal onset completes the setup.
-// Everywhere the row is unprojected (forex.js), read r.score instead.
+// Everywhere the row is unprojected (forex.js, the Daily table's Setup column), read r.score instead.
 function screenerSetup(r) {
   for (const dir of ['bullish', 'bearish']) {
     const count = screenerAlignedCount(r, dir);
@@ -338,9 +391,9 @@ function seasonalNote(r, setup) {
   const dirCls = ev.direction === 'bullish' ? 'wk-bull' : 'wk-bear';
   if (ev.type === 'onset') {
     const completes = setup && setup.count === 2 && setup.missing.includes('seasonal') && ev.direction === setup.dir;
-    return `📅 <span class="wk-seasonal">Seasonal onset ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span> → <span class="${dirCls}">${ev.direction}</span>${completes ? ' <span class="wk-complete">→ 3/3</span>' : ''}</span>`;
+    return `${lineIcon('calendar')}<span class="wk-seasonal">Seasonal onset ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span> → <span class="${dirCls}">${ev.direction}</span>${completes ? ' <span class="wk-complete">→ 3/3</span>' : ''}</span>`;
   }
-  return `📅 <span class="wk-seasonal">Seasonal <span class="${dirCls}">${ev.direction}</span> until ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span></span>`;
+  return `${lineIcon('calendar')}<span class="wk-seasonal">Seasonal <span class="${dirCls}">${ev.direction}</span> until ${fmtDay(ev.date)} <span class="wk-away">(${fmtDaysAway(n)})</span></span>`;
 }
 
 // End of the current week — the coming Sunday (ISO week Mon–Sun) at local midnight.
@@ -380,8 +433,9 @@ function selectedWeekRange() {
 // Events inside or after the week leave the seasonal unchanged (handled as a live 3/3 with a
 // runway note, or — for an onset within the week — as a 2/3→3/3 transition below). This makes
 // the weekly 3/3 set symmetric: setups whose seasonal expires by the week drop out, and 2/3
-// setups whose seasonal has turned on by the week join in. Each seasonal run is >= 14 days, so
-// a market has at most one event per week — the per-market next-event data is enough.
+// setups whose seasonal has turned on by the week join in. Each seasonal run lasts at least
+// SEASONAL_MIN_SEASON_DAYS (14, screener.py), so a market has at most one event per week — the
+// per-market next-event data is enough.
 function projectSeasonal(r, weekStart) {
   const ev = r.seasonal_event;
   if (!ev || !ev.date) return r;
@@ -434,10 +488,10 @@ function wkBlock(r, setup, withChart) {
   const meta = `<span class="wk-conv"><span class="wk-dots">${dots}</span><span class="wk-conv-label">${setup.count}/3</span></span>`
     + (withChart ? '<span class="wk-basis"></span><span class="wk-live-state" hidden></span>' : '');
   const chart = withChart ? wkChartHtml(r, setup) : '';
-  return `<div class="wk-block wk-dir-${dirCls}">
+  return `<div class="wk-block wk-dir-${dirCls}" id="wk-${r.key}">
       <div class="wk-band">
         <div class="wk-band-top">
-          <div class="wk-block-id" onclick="openScreenerMarket('${r.key}')">
+          <div class="wk-block-id" role="button" tabindex="0" onclick="openScreenerMarket('${r.key}')">
             <span class="wk-block-name">${esc(r.display_name || r.key)}</span>
           </div>
           <div class="wk-band-meta">${meta}</div>
@@ -467,7 +521,7 @@ function wkStatLine(r, setup) {
           + `<span class="wk-stat-sep">·</span>since ${fmtDay(lead.start)}`;
     const rw = logEntry.runway;
     if (rw && rw.days && rw.until) {
-      s += `<span class="wk-stat-sep">·</span><span class="wk-stat-run">⏳ Seasonal ~${rw.days}d</span> <span class="wk-stat-dim">(until ${fmtDay(rw.until)})</span>`;
+      s += `<span class="wk-stat-sep">·</span><span class="wk-stat-run">${lineIcon('hourglass')}Seasonal ~${rw.days}d</span> <span class="wk-stat-dim">(until ${fmtDay(rw.until)})</span>`;
     } else if (r.seasonal_event && r.seasonal_event.date) {
       s += `<span class="wk-stat-sep">·</span>${seasonalNote(r, setup)}`;
     }
@@ -542,10 +596,25 @@ function renderWeeklyOutlook() {
   const wkEl = document.getElementById('screenerWeekLabel');
   if (wkEl) {
     const f = d => d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-    wkEl.textContent = `📅 Week ${isoWeekNumber(wk.calStart)} · ${f(wk.calStart)} – ${wk.calEnd.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}`;
+    wkEl.innerHTML = lineIcon('calendar') + esc(`Week ${isoWeekNumber(wk.calStart)} · ${f(wk.calStart)} – ${wk.calEnd.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}`);
   }
   const countEl = document.getElementById('screenerWeeklyCount');
-  if (countEl) countEl.textContent = `${full.length} × 3/3 · ${onsets.length} ${onsets.length === 1 ? 'onset' : 'onsets'} ${weekWord}`;
+  if (countEl) countEl.textContent = `${full.length} at 3/3 · ${onsets.length} turning 3/3 ${weekWord}`;
+
+  // One chip per block, in the blocks' own order, so a result five screens down is one click away.
+  const summaryEl = document.getElementById('screenerWeeklySummary');
+  if (summaryEl) {
+    const catRank = c => { const i = CATEGORY_POPULARITY.indexOf(c); return i === -1 ? 99 : i; };
+    const order = (a, b) => (catRank(a.r.category) - catRank(b.r.category)) || (a.r.display_name || '').localeCompare(b.r.display_name || '');
+    const chip = (x, onset) => {
+      const bull = x.setup.dir === 'bullish';
+      const title = onset ? ` title="Turns 3/3 ${weekWord} through its seasonal"` : '';
+      return `<button type="button" class="setup-chip ${bull ? 'bull' : 'bear'}${onset ? ' onset' : ''}" onclick="wkJumpTo('${x.r.key}')"${title}>${bull ? '▲' : '▼'} ${esc(x.r.display_name || x.r.key)}</button>`;
+    };
+    const chips = full.slice().sort(order).map(x => chip(x, false)).concat(onsets.slice().sort(order).map(x => chip(x, true)));
+    summaryEl.innerHTML = chips.join('');
+    summaryEl.hidden = !chips.length;
+  }
 
   body.innerHTML =
     wkCategorySection('', full, 'No 3/3 setup right now.', true)
@@ -555,16 +624,41 @@ function renderWeeklyOutlook() {
   wkObserveCharts();   // lazy-render the 3/3 charts as they scroll into view
 }
 
+// Summary chip -> its block. Instant rather than smooth: the charts render lazily as they come into
+// view, and a smooth scroll past them could land wherever their growth had pushed the target.
+function wkJumpTo(key) {
+  const el = document.getElementById('wk-' + key);
+  if (!el) return;
+  el.scrollIntoView({ block: 'start' });
+  el.querySelector('.wk-block-id')?.focus({ preventScroll: true });
+}
+
 // ── Weekly Outlook inline 3/3 charts (native, dynamic, lazy) ──────────────────
 
-// The bot's 3/3 period log, fetched once. Holds {key: {periods:[{direction,start,
-// end}], runway:{days,until}}} — `start` is the day the 3/3 first triggered.
+// The generator's 3/3 period log, fetched once per data generation. Holds {key: {periods:
+// [{direction,start,end}], runway:{days,until}}} — `start` is the day the 3/3 first
+// triggered. resetScreenerData() drops it on an in-place refresh reload; the nonce keeps a
+// response from before that reload from being cached as the new log (the same guard as
+// ensureScreenerData above).
+let _wkLogInFlight = null;   // { nonce, promise }
+
 async function ensureThreeThreeLog() {
   if (_wkThreeThreeLog) return _wkThreeThreeLog;
-  try {
-    const res = await fetch(`${DATA_DIR}/three_three_log.json?v=${DATA_VERSION}`, { cache: 'no-store' });
-    _wkThreeThreeLog = res.ok ? (await res.json()) : {};
-  } catch (e) { _wkThreeThreeLog = {}; }
+  const nonce = _dataReloadNonce;
+  let pending = _wkLogInFlight;
+  if (!pending || pending.nonce !== nonce) {
+    const entry = {
+      nonce,
+      promise: fetch(`${DATA_DIR}/three_three_log.json?v=${DATA_VERSION}&r=${nonce}`, { cache: 'no-store' })
+        .then(res => (res.ok ? res.json() : {}))
+        .catch(() => ({})),
+    };
+    entry.promise.then(() => { if (_wkLogInFlight === entry) _wkLogInFlight = null; });
+    _wkLogInFlight = pending = entry;
+  }
+  const log = await pending.promise;
+  if (nonce !== _dataReloadNonce) return ensureThreeThreeLog();   // a refresh landed meanwhile
+  if (!_wkThreeThreeLog) _wkThreeThreeLog = log || {};
   return _wkThreeThreeLog;
 }
 
@@ -640,14 +734,14 @@ async function wkEnsureFrontHistory(cfg) {
 // The yfinance symbol a given .wk-chart plots: its market's front-month contract
 // (front-month mode), else the native continuous (fallback).
 // The live-quote symbol for a market's weekly chart: its front-month contract once that
-// contract's history is loaded (front mode), else the native continuous (fallback). Pure read.
-// Shared by wkChartLiveSymbol (per element) and the cold-start boot splash (per cfg).
+// contract's history is loaded (front mode), else the contract the native continuous settles
+// on (fallback) — never `=F` itself, see continuousLiveSymbol in chart.js. Pure read.
+// Shared by wkChartLiveSymbol (per element), wkDrawChart and the cold-start boot splash (per cfg).
 function wkLiveSymbol(cfg) {
   if (!cfg) return null;
-  const { mode, front, cont } = wkResolveSeries(cfg);
+  const { mode, front } = wkResolveSeries(cfg);
   if (mode === 'front' && front && front.yf_symbol) return front.yf_symbol;
-  const c = cont || (typeof getContinuousContract === 'function' ? (getContinuousContract(cfg) || {}) : {});
-  return c.yf_symbol || c.tv_symbol || null;
+  return (typeof continuousLiveSymbol === 'function') ? continuousLiveSymbol(cfg) : null;
 }
 function wkChartLiveSymbol(el) {
   const key = el && el.dataset && el.dataset.key;
@@ -710,13 +804,11 @@ function wkDrawChart(el) {
     if (si >= 0) from = Math.min(from, Math.max(0, si - 12));
   }
   let bars = all.slice(from);
-  // Splice the continuous symbol's live tick onto the bars (display-only) — like chart.js
+  // Splice this chart's live tick (wkLiveSymbol) onto the bars (display-only) — like chart.js
   // injectLivePoint. Never persisted; a reload / the board refresh replaces it.
   const cont = (typeof getContinuousContract === 'function') ? (getContinuousContract(cfg) || {}) : (cfg.continuous_contract || {});
-  const liveSym = (mode === 'front' && front && front.yf_symbol)
-    ? front.yf_symbol
-    : (cont.yf_symbol || cont.tv_symbol || null);
-  const lq = (liveSym && typeof liveQuotes === 'object' && liveQuotes) ? liveQuotes[liveSym] : null;
+  const liveSym = wkLiveSymbol(cfg);   // the same symbol live.js polls for this chart
+  const lq = (typeof liveQuoteFor === 'function') ? liveQuoteFor(liveSym, all) : null;   // null when stale (chart.js)
   const liveReady = !!(lq && Number.isFinite(lq.price) && lq.day);
   // Whether THIS live-layer session has confirmed a tick for liveSym (live.js owns the set,
   // reset on every (re)start). Drives the hint + dot so they survive a persisted `liveQuotes`:
@@ -779,7 +871,7 @@ function wkDrawChart(el) {
     priceLine =
       `<line x1="${padL}" y1="${curY.toFixed(1)}" x2="${tagX.toFixed(1)}" y2="${curY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="5,4"/>` +
       `<rect x="${tagX.toFixed(1)}" y="${(tagYc - 8).toFixed(1)}" width="${tagW.toFixed(1)}" height="16" rx="2.5" fill="${CHART_THEME.bg}" stroke="${CHART_THEME.axis}" stroke-width="1"/>` +
-      `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagYc + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist">${txt}</text>`;
+      `<text x="${(tagX + tagW / 2).toFixed(1)}" y="${(tagYc + 3.5).toFixed(1)}" font-size="10" font-weight="600" text-anchor="middle" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${txt}</text>`;
   }
 
   // Pulsing hollow dot on the provisional (live) last bar — same marker as the Futures tab.
@@ -805,7 +897,7 @@ function wkDrawChart(el) {
     grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
     // Right-aligned (no clipping); drop the label when it collides with the price tag.
     if (!(Number.isFinite(curY) && Math.abs(+y - curY) < 9))
-      grid += `<text x="${W - 4}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist">${v.toFixed(dec)}</text>`;
+      grid += `<text x="${W - 4}" y="${(+y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${v.toFixed(dec)}</text>`;
   }
 
   // 3/3 band + entry/drop markers (all periods in view), behind candles — same as card-mode.
@@ -903,9 +995,9 @@ function wkDrawChart(el) {
       });
       volumeSvg = `<line x1="${padL}" y1="${volumeTop}" x2="${W - padR}" y2="${volumeTop}" stroke="${CHART_THEME.grid}"/>`
         + `<line x1="${padL}" y1="${volBase}" x2="${W - padR}" y2="${volBase}" stroke="${CHART_THEME.grid}"/>${vbars}`
-        + `<text x="${W - padR + 5}" y="${(volumeTop + 8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(volMax / 1000).toFixed(0)}K</text>`;
+        + `<text x="${W - padR + 5}" y="${(volumeTop + 8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(volMax / 1000).toFixed(0)}K</text>`;
     } else {
-      volumeSvg = `<text x="${padL}" y="${volumeTop + volumeH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No volume data in this range</text>`;
+      volumeSvg = `<text x="${padL}" y="${volumeTop + volumeH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No volume data in this range</text>`;
     }
   }
 
@@ -932,86 +1024,91 @@ function wkDrawChart(el) {
       oiSvg = `<line x1="${padL}" y1="${oiTop}" x2="${W - padR}" y2="${oiTop}" stroke="${CHART_THEME.grid}"/>`
         + `<line x1="${padL}" y1="${oiTop + oiH}" x2="${W - padR}" y2="${oiTop + oiH}" stroke="${CHART_THEME.grid}"/>`
         + (pts.length > 1 ? `<path d="${oiPath}" fill="none" stroke="${CHART_THEME.oi}" stroke-width="1.5" opacity="0.8"/>` : '') + oiDots
-        + `<text x="${W - padR + 5}" y="${(oiTop + 5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMax / 1000).toFixed(0)}K</text>`
-        + `<text x="${W - padR + 5}" y="${(oiTop + oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(oiMin / 1000).toFixed(0)}K</text>`;
+        + `<text x="${W - padR + 5}" y="${(oiTop + 5).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(oiMax / 1000).toFixed(0)}K</text>`
+        + `<text x="${W - padR + 5}" y="${(oiTop + oiH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(oiMin / 1000).toFixed(0)}K</text>`;
     } else {
-      oiSvg = `<text x="${padL}" y="${oiTop + oiH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No Open Interest data in this range</text>`;
+      oiSvg = `<text x="${padL}" y="${oiTop + oiH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No Open Interest data in this range</text>`;
     }
   }
 
-  // COT pane (commercial net; no hedging-window variant in the Outlook).
-  const cotValue = d => (d.cot_net !== undefined && d.cot_net !== null) ? d.cot_net : d.comm_net;
+  // COT pane — the 6M Hedging Program, the read the block's own COT Hedging tag reports
+  // (screener.py `_screener_cot_hedge_signal`) and the pane the Futures tab draws with the
+  // program switched on. Until 2026-09-19 this pane drew the bare net around zero, which on a
+  // structurally one-sided market says the opposite of the tag above it: the pound's
+  // commercial net is long all year (a pane full of green) under a bearish Hedging tag, USDX's
+  // is short all year (all red) under a bullish one. See core.js for why the midpoint, not
+  // zero, is the line that moves.
+  //
+  // The window is the program's own trailing 6M, so it covers the right part of a chart whose
+  // price window is ~12M — deliberately: the midpoint, the scale and the colours only mean
+  // anything inside it, and the dashed level starts where it starts.
+  const cotValue = cotNetOf;   // core.js
+  const cotLabel = (cotSeries[0] && (cotSeries[0].cot_label || cotSeries[0].cotLabel)) || 'Commercial Net';
   const cotTop = oiTop + oiH + gap;
   let cotSvg = '';
+  // The midpoint and the scale come from the WHOLE 6M window, the drawn bars from the part of
+  // it this chart shows — like chart.js. A block whose price window is shorter than 6 months
+  // (front-month mode opens on the contract's own listing) would otherwise take its level from
+  // a clipped window and stop agreeing with the tag: USDX's true 6M midpoint is -13.1K, the
+  // part visible above its Jun-10 listing gives -18K.
+  const hedgeAll = cotHedgeWindow(cotSeries, COT_HEDGE_WINDOW_DAYS);
+  const hedge = cotHedgeLevels(hedgeAll);
+  const hedgeRows = hedgeAll.filter(inVisibleRange);
+  const cotShown = !!hedge && hedgeRows.length > 0;
   {
-    const cotBars = visCot;
-    if (cotBars.length) {
-      const cotVals = cotBars.map(cotValue).filter(v => v !== null && v !== undefined);
-      const cotAbs = cotVals.length ? (Math.max(...cotVals.map(Math.abs)) || 1) : 1;
-      const cotLo = -cotAbs, cotHi = cotAbs, cotSpan = (cotHi - cotLo) || 1;
+    if (cotShown) {
+      const cotPad = Math.max(1, (hedge.max - hedge.min) * 0.08);
+      const cotLo = hedge.min - cotPad, cotHi = hedge.max + cotPad, cotSpan = (cotHi - cotLo) || 1;
       const cotY = v => cotTop + (1 - (v - cotLo) / cotSpan) * cotH;
-      const cotMid = cotY(0);
+      const cotMid = cotY(hedge.threshold);
       // Same rule as the Futures pane (chart.js), through the same helper: anchored to the
       // shared time axis at both ends, evenly spaced in between, never an even division of
       // the pane width — see cotBarLayout() in core.js.
-      const cotLayout = cotBarLayout(cotBars.map(d => xForDate(d.date)), plotW);
+      const cotLayout = cotBarLayout(hedgeRows.map(d => xForDate(d.date)), plotW);
       const barW = Math.max(1, Math.min(14, cotLayout.step * 0.55));
       let cbars = '';
-      cotBars.forEach((d, i) => {
+      hedgeRows.forEach((d, i) => {
         const net = cotValue(d);
         if (net === null || net === undefined) return;
         const x = cotLayout.xs[i], y = cotY(net), h = Math.abs(y - cotMid);
-        cbars += `<rect x="${(x - barW / 2).toFixed(1)}" y="${Math.min(y, cotMid).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" fill="${net >= 0 ? '#0ea679' : '#e53e3e'}" opacity="0.7" rx="1"/>`;
+        cbars += `<rect x="${(x - barW / 2).toFixed(1)}" y="${Math.min(y, cotMid).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" fill="${net >= hedge.threshold ? '#0ea679' : '#e53e3e'}" opacity="0.7" rx="1"/>`;
       });
-      cotSvg = `<line x1="${padL}" y1="${cotMid.toFixed(1)}" x2="${W - padR}" y2="${cotMid.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"/>${cbars}`
-        + `<text x="${W - padR + 5}" y="${(cotTop + 8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(cotAbs / 1000).toFixed(0)}K</text>`
-        + `<text x="${W - padR + 5}" y="${(cotTop + cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${(-cotAbs / 1000).toFixed(0)}K</text>`;
+      // The level is drawn across the window only — that edge is what says where the program
+      // starts on a chart whose price window reaches further back.
+      const midX = Math.max(padL, cotLayout.xs[0] - barW);
+      cotSvg = `<line x1="${midX.toFixed(1)}" y1="${cotMid.toFixed(1)}" x2="${W - padR}" y2="${cotMid.toFixed(1)}" stroke="${CHART_THEME.bull}" stroke-dasharray="4,3"/>${cbars}`
+        + `<text x="${W - padR + 5}" y="${(cotTop + 8).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(hedge.max / 1000).toFixed(0)}K</text>`
+        + `<text x="${W - padR + 5}" y="${(cotMid + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.bull}" font-family="Geist, system-ui, sans-serif">${(hedge.threshold / 1000).toFixed(0)}K</text>`
+        + `<text x="${W - padR + 5}" y="${(cotTop + cotH).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${(hedge.min / 1000).toFixed(0)}K</text>`;
     } else {
-      cotSvg = `<text x="${padL}" y="${cotTop + cotH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" font-style="italic">No CFTC COT data in this range</text>`;
+      cotSvg = `<text x="${padL}" y="${cotTop + cotH / 2}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" font-style="italic">No CFTC COT data in this range</text>`;
     }
   }
 
   // Calendar-spread pane (front − next; negative = contango). Only when data is there.
-  let spreadSeries = (typeof normalizeSpreadSeries === 'function') ? normalizeSpreadSeries(cfg.calendar_spread_series || []) : [];
+  let spreadSeries = (typeof normalizeSpreadSeries === 'function') ? currentPairSpread(normalizeSpreadSeries(cfg.calendar_spread_series || [])) : [];
   spreadSeries = spreadSeries.filter(inVisibleRange);
   const spreadShown = spreadSeries.length > 0;
   const spreadTop = cotTop + cotH + gap;
   let spreadSvg = '';
   if (spreadShown) {
-    const spVals = spreadSeries.map(d => d.spread);
-    const dataLo = Math.min(...spVals), dataHi = Math.max(...spVals);
-    const spPad = ((dataHi - dataLo) || Math.abs(dataHi) || 1) * 0.12;
-    const spLo = dataLo - spPad, spHi = dataHi + spPad, spRng = (spHi - spLo) || 1;
-    const spreadY = v => spreadTop + (1 - (v - spLo) / spRng) * spreadH;
-    const zeroYraw = spreadY(0);
-    const zeroY = Math.max(spreadTop, Math.min(spreadTop + spreadH, zeroYraw));
-    const zeroPinned = zeroYraw !== zeroY;
+    // The Futures pane's own drawing (chart.js: currentPairSpread / spreadPaneScale /
+    // spreadPaneSvg) — only the pair trading today, its scale, colour by side of zero and labels.
+    const sp = spreadPaneScale(spreadSeries.map(d => d.spread), spreadTop, spreadH);
     const pts = spreadSeries.map(d => ({
-      date: d.date, x: xForDate(d.date), y: spreadY(d.spread),
+      date: d.date, x: xForDate(d.date), y: sp.y(d.spread), value: d.spread,
       pair: `${d.front_contract || ''}-${d.next_contract || ''}`
     })).sort((a, b) => a.x - b.x);
-    // Same two breaks as the Futures pane (chart.js): a >7-day gap, and a change of
-    // contract pair — the step across a roll is not a move in the spread.
-    let spPath = '', prevTime = null, prevPair = null;
-    pts.forEach((p, i) => {
-      const t = new Date(p.date).getTime();
-      const brk = prevTime !== null && ((t - prevTime) > 7 * 864e5 || p.pair !== prevPair);
-      spPath += (i === 0 || brk ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ' ';
-      prevTime = t; prevPair = p.pair;
-    });
-    const spDots = pts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.6" fill="${CHART_THEME.spread}" opacity="0.5"/>`).join('');
-    spreadSvg = `<line x1="${padL}" y1="${spreadTop}" x2="${W - padR}" y2="${spreadTop}" stroke="${CHART_THEME.grid}"/>`
-      + `<line x1="${padL}" y1="${spreadTop + spreadH}" x2="${W - padR}" y2="${spreadTop + spreadH}" stroke="${CHART_THEME.grid}"/>`
-      + `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="${CHART_THEME.axis}" stroke-dasharray="4,3"${zeroPinned ? ' opacity="0.65"' : ''}/>`
-      + `<text x="${W - padR + 5}" y="${(zeroY + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">0</text>`
-      + (pts.length > 1 ? `<path d="${spPath}" fill="none" stroke="${CHART_THEME.spread}" stroke-width="1.5" opacity="0.85"/>` : '') + spDots
-      + `<text x="${W - padR + 5}" y="${(spreadY(dataHi) + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataHi.toFixed(dec)}</text>`
-      + `<text x="${W - padR + 5}" y="${(spreadY(dataLo) + 3).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist">${dataLo.toFixed(dec)}</text>`;
+    spreadSvg = spreadPaneSvg(pts, sp, padL, W - padR, dec, W - 4);
   }
 
   // Pane headings on the left (no toggle control in the Outlook, hence the labels).
-  const paneLabel = (top, txt) => `<text x="${padL}" y="${(top - 6).toFixed(1)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist" letter-spacing="0.05em" opacity="0.72">${txt}</text>`;
-  const paneHeads = paneLabel(volumeTop, 'VOLUME') + paneLabel(oiTop, 'OPEN INTEREST') + paneLabel(cotTop, 'COT · COMMERCIAL NET')
+  const paneLabel = (top, txt) => `<text x="${padL}" y="${(top - 6).toFixed(1)}" font-size="9" font-weight="600" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" letter-spacing="0.05em" opacity="0.72">${txt}</text>`;
+  // The COT heading names the cohort the series is actually about (`cot_label` — not every
+  // tracked book is the commercial one) and the program window, so the empty left of that
+  // pane reads as the window's edge rather than as missing data.
+  const cotHead = `COT · ${cotLabel.toUpperCase()}${cotShown ? ' · 6M HEDGING PROGRAM' : ''}`;
+  const paneHeads = paneLabel(volumeTop, 'VOLUME') + paneLabel(oiTop, 'OPEN INTEREST') + paneLabel(cotTop, cotHead)
     + (spreadShown ? paneLabel(spreadTop, 'CALENDAR SPREAD') : '');
 
   // Bottom date axis below the last pane.
@@ -1020,7 +1117,7 @@ function wkDrawChart(el) {
   let xLabels = '';
   for (let g = 0; g <= 5; g++) {
     const i = Math.round((n - 1) * g / 5);
-    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
+    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="10" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" text-anchor="middle">${fmtAxisDate(bars[i].date)}</text>`;
   }
   const chartBg = `<rect x="0" y="0" width="${W}" height="${totalH}" fill="${CHART_THEME.bg}" rx="7"/>`;
 

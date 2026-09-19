@@ -42,7 +42,6 @@ except ImportError:
 # ---- cross-module dependencies (from the lower layers) ----
 from market_config import (
     SPREAD_MAX_GAP_DAYS,
-    SPREAD_MIN_PAIR_POINTS,
     SPREAD_ROLL_CONFIRM_DAYS,
     SPREAD_SPIKE_REVERT_PCT,
     YF_CONTRACT_LOOKAHEAD,
@@ -61,6 +60,8 @@ from market_config import (
     YF_QUOTE_MAX_STALE_DAYS,
     YF_QUOTE_PERIOD,
     YF_QUOTE_TAIL_BARS,
+    YF_SETTLED_CONTRACT_TRAILING_BARS,
+    CONTRACT_SPECS,
 )
 from series_utils import (
     BLANK,
@@ -69,7 +70,8 @@ from series_utils import (
     _round_price,
     _trim_leading_flat,
 )
-from contracts import build_contract_candidates, build_total_volume_contract_candidates
+from calendar_utils import compute_expiry
+from contracts import build_contract_candidates, build_total_volume_contract_candidates, build_yf_symbol
 from local_first_merge import _merge_volume_series
 import yahoo_gateway
 import dead_symbols
@@ -99,6 +101,7 @@ __all__ = [
     'fetch_seasonal_price_history',
     'fetch_yfinance_liquid_continuous_history',
     'fetch_yfinance_total_volume_series',
+    'resolve_settled_contracts',
     'select_yfinance_contracts',
 ]
 
@@ -486,18 +489,29 @@ def _cached_seasonal_last_year(key, data_dir="ff_data"):
     if _existing_seasonal_years is None:
         _existing_seasonal_years = {}
         try:
-            for name in os.listdir(data_dir):
-                if not (name.startswith("data_") and name.endswith(".json")):
-                    continue
+            names = os.listdir(data_dir)
+        except OSError:
+            names = []
+        for name in names:
+            if not (name.startswith("data_") and name.endswith(".json")):
+                continue
+            # Per file, and per entry: data_quality.json matches data_*.json and carries plain
+            # strings at its top level. One try/except around the whole scan raised on the first of
+            # them and skipped every file listed after it, so those markets pulled their entire
+            # seasonal history again on every refresh (35 of 39 on 2026-09-11).
+            try:
                 with open(os.path.join(data_dir, name), encoding="utf-8") as f:
                     payload = json.load(f)
-                if isinstance(payload, dict):
-                    for k, v in payload.items():
-                        sh = (v.get("continuous_contract") or {}).get("seasonal_history") or []
-                        if sh:
-                            _existing_seasonal_years[k] = str(sh[-1].get("date", ""))[:4]
-        except Exception:
-            pass
+            except (OSError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for k, v in payload.items():
+                if not isinstance(v, dict):
+                    continue
+                sh = (v.get("continuous_contract") or {}).get("seasonal_history") or []
+                if sh:
+                    _existing_seasonal_years[k] = str(sh[-1].get("date", ""))[:4]
     yr = _existing_seasonal_years.get(key)
     return int(yr) if yr and yr.isdigit() else None
 
@@ -741,23 +755,23 @@ def _spread_pair(row):
     return (row.get("front_contract"), row.get("next_contract"))
 
 
-def _trailing_same_pair_spread(rows, min_points=SPREAD_MIN_PAIR_POINTS):
-    """Keep the trailing run that measures the CURRENT front/next pair.
+def _trailing_same_pair_spread(rows):
+    """Keep the trailing run that measures the CURRENT front/next pair — nothing older.
 
     A spliced series is not one indicator: each roll swaps in a different pair, and with
     it a different horizon, so the line steps to a new level for reasons that have
     nothing to do with the market (euro's Mar-Sep pair sat near -0.011 while the
     current Sep-Dec pair trades near -0.004). Plotted together the older segments own
-    the y-axis and flatten the spread the reader is actually looking at. So the pane
-    shows the spread of the pair that trades TODAY, starting on the day that pair
-    became front/next.
+    the y-axis and flatten the spread the reader is actually looking at. So the series
+    is the spread of the pair that trades TODAY, starting on the day that pair became
+    front/next.
 
-    The day after a roll that pair has one point, which is a blank pane rather than an
-    honest one — on 2026-08-21 four markets sat there at once. So while the current run
-    is shorter than `min_points`, ONE preceding pair comes along for context (never
-    more: the point is a readable pane, not a spliced history). Consumers must break
-    the line where the pair changes — `chart.js` and `screener.js` start a new path
-    segment there — so the roll step is never drawn as a move in the spread.
+    The day after a roll that is a single point, and it is meant to be: the series starts
+    over at every roll (operator decision 2026-09-12 — only the current front month's
+    spread, no data on earlier pairs). Until then ONE preceding pair rode along while the
+    new run was under 10 points, and drawn beside the new one, at an unrelated level behind
+    the break, it read as a broken line (sugar, 2026-09-09: Oct/Mar at -0.99, Mar/May at
+    +0.63).
     """
     if not rows:
         return rows
@@ -765,16 +779,10 @@ def _trailing_same_pair_spread(rows, min_points=SPREAD_MIN_PAIR_POINTS):
     start = len(rows) - 1
     while start > 0 and _spread_pair(rows[start - 1]) == pair:
         start -= 1
-    if len(rows) - start >= min_points or start == 0:
-        return rows[start:]
-    prev_pair = _spread_pair(rows[start - 1])
-    prev_start = start - 1
-    while prev_start > 0 and _spread_pair(rows[prev_start - 1]) == prev_pair:
-        prev_start -= 1
-    return rows[prev_start:]
+    return rows[start:]
 
 
-def build_calendar_spread_series(candidates_by_date, deferred_by_date=None):
+def build_calendar_spread_series(candidates_by_date, deferred_by_date=None, settled_by_date=None):
     """Front-minus-next calendar spread per day (negative = contango).
 
     Front = the LEAD contract that day — the one carrying the most reported volume —
@@ -799,6 +807,12 @@ def build_calendar_spread_series(candidates_by_date, deferred_by_date=None):
     was allowed to be the partner. The spread then spans the real gap to the next LISTED
     month, which for such a market is exactly what a calendar spread is.
 
+    `settled_by_date` maps a day to {chain_index: row} for months that SETTLED without trading
+    that day. It is the last resort for the next leg and nothing else: never a front, never a
+    volume candidate. Deferred Treasury months are the case: ZFH27 settled every session after
+    the 2026-08-28 roll but traded on three of ten, so the 5Y spread built from traded rows had
+    two points by 09-11. An exchange settlement is that day's real price, not a fill.
+
     The spread is computed for EVERY day on which the lead month and its immediate
     successor both print — liquidity is deliberately NOT gated past picking the lead.
     When no leg reports positive volume (thinly-traded deferred months on Yahoo — BTC
@@ -811,14 +825,17 @@ def build_calendar_spread_series(candidates_by_date, deferred_by_date=None):
     """
     rows = []
     deferred_by_date = deferred_by_date or {}
+    settled_by_date = settled_by_date or {}
     # Which chain positions this market actually lists, over the whole window. The next
     # leg is picked from THIS set, so the pairing is a property of the market and not of
-    # whatever printed on a given day — see `_chain_successor`.
+    # whatever printed on a given day — see `_chain_successor`. A month that only ever
+    # settled is listed too: it is the exchange's next month, traded or not.
     listed_chain = sorted({r.get("chain_index")
                            for rows_ in candidates_by_date.values() for r in rows_
                            if r.get("chain_index") is not None and r.get("close") is not None}
                           | {r.get("chain_index") for r in deferred_by_date.values()
-                             if r.get("chain_index") is not None and r.get("close") is not None})
+                             if r.get("chain_index") is not None and r.get("close") is not None}
+                          | {c for day_rows in settled_by_date.values() for c in day_rows})
 
     def _chain_successor(c):
         i = bisect.bisect_right(listed_chain, c)
@@ -872,6 +889,8 @@ def build_calendar_spread_series(candidates_by_date, deferred_by_date=None):
                     and deferred.get("chain_index") == target):
                 nxt = deferred
         if nxt is None:
+            nxt = settled_by_date.get(day, {}).get(target)    # settled, not traded
+        if nxt is None:
             continue
         rows.append({
             "date": day,
@@ -924,6 +943,7 @@ def fetch_yfinance_liquid_continuous_history(
 
     candidates_by_date = {}
     deferred_by_date = {}    # not-yet-active months; next-leg pool for the calendar spread
+    settled_by_date = {}     # {day: {chain_index: row}}: settled but untraded; next leg only
     total_by_date = {}
     active_contracts = 0
     empty_streak = 0
@@ -966,9 +986,21 @@ def fetch_yfinance_liquid_continuous_history(
                 item["volume"] += int(volume)
                 item["symbols"].add(symbol)
 
-            if not _history_row_looks_tradable(clean):
-                continue
             is_active = _contract_is_active_for_day(contract, day)
+            if not _history_row_looks_tradable(clean):
+                # No trade that day, but the exchange still settled the month. Such a row
+                # never enters the volume-led selection and is never a front; it may only be
+                # the calendar spread's NEXT leg (see `build_calendar_spread_series`). An
+                # untraded bar at 0 is not a price.
+                chain = contract.get("chain_index")
+                if (chain is not None and clean["close"] > 0
+                        and (is_active or _contract_is_pre_active_for_day(contract, day))):
+                    settled_by_date.setdefault(day, {})[chain] = {
+                        "contract_symbol": contract.get("contract_symbol"),
+                        "chain_index": chain,
+                        "close": clean["close"],
+                    }
+                continue
             # Not active yet (only too early, not expired) → keep it aside as a possible
             # NEXT leg for the calendar spread; it stays out of the volume-led selection.
             if not is_active and not _contract_is_pre_active_for_day(contract, day):
@@ -1022,7 +1054,7 @@ def fetch_yfinance_liquid_continuous_history(
     # Calendar spread (front-next): front = the lead (highest-volume) contract, next =
     # the nearest expiry after it — see the helper. Computed whenever a lead month and a
     # following month exist.
-    calendar_spread_series = build_calendar_spread_series(candidates_by_date, deferred_by_date)
+    calendar_spread_series = build_calendar_spread_series(candidates_by_date, deferred_by_date, settled_by_date)
 
     if is_index_proxy:
         # Price stays the cash/index proxy (raw fallback); no stitched continuous and
@@ -1073,6 +1105,106 @@ def build_continuous_contract(cfg, yf_symbol, history, total_volume_series=None)
         "history": history or [],
         "total_volume_series": total_volume_series or [],
     }
+
+
+def _same_settle(a, b):
+    """Two prints of the same settlement: equal up to float noise, never a tick apart."""
+    return abs(a - b) <= max(1e-9, abs(b) * 1e-7)
+
+
+def _settlement_rows(frame):
+    """{date, close} for every priced bar of a raw Yahoo frame — what resolve_settled_contracts
+    matches against. Deliberately NOT through _drop_unsettled_tail: before the settle, that judges
+    the newest bar by volume against the contract's own last 20 sessions, and an expiring spot
+    month fails it on a genuinely settled day (SIU26 on 2026-09-10: 138 lots after a busy August)
+    — the very bar its =F series settled on, so silver, copper and soybeans went unresolved. Raw
+    is safe for a match: only dates the continuous series already holds as settled are compared."""
+    rows = []
+    if frame is None or getattr(frame, "empty", True):
+        return rows
+    for idx, row in frame.iterrows():
+        close = row.get("Close")
+        if close is None or close != close:
+            continue
+        rows.append({"date": idx.strftime("%Y-%m-%d"), "close": _round_price(float(close))})
+    return rows
+
+
+def _settled_contract_candidates(cfg, contracts, last_day):
+    """The contracts an `=F` series may have settled on at `last_day`, in the order they are
+    tried: every listed contract, nearest expiry first (quote() read them this run, so a
+    second read costs no request), then the calendar months around `last_day` that the
+    listed chain skips. Yahoo settles `=F` on the nearest month the exchange lists, and that
+    is often not one this market's chain carries — GC=F settles on September gold while the
+    chain is Feb/Apr/Jun/Aug/Oct/Dec. A month whose last trading day lies before `last_day`
+    cannot have settled on it and is never asked for."""
+    listed = sorted(
+        (c for c in (contracts or []) if c.get("yf_symbol")),
+        key=lambda c: (c.get("expiry") or "9999-12-31", c["yf_symbol"]))
+    out = [c["yf_symbol"] for c in listed]
+    root, exchange = cfg.get("yf_root"), cfg.get("yf_exchange")
+    if root and exchange:
+        rule = CONTRACT_SPECS.get(cfg.get("_key", ""), {}).get("expiry_rule")
+        first = date(last_day.year, last_day.month, 1)
+        for offset in (0, 1, 2, 3, -1):
+            month = first + relativedelta(months=offset)
+            expiry = compute_expiry(rule, month.year, month.month) if rule else None
+            if expiry is not None and expiry < last_day:
+                continue
+            symbol = build_yf_symbol(root, exchange, month.year, month.month)
+            if symbol not in out:
+                out.append(symbol)
+    today = date.today()
+    return [s for s in out if not dead_symbols.is_dead(_dead_memo, s, today)]
+
+
+def resolve_settled_contracts(cfg, history, contracts, fetch=None):
+    """Which single contract each trailing settled bar of a native `=F` series IS, as
+    {date: yf_symbol}.
+
+    The live overlay needs it. One Yahoo answer for an `=F` chart prices its settled bars
+    off the nearest contract and its still-forming bar off the next one: checked on
+    2026-09-11, all 12 markets split that way (SB=F settled on SBV26 at 18.73 while its
+    forming bar was SBH27 at 19.15; coffee's forming bar sat 9.8 % below its own settled
+    series). Spliced onto the chart, that bar drew a roll that is not in the market, so the
+    overlay polls the contract found here instead.
+
+    Found by matching settlements: a candidate's close on a bar's date equals the series'
+    close there. Several trailing bars are placed, not only the last, because the written
+    series can end a bar or two earlier — see _settled_contract_for_history. A failed or
+    throttled read is skipped and never memoised; finding nothing leaves the series without
+    a live candle, never with a wrong one. `fetch` is injectable for the offline tests."""
+    if not str(cfg.get("yf_continuous") or "").endswith("=F"):
+        return {}                     # an index quote (DX-Y.NYB) is one instrument
+    trailing = []
+    for row in (history or [])[-YF_SETTLED_CONTRACT_TRAILING_BARS:]:
+        day = _coerce_iso_date(row.get("date"))
+        close = row.get("close")
+        if day is not None and close is not None:
+            trailing.append((day.isoformat(), float(close)))
+    if not trailing:
+        return {}
+    if fetch is None:
+        def fetch(symbol):
+            frame = _yf_client._history(symbol, "1mo")
+            if frame is None:                 # the gateway declined: no answer about this symbol
+                raise yahoo_gateway.RateLimitedError(f"{symbol}: gateway declined the request")
+            return _settlement_rows(frame)
+    last_day = trailing[-1][0]
+    found = {}
+    for symbol in _settled_contract_candidates(cfg, contracts, date.fromisoformat(last_day)):
+        if last_day in found:
+            break
+        try:
+            rows = fetch(symbol) or []
+        except Exception:
+            continue
+        closes = {str(r.get("date"))[:10]: r.get("close") for r in rows}
+        for day, close in trailing:
+            other = closes.get(day)
+            if day not in found and other is not None and _same_settle(float(other), close):
+                found[day] = symbol
+    return found
 
 
 def select_yfinance_contracts(cfg, count=6):

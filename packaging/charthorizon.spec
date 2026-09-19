@@ -34,6 +34,24 @@ datas += [
     (os.path.join(ROOT, "app", "loading.html"), "."),
 ]
 
+# ---- Bake in which recipe built this -------------------------------------------------
+# The Windows installer is built in a VM from its own copy of the tree, and a stale
+# packaging/ there still builds — quietly, from the previous recipe (that is how the
+# ctypes.wintypes hidden import below reached the Mac build and never the Windows one).
+# The digest is taken from the packaging tree THIS spec is sitting in, so a stale copy
+# bakes the previous value; start.py reports it from /api/version and the Mac prints what
+# it ought to be (tools/packaging-fingerprint.py). See app/packaging_fingerprint.py for
+# why the definition lives in app/ — the only tree that is always synced.
+sys.path.insert(0, os.path.join(ROOT, "app"))
+from packaging_fingerprint import FINGERPRINT_FILE, packaging_fingerprint
+
+_fp_dir = os.path.join(ROOT, "build")
+os.makedirs(_fp_dir, exist_ok=True)                 # gitignored; --clean runs before this
+_fp_path = os.path.join(_fp_dir, FINGERPRINT_FILE)
+with open(_fp_path, "w", encoding="utf-8") as _fh:
+    _fh.write(packaging_fingerprint(os.path.join(ROOT, "packaging")) + "\n")
+datas += [(_fp_path, ".")]
+
 if sys.platform == "darwin":
     icon = os.path.join(ROOT, "packaging", "icons", "icon.icns")
     # Cocoa reopen-handler in start.py drives serving so a Dock click reopens the

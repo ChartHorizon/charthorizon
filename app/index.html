@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ChartHorizon – Commodity Futures Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- Geist is bundled (web/fonts/, @font-face in styles.css): no Google Fonts request, and the chart
+     labels keep their face offline. Preloaded because the PNG export draws text on a canvas, which
+     only uses a font that has already loaded. -->
+<link rel="preload" href="web/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2048%2048%22%20fill%3D%22none%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22chSunFav%22%20x1%3D%2224%22%20y1%3D%229%22%20x2%3D%2224%22%20y2%3D%2234%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23fcd34d%22/%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23f97316%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Cline%20x1%3D%226%22%20y1%3D%2234%22%20x2%3D%2242%22%20y2%3D%2234%22%20stroke%3D%22%238896a8%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cpath%20d%3D%22M15%2034a9%209%200%200%201%2018%200%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2224%22%20y1%3D%2210%22%20x2%3D%2224%22%20y2%3D%2215%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2211.5%22%20y1%3D%2219%22%20x2%3D%2214.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3Cline%20x1%3D%2236.5%22%20y1%3D%2219%22%20x2%3D%2233.5%22%20y2%3D%2222%22%20stroke%3D%22url%28%23chSunFav%29%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22/%3E%3C/svg%3E">
 <script>
 /* Set the theme as early as possible (no flash). Card-mode (content bot) ALWAYS
@@ -20,9 +21,11 @@
   document.documentElement.setAttribute('data-theme', dark?'dark':'light');
 }catch(e){document.documentElement.setAttribute('data-theme','light');}})();
 </script>
-<link rel="stylesheet" href="web/styles.css?v=45">
+<link rel="stylesheet" href="web/styles.css?v=58">
 </head>
 <body>
+<!-- First Tab stop: past the header and the 39-market sidebar into the open tab (skipToContent, core.js). -->
+<a class="skip-link" href="#" onclick="skipToContent(event)">Skip to content</a>
 <!-- Cold-start splash: kept up by html.booting (set in <head> before first paint, normal
      dashboard only) until boot.js has the market about to be on screen ready — its category
      file, its front month's history and live price. The rest of the board loads behind the
@@ -36,16 +39,40 @@
   </div>
 </div>
 <script>
-/* Last-resort net: if boot.js never ran at all (a syntax error, a failed load), nothing would
-   ever lift the splash. It stands down as soon as bootWarmup() marks itself started — from
-   then on the splash has its own stall watchdog and its own "Open anyway" button, and must
-   NOT be yanked out from under a warm-up that is still making progress. */
-setTimeout(function(){
-  if (window.__bootWarmupStarted) return;
-  var s=document.getElementById('bootSplash');
-  if(s)s.classList.add('boot-splash-done');
-  document.documentElement.classList.remove('booting');
-},60000);
+/* Last-resort net: if boot.js never ran (a script that did not arrive, a syntax error), nothing
+   would ever lift the splash. It used to lift it after 60 s onto a dead board — no sidebar, no
+   chart, no hint — which the first launch of a fresh Windows 1.2.8 install showed once
+   (2026-09-13; a reload fixed it and it did not reproduce). Now the page reloads itself ONCE:
+   straight away when a script fails to load, after 60 s otherwise. If that load fails too, the
+   splash says so and offers Reload — never an empty board. It stands down as soon as
+   bootWarmup() marks itself started: from then on the splash has its own stall watchdog and
+   "Open anyway" button, and must NOT be pulled out from under a warm-up still making progress.
+   Card-mode never sets html.booting, so the bot's page is never reloaded under it. */
+(function(){
+  var RETRY_KEY='ch_boot_retry_at', RETRY_WINDOW_MS=120000, fired=false;
+  function bootFailed(){
+    if (fired || window.__bootWarmupStarted) return;
+    if (!document.documentElement.classList.contains('booting')) return;
+    fired=true;
+    try {
+      if (Date.now() - (+sessionStorage.getItem(RETRY_KEY) || 0) > RETRY_WINDOW_MS) {
+        sessionStorage.setItem(RETRY_KEY, String(Date.now()));
+        setTimeout(function(){ location.reload(); }, 1500);
+        return;
+      }
+    } catch (e) {}   // no sessionStorage: no way to count reloads, so never loop — ask instead
+    var p=document.getElementById('bootSplashPhase'); if(p)p.textContent='ChartHorizon did not load completely';
+    var c=document.getElementById('bootSplashProgress'); if(c)c.textContent='';
+    var d=document.querySelector('.boot-splash-dots'); if(d)d.style.display='none';
+    var b=document.getElementById('bootSplashSkip');
+    if(b){ b.textContent='Reload'; b.onclick=function(){ location.reload(); }; b.hidden=false; }
+  }
+  // A <script> that fails to load fires `error` on the element, which does not bubble: capture.
+  window.addEventListener('error', function(e){
+    if (e.target && e.target.tagName === 'SCRIPT') bootFailed();
+  }, true);
+  setTimeout(bootFailed, 60000);
+})();
 </script>
 <header>
   <!-- /from-dashboard redirects (302) to chart-horizon.com and counts the click on the
@@ -81,7 +108,7 @@ setTimeout(function(){
     </a>
     <div class="watchlist-refresh header-refresh" data-watchlist-refresh>
       <div class="wlr-row">
-        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="Refresh EoD data now">⟳</button>
+        <button class="wlr-btn" type="button" onclick="triggerManualRefresh()" data-wlr-trigger title="Refresh EoD data now" aria-label="Refresh data">⟳</button>
         <span class="wlr-label" data-wlr-label>Refresh</span>
       </div>
       <div class="wlr-track"><div class="wlr-fill" data-wlr-fill></div></div>
@@ -98,6 +125,7 @@ setTimeout(function(){
   <aside id="sidebar"></aside>
   <main>
     <select class="mobile-select" id="mobileSelect" onchange="switchCommodity(this.value)"></select>
+    <div class="setup-strip" id="futuresHeatSection" aria-label="Futures at 3/3" hidden></div>
 
     <div class="chart-card">
       <div class="chart-head">
@@ -115,7 +143,7 @@ setTimeout(function(){
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
             <span id="btnChartShareLabel">Share</span>
           </button>
-          <button class="chart-action-btn" id="btnChartX" type="button" onclick="shareToX()" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
+          <button class="chart-action-btn" id="btnChartX" type="button" aria-label="Share on X" onclick="shareToX()" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
             <span id="btnChartXLabel"></span>
           </button>
@@ -138,7 +166,6 @@ setTimeout(function(){
             <th>Change</th>
             <th>Change %</th>
             <th>Volume</th>
-            <th>Open Interest</th>
             <th>Expiration (Last Trading Day)</th>
           </tr>
         </thead>
@@ -148,8 +175,6 @@ setTimeout(function(){
     </div>
 
     <div class="spec-card" id="specCard"></div>
-
-    <div class="fx-section" id="futuresHeatSection" hidden></div>
 
     <div class="foot-note">
       <strong>Note:</strong> Price, volume, single-contract charts and the forward curve use yfinance OHLCV/quote data.
@@ -187,7 +212,7 @@ setTimeout(function(){
       <div class="seasonals-card-head">
         <div class="seasonals-card-title" id="seasonalsChartTitle">Seasonal tendency</div>
         <div class="seasonals-card-side">
-          <div class="seasonals-card-meta" id="seasonalsChartMeta">Indexed to 100 at the first trading day of each year</div>
+          <div class="seasonals-card-meta" id="seasonalsChartMeta">% from each year's first session</div>
           <div class="chart-actions">
             <button class="chart-action-btn" id="btnSeasonalsPng" type="button" onclick="downloadChart('seasonals')" title="Download seasonals as PNG image">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5v8M5 7l3 3 3-3M2.5 11.5v1a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1"/></svg>
@@ -197,7 +222,7 @@ setTimeout(function(){
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
               <span id="btnSeasonalsShareLabel">Share</span>
             </button>
-            <button class="chart-action-btn" id="btnSeasonalsX" type="button" onclick="shareToX('seasonals')" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
+            <button class="chart-action-btn" id="btnSeasonalsX" type="button" aria-label="Share on X" onclick="shareToX('seasonals')" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
               <span id="btnSeasonalsXLabel"></span>
             </button>
@@ -250,7 +275,7 @@ setTimeout(function(){
         </div>
       </div>
       <div class="screener-body" id="screenerBody"></div>
-      <div class="screener-legend"><span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> · COT Hedging: relative to the 6M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
+      <div class="screener-legend">Setup 3/3 = all three signals agree · 2/3 = two agree, one neutral · <span class="sig sig-bull">Bullish</span> <span class="sig sig-bear">Bearish</span> · COT Hedging: relative to the 6M midpoint · Premium = front month &gt; next month (backwardation) · ★ = Watchlist</div>
     </div>
     <div id="screenerWeekly" hidden>
       <div class="screener-actions">
@@ -263,8 +288,9 @@ setTimeout(function(){
         </div>
         <span class="screener-count" id="screenerWeeklyCount"></span>
       </div>
+      <div class="wk-summary" id="screenerWeeklySummary" aria-label="Jump to a result" hidden></div>
       <div class="screener-body" id="screenerWeeklyBody"></div>
-      <div class="screener-legend">3/3 = all three signals aligned. Below: only 2/3 markets whose seasonal turns <strong>this week (today–Sunday)</strong> in the matching direction and lifts the setup to 3/3 · 📅 = seasonal onset date · grouped by category.</div>
+      <div class="screener-legend">3/3 = all three signals aligned. Below: only 2/3 markets whose seasonal turns <strong>this week (today–Sunday)</strong> in the matching direction and lifts the setup to 3/3 · <svg class="line-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Calendar"><rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M3.5 10h17M8 2.5v4M16 2.5v4"/></svg>= seasonal onset date · grouped by category.</div>
     </div>
   </div>
   <aside class="watchlist-sidebar" aria-label="Watchlist" data-watchlist-context="screener">
@@ -375,15 +401,27 @@ setTimeout(function(){
         <span class="fx-calc-vs">vs</span>
         <label class="fx-calc-field">Market C<select id="smtSelC" class="screener-cat" onchange="setSmtMarket('c', this.value)"></select></label>
         <span class="smt-controls-spacer"></span>
-        <button class="smt-btn" id="smtDownloadBtn" type="button" onclick="downloadSmtCharts()">⤓ Download</button>
-        <button class="smt-btn" id="smtShareBtn" type="button" onclick="shareSmtCharts()" title="Share the image (or copy it to the clipboard)">Share</button>
-        <button class="smt-btn" id="smtXBtn" type="button" onclick="shareSmtToX()" title="Share on X: copies the image so you can paste it into the post (Cmd/Ctrl+V)">X</button>
+        <!-- Same buttons as the Futures and Seasonals charts; setSmtBtnStatus writes the label spans. -->
+        <div class="chart-actions smt-actions">
+          <button class="chart-action-btn" id="smtDownloadBtn" type="button" onclick="downloadSmtCharts()" title="Download the charts as a PNG image">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5v8M5 7l3 3 3-3M2.5 11.5v1a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1"/></svg>
+            PNG
+          </button>
+          <button class="chart-action-btn" id="smtShareBtn" type="button" onclick="shareSmtCharts()" title="Share the image (or copy it to the clipboard)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
+            <span id="smtShareBtnLabel">Share</span>
+          </button>
+          <button class="chart-action-btn" id="smtXBtn" type="button" aria-label="Share on X" onclick="shareSmtToX()" title="Share on X: copies the image so you can paste it into the post (Cmd/Ctrl+V)">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            <span id="smtXBtnLabel"></span>
+          </button>
+        </div>
       </div>
       <div class="smt-controls-row">
         <div class="fx-timeframe-bar" id="smtRangeBar" aria-label="Time window"></div>
         <div class="fx-timeframe-bar" id="smtIntervalBar" aria-label="Interval (daily or weekly)"></div>
         <div class="fx-timeframe-bar" id="smtContractModeBar" aria-label="Continuous or front-month contract"></div>
-        <button class="smt-toggle" id="smtDrawToggle" type="button" onclick="toggleSmtDraw()">✏ Trendline: Off</button>
+        <button class="smt-toggle" id="smtDrawToggle" type="button" onclick="toggleSmtDraw()">Trendline: Off</button>
         <button class="smt-btn" id="smtClearBtn" type="button" onclick="clearSmtLines()">Clear lines</button>
       </div>
     </div>
@@ -406,16 +444,19 @@ setTimeout(function(){
           <div class="bigchart-name" id="bigchartName">Select a market</div>
         </div>
         <span class="bigchart-sym" id="bigchartSym"></span>
-        <!-- One right-aligned toolbar; its groups wrap as whole units so the layout stays
-             structured at any width: [Contract] [Timeframe] [Indicators] [View controls]. -->
+        <!-- Two lines with one job each. Beside the title: what is drawn (contract, timeframe). On a
+             line of its own: the panes, the indicators and the zoom controls. All of it used to share
+             one right-aligned toolbar, which wrapped into four ragged rows at 1440px. -->
         <div class="bigchart-toolbar">
           <div class="fx-timeframe-bar bigchart-contractbar" id="bigchartContractBar" aria-label="Contract"></div>
           <select class="mobile-select" id="bigchartMobileSelect" aria-label="Select market" onchange="selectBigChartMarket(this.value)"></select>
           <div class="fx-timeframe-bar" id="bigchartTfBar" aria-label="Timeframe"></div>
-          <div class="chart-filter-group bigchart-indicators" id="bigchartIndicatorBar" aria-label="Indicators"></div>
+        </div>
+        <div class="bigchart-subbar">
+          <div class="chart-filter-group bigchart-indicators" id="bigchartIndicatorBar" aria-label="Panes"></div>
           <div class="bigchart-ta" id="bigchartTaBar" aria-label="Technical indicators"></div>
           <div class="bigchart-viewctrls">
-            <label class="cot-filter-box bigchart-zoomanchor" title="When zooming, the right edge (newest candle) stays fixed — the chart doesn't shift">
+            <label class="bigchart-zoomanchor" title="When zooming, the right edge (newest candle) stays fixed — the chart doesn't shift">
               <input type="checkbox" id="bigchartZoomAnchor" onchange="setBigChartZoomAnchor(this.checked)" checked>
               <span>Anchor right</span>
             </label>
@@ -437,12 +478,13 @@ setTimeout(function(){
     <div class="screener-head">
       <div>
         <div class="screener-title">Settings</div>
-        <div class="screener-sub">Chart layouts (light/dark), timezone and version info</div>
+        <div class="screener-sub">Chart layouts (light/dark), timezone, drawing defaults and version info</div>
       </div>
     </div>
     <div class="set-card" id="settingsAppearance"></div>
     <div class="set-card" id="settingsLayouts"></div>
     <div class="set-card" id="settingsTimezone"></div>
+    <div class="set-card" id="settingsDrawings"></div>
     <div class="set-card" id="settingsBackup"></div>
     <div class="set-card" id="settingsAbout"></div>
   </div>
@@ -456,21 +498,21 @@ setTimeout(function(){
 </footer>
 
 <script src="ff_data/config.js"></script>
-<script src="web/core.js?v=22"></script>
-<script src="web/indicators.js?v=1"></script>
-<script src="web/chart.js?v=30"></script>
-<script src="web/futures.js?v=6"></script>
-<script src="web/seasonals.js?v=4"></script>
-<script src="web/screener.js?v=17"></script>
-<script src="web/forex.js?v=6"></script>
-<script src="web/smt.js?v=4"></script>
+<script src="web/core.js?v=34"></script>
+<script src="web/indicators.js?v=3"></script>
+<script src="web/chart.js?v=49"></script>
+<script src="web/futures.js?v=9"></script>
+<script src="web/seasonals.js?v=9"></script>
+<script src="web/screener.js?v=32"></script>
+<script src="web/forex.js?v=10"></script>
+<script src="web/smt.js?v=11"></script>
 <script src="web/tools.js?v=3"></script>
-<script src="web/refresh.js?v=2"></script>
-<script src="web/live.js?v=8"></script>
-<script src="web/bigchart.js?v=16"></script>
-<script src="web/draw.js?v=26"></script>
-<script src="web/settings.js?v=15"></script>
-<script src="web/boot.js?v=12"></script>
+<script src="web/refresh.js?v=4"></script>
+<script src="web/live.js?v=9"></script>
+<script src="web/bigchart.js?v=20"></script>
+<script src="web/draw.js?v=29"></script>
+<script src="web/settings.js?v=18"></script>
+<script src="web/boot.js?v=13"></script>
 
 </body>
 </html>

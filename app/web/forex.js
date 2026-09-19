@@ -122,7 +122,7 @@ function fxCorrVerdict(v) {
   if (a < 0.2) return { word: 'No meaningful correlation', color: 'var(--muted)' };
   const strength = a >= 0.7 ? 'Strong' : a >= 0.4 ? 'Moderate' : 'Weak';
   const dir = v >= 0 ? 'positive' : 'inverse';
-  return { word: `${strength} ${dir} correlation`, color: v >= 0 ? 'var(--up)' : 'var(--down)' };
+  return { word: `${strength} ${dir} correlation`, color: v >= 0 ? 'var(--up-text)' : 'var(--down-text)' };
 }
 
 function fxMiniCard(pairKey, series, fromDate, toDate) {
@@ -149,7 +149,7 @@ function fxMiniCard(pairKey, series, fromDate, toDate) {
   const fill = up ? 'rgba(14,166,121,0.12)' : 'rgba(229,62,62,0.12)';
   const dec = last >= 100 ? 2 : last >= 1 ? 4 : 5;
   return `<div class="fx-mini">
-    <div class="fx-mini-head"><span class="fx-mini-title">${esc(name)}</span><span class="fx-mini-last" style="color:${stroke}">${last.toFixed(dec)} <small>(${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)</small></span></div>
+    <div class="fx-mini-head"><span class="fx-mini-title">${esc(name)}</span><span class="fx-mini-last" style="color:${up ? 'var(--up-text)' : 'var(--down-text)'}">${last.toFixed(dec)} <small>(${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)</small></span></div>
     <svg viewBox="0 0 ${W} ${H}"><path d="${area}" fill="${fill}" stroke="none"/><path d="${d.trim()}" fill="none" stroke="${stroke}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
   </div>`;
 }
@@ -223,7 +223,12 @@ const FX_INTEREST_RATES_FALLBACK = {
   JPY: { rate:0.75, display:'0.75%', centralBank:'Bank of Japan', label:'Overnight Call Rate', asOf:'2025-12-22' },
   CHF: { rate:0.00, display:'0.00%', centralBank:'Swiss National Bank', label:'Policy Rate', asOf:'2025-06-20' },
 };
-const FX_INTEREST_RATES = (window.__CONFIG__ && window.__CONFIG__.fxRates) || FX_INTEREST_RATES_FALLBACK;
+// Read live, never captured at load: an in-place refresh reload (refresh.js) re-runs
+// config.js, and a const taken here kept the rates the page had opened with — the heatmap's
+// rate bias and the Interest Rates table only moved on a browser reload.
+function fxInterestRates() {
+  return (window.__CONFIG__ && window.__CONFIG__.fxRates) || FX_INTEREST_RATES_FALLBACK;
+}
 
 // ── Synthetic FX-pair watchlist entries (key form: fxpair:<baseFutureKey>|<quoteFutureKey>) ──
 const FX_CUR_BY_KEY = Object.fromEntries(Object.entries(FX_CURRENCIES).map(([cur, key]) => [key, cur]));
@@ -281,12 +286,12 @@ function roundScore(v) {
 }
 
 function fxInterestRateStats() {
-  const vals = Object.values(FX_INTEREST_RATES).map(r => r.rate).filter(v => Number.isFinite(v));
+  const vals = Object.values(fxInterestRates()).map(r => r.rate).filter(v => Number.isFinite(v));
   return { min: Math.min(...vals), max: Math.max(...vals) };
 }
 
 function fxInterestRateScore(cur) {
-  const meta = FX_INTEREST_RATES[cur];
+  const meta = fxInterestRates()[cur];
   if (!meta || !Number.isFinite(meta.rate)) return 0;
   const { min, max } = fxInterestRateStats();
   if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) return 0;
@@ -317,7 +322,7 @@ function fxStrengthRanking() {
         score: roundScore(signalScore + rateScore),
         signalScore,
         rateScore,
-        rate: FX_INTEREST_RATES[cur] || null,
+        rate: fxInterestRates()[cur] || null,
       });
     }
   }
@@ -414,7 +419,7 @@ function fxPairTile(p, tone) {
   const inWatch = watchlist.includes(`fxpair:${p.base.key}|${p.quote.key}`);
   const isBear = tone === 'bearish';
   const label = isBear ? `Bear -${fxAbsScoreLabel(p.spread)}/${fxMaxPairSpread()}` : `Bull +${fxAbsScoreLabel(p.spread)}/${fxMaxPairSpread()}`;
-  return `<div class="fx-pair ${tone}" style="${fxPairHeat(p.spread, tone, p.heat)}" onclick="openFxPairChart('${p.base.key}','${p.quote.key}','${p.base.cur}','${p.quote.cur}')" title="Open ${p.base.cur}/${p.quote.cur} chart">
+  return `<div class="fx-pair ${tone}" tabindex="0" style="${fxPairHeat(p.spread, tone, p.heat)}" onclick="openFxPairChart('${p.base.key}','${p.quote.key}','${p.base.cur}','${p.quote.cur}')" title="Open ${p.base.cur}/${p.quote.cur} chart">
     <span class="fx-pair-name">${p.base.cur}/${p.quote.cur}</span>
     <span class="fx-pair-spread">${label}</span>
     <button type="button" class="fx-pair-add${inWatch ? ' on' : ''}" onclick="fxAddPair('${p.base.key}','${p.quote.key}', event)" title="Add pair to watchlist">${inWatch ? '★ saved' : '+ Watchlist'}</button>
@@ -718,7 +723,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
     if (v < pLo || v > pHi) continue;
     const y = pY(v).toFixed(1);
     grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${CHART_THEME.axis}" stroke-width="1" stroke-dasharray="2,4" opacity="0.78"/>`;
-    grid += `<text x="${W - padR + 6}" y="${(+y + 3.5).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist">${v.toFixed(dec)}</text>`;
+    grid += `<text x="${W - padR + 6}" y="${(+y + 3.5).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif">${v.toFixed(dec)}</text>`;
   }
 
   let candles = '';
@@ -764,7 +769,7 @@ function renderFxPairChart(baseCur, quoteCur, bars, direction) {
   let xLabels = '';
   for (let g = 0; g <= 5; g++) {
     const i = Math.round((n - 1) * g / 5);
-    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist" text-anchor="middle">${bars[i].date.slice(2)}</text>`;
+    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${(totalH - 6).toFixed(1)}" font-size="11" fill="${CHART_THEME.text}" font-family="Geist, system-ui, sans-serif" text-anchor="middle">${fmtAxisDate(bars[i].date)}</text>`;
   }
   const chartBg = `<rect x="0" y="0" width="${W}" height="${totalH}" fill="${CHART_THEME.bg}" rx="7"/>`;
 

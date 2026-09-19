@@ -33,7 +33,30 @@ const catCache = {};   // slug -> { key -> payload }
 let _dataReloadNonce = 0;
 function bumpDataReloadNonce() { _dataReloadNonce++; }
 
-const CAT_ICONS = { Energy:'⚡', Metals:'🥇', Agriculture:'🌾', 'Livestock/Dairy':'🐄', Softs:'☕', Indices:'📈', Currencies:'💱', Bonds:'🏦', Crypto:'🪙' };
+// Small stroke icons drawn like the header's own (24-unit grid, round caps, currentColor), so they
+// take the colour of the text beside them and look the same on every machine. They replaced emoji,
+// which Windows and macOS draw as two different pictures and which ignore the text colour.
+const LINE_ICON_PATHS = {
+  energy: '<path d="M13 2.5 4.5 13.5H11l-1 8 8.5-11H12z"/>',
+  metals: '<path d="M2.5 20.5 4 15h6l1.5 5.5z"/><path d="M12.5 20.5 14 15h6l1.5 5.5z"/><path d="M7.5 11.5 9 6h6l1.5 5.5z"/>',
+  agriculture: '<path d="M12 21v-8.5"/><path d="M12 12.5C12 8 9 5 4 5c0 4.5 3 7.5 8 7.5z"/><path d="M12 15.5c0-3.5 2.5-6 7-6 0 3.5-2.5 6-7 6z"/>',
+  livestock: '<path d="M3.5 4c.5 3 2.5 5 5.5 5h6c3 0 5-2 5.5-5"/><path d="M8 9v5.5a4 4 0 0 0 8 0V9"/><path d="M10.5 17.5h3"/>',
+  softs: '<path d="M4 10h12v4.5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M16 11.5h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3.5v3M12 3.5v3"/>',
+  indices: '<path d="M3 17 9.5 10.5l4 4L21 7"/><path d="M15 7h6v6"/>',
+  currencies: '<path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/>',
+  bonds: '<path d="M3.5 9 12 4l8.5 5z"/><path d="M6.5 12v5.5M12 12v5.5M17.5 12v5.5"/><path d="M3.5 20.5h17"/>',
+  crypto: '<path d="M12 2.5 20.5 7.25v9.5L12 21.5l-8.5-4.75v-9.5z"/><path d="M3.5 7.25 12 12l8.5-4.75M12 12v9.5"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M3.5 10h17M8 2.5v4M16 2.5v4"/>',
+  hourglass: '<path d="M6 2.5h12M6 21.5h12"/><path d="M7.5 2.5V5c0 3 4.5 4.5 4.5 7s-4.5 4-4.5 7v2.5M16.5 2.5V5c0 3-4.5 4.5-4.5 7s4.5 4 4.5 7v2.5"/>',
+  pencil: '<path d="M15.5 4.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4z"/><path d="M13.5 6.5l3 3"/>',
+  close: '<path d="M6 6l12 12M18 6 6 18"/>',
+};
+function lineIcon(name) {
+  const paths = LINE_ICON_PATHS[name];
+  return paths ? `<svg class="line-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>` : '';
+}
+const CAT_ICONS = { Energy:'energy', Metals:'metals', Agriculture:'agriculture', 'Livestock/Dairy':'livestock', Softs:'softs', Indices:'indices', Currencies:'currencies', Bonds:'bonds', Crypto:'crypto' };
+function catIcon(cat) { return lineIcon(CAT_ICONS[cat]); }
 // Sidebar category order: most broadly-followed / popular first. Keep in sync with
 // CATEGORY_POPULARITY in generate_html() (Python), which sets the same INDEX order.
 const CATEGORY_POPULARITY = ['Indices','Crypto','Metals','Energy','Currencies','Agriculture','Bonds','Softs','Livestock/Dairy'];
@@ -59,14 +82,19 @@ const CHART_THEME = {
   oiCftc:'#52657f',       // CFTC weekly history (baseline)
   oiCme:'#0ea679',        // (unused, kept for theme stability)
   oiYf:'#e8853a',         // yfinance fallback (estimated / lower quality)
+  oiSeasonal:'#b45309',   // OI seasonal-tendency overlay (dashed, opt-in; never a card)
   spread:'#7c3aed',       // calendar spread (front - next)
+  spreadPremium:'#0ea679', // spread line above 0 (premium); own token, NOT bull — bull is blue in light
+  spreadDiscount:'#e53e3e', // spread line at or below 0 (discount); green/red like the volume pane
   trend:'#000000'         // Macro-Shift user trend lines (black light / white dark)
 };
 const _CHART_THEME_VARS = {
   bg:'--chart-bg', grid:'--chart-grid', gridSoft:'--chart-grid-soft', axis:'--chart-axis', text:'--chart-text',
   bull:'--chart-bull', bullWick:'--chart-bull-wick', bear:'--chart-bear', bearWick:'--chart-bear-wick',
   volume:'--chart-volume', volumeBull:'--chart-volume-bull', volumeBear:'--chart-volume-bear',
-  oi:'--chart-oi', oiCftc:'--chart-oi-cftc', oiCme:'--chart-oi-cme', oiYf:'--chart-oi-yf', spread:'--chart-spread',
+  oi:'--chart-oi', oiCftc:'--chart-oi-cftc', oiCme:'--chart-oi-cme', oiYf:'--chart-oi-yf',
+  oiSeasonal:'--chart-oi-seasonal', spread:'--chart-spread',
+  spreadPremium:'--chart-spread-premium', spreadDiscount:'--chart-spread-discount',
   trend:'--chart-trend'
 };
 // Pull the active theme's --chart-* tokens into CHART_THEME (mutates in place).
@@ -163,6 +191,49 @@ function cotBarLayout(xs, fallbackStep) {
   return { xs: xs.map((_, i) => xs[0] + step * i), step };
 }
 
+// ── COT Hedging Program: ONE definition, shared by every surface that draws or reads it ──
+// The program reads the net against the MIDPOINT of its own trailing window, never against
+// zero. The side of zero is a per-market constant — commercials are the natural seller in a
+// producer-hedged market and the natural buyer in the Treasuries — which is exactly why the
+// plain COT-net signal was dropped from the score on 2026-08-29; the side of the midpoint is
+// what moves. Drawn against zero, the pane says the opposite of the verdict beside it on
+// every structurally one-sided market (the pound's net is long all year and its column reads
+// bearish; USDX's is short all year and reads bullish).
+//
+// `cot_hedge` in screener.json is this same read at 182 days (`_screener_cot_hedge_signal`,
+// screener.py). Keep the two in step: the Futures/Charts pane may widen the window to the
+// selected 12M range, but anything reporting the screener's verdict draws the 6M one.
+//
+// Anchored on the series' OWN last report, never on today — a store that has not been
+// refreshed for a while is then read like a fresh one, the way the generator reads it.
+const COT_HEDGE_WINDOW_DAYS = 182;   // 6 months: the window the screener's COT Hedging column reports
+
+// The net of one weekly report: `cot_net` where the fetch recorded one, the commercial book
+// otherwise. Which cohort that is varies per market (`cot_label`) — see screener.py.
+function cotNetOf(row) {
+  return (row && row.cot_net !== undefined && row.cot_net !== null) ? row.cot_net : (row && row.comm_net);
+}
+
+// The reports inside the trailing `days` window, ascending. `series` must be sorted
+// (normalizeCotSeries).
+function cotHedgeWindow(series, days) {
+  if (!series || !series.length) return [];
+  const last = new Date(series[series.length - 1].date);
+  if (isNaN(last)) return [];
+  const cutoff = new Date(last);
+  cutoff.setDate(cutoff.getDate() - (days || COT_HEDGE_WINDOW_DAYS));
+  return series.filter(d => { const dt = new Date(d.date); return dt >= cutoff && dt <= last; });
+}
+
+// min / max / midpoint of a window's nets — the level the bars are coloured against.
+// null when the window carries no reading at all.
+function cotHedgeLevels(rows) {
+  const vals = (rows || []).map(cotNetOf).filter(v => v !== null && v !== undefined && Number.isFinite(Number(v))).map(Number);
+  if (!vals.length) return null;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  return { min, max, threshold: (min + max) / 2 };
+}
+
 // The editable color tokens (order is only for robustness; UI groups live in settings.js).
 const CHART_COLOR_TOKENS = [
   '--chart-bg', '--chart-grid', '--chart-grid-soft', '--chart-axis', '--chart-text',
@@ -179,6 +250,27 @@ const CHART_TZ_KEY = 'ch_timezone.v1';
 // stay stable no matter what the user has picked on screen.
 function _isCardMode() {
   try { return !!new URLSearchParams(location.search).get('card'); } catch (e) { return false; }
+}
+
+// Blog cards (`&paper=1`, set only by content/livermore/blog): the chart in the website's
+// newsprint instead of the app's palette. chart-horizon.com is set as a paper (press ink on a
+// cool sheet, one green and one vermilion for bull/bear), and a card in the dashboard's
+// blue/salmon under an orange wordmark read there as an app screenshot pasted onto the page.
+// Card mode only: the in-app export never sees it, and the Telegram/video cards do not pass
+// the flag. The values are the website's DESIGN.md tokens.
+const PAPER_CARD_COLORS = {
+  '--chart-bg': '#fbfbf9', '--chart-grid': '#ddd9d0', '--chart-grid-soft': '#ebe8e1',
+  '--chart-axis': '#c9c3b6', '--chart-text': '#17150f',
+  '--chart-bull': '#39744b', '--chart-bull-wick': '#39744b', '--chart-bear': '#a8503f', '--chart-bear-wick': '#a8503f',
+  '--chart-volume': '#8a8274', '--chart-volume-bull': '#39744b', '--chart-volume-bear': '#a8503f',
+  '--chart-oi': '#6b6356', '--chart-oi-cftc': '#6b6356', '--chart-oi-cme': '#39744b', '--chart-oi-yf': '#7d641e',
+  '--chart-oi-seasonal': '#7d641e',
+  '--chart-spread': '#7d641e', '--chart-spread-premium': '#39744b', '--chart-spread-discount': '#a8503f',
+  '--chart-trend': '#17150f',
+  '--up': '#39744b', '--down': '#a8503f', '--up-text': '#39744b', '--down-text': '#a8503f', '--accent': '#7d641e',
+};
+function _isPaperCard() {
+  try { return _isCardMode() && new URLSearchParams(location.search).get('paper') === '1'; } catch (e) { return false; }
 }
 
 // Read-only colored built-in presets shipped per theme, IN ADDITION to "Standard".
@@ -277,6 +369,7 @@ function applyActivePresetVars() {
   const root = document.documentElement;
   if (_isCardMode()) {
     CHART_COLOR_TOKENS.forEach(tok => root.style.removeProperty(tok));
+    if (_isPaperCard()) Object.entries(PAPER_CARD_COLORS).forEach(([tok, v]) => root.style.setProperty(tok, v));
     CHART_STYLE = { ...CHART_STYLE_DEFAULT };
     applyChartTheme();
     return;
@@ -467,8 +560,13 @@ function switchPage(page) {
   document.querySelectorAll('[data-page-tab]').forEach(tab => {
     const active = tab.dataset.pageTab === target;
     tab.classList.toggle('active', active);
-    if (active) tab.setAttribute('aria-current', 'page');
-    else tab.removeAttribute('aria-current');
+    if (active) {
+      tab.setAttribute('aria-current', 'page');
+      // Below 900px the tab bar is a row of its own and scrolls sideways once the tabs outgrow it;
+      // bring the one you are on into view rather than leaving it past the edge.
+      const bar = tab.parentElement;
+      if (bar && bar.scrollWidth > bar.clientWidth) tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else tab.removeAttribute('aria-current');
   });
   for (const p of PAGES) {
     const el = document.getElementById(p.id + 'Page');
@@ -507,6 +605,88 @@ function activePage() {
   return 'overview';
 }
 
+// "Skip to content" (the first Tab stop, index.html): past the header and the 39-market sidebar
+// into the open tab's own content, where the next Tab lands on its first control.
+function skipToContent(e) {
+  if (e) e.preventDefault();
+  const page = document.querySelector('.page-view:not([hidden])');
+  if (!page) return;
+  const target = page.querySelector('main, .screener-wrap, .forex-wrap, .tools-wrap, .smt-wrap, .settings-wrap') || page;
+  if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+  target.focus();
+}
+
+// A list re-rendered through innerHTML drops keyboard focus with the element it replaces — picking
+// a contract with Enter re-renders the forward curve, sorting re-renders the screener. Call before
+// the render, run the result after it: focus returns to the element carrying the same
+// data-focus-key, if focus was inside the container at all.
+function keepFocusIn(container) {
+  const el = document.activeElement;
+  const key = container && el && el !== container && container.contains(el) ? el.dataset.focusKey : null;
+  return () => { if (key) container.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus(); };
+}
+
+// ── In-page questions and notices ──
+// window.alert / prompt / confirm are drawn by the browser, not by the page: another program's look
+// under a "127.0.0.1:8000 says" heading, and they freeze the whole tab (the live candle and a running
+// refresh's progress bar included) until answered. appAsk() is a native <dialog>, which brings its own
+// focus trap, Esc and backdrop; appNotice() reports a failure without stopping anything.
+// appAsk resolves the trimmed text when `value` is given (null on Cancel), otherwise true / false.
+function appAsk({ title, message = '', value = null, confirmLabel = 'OK', danger = false }) {
+  return new Promise(resolve => {
+    const asksText = value !== null;
+    const dlg = document.createElement('dialog');
+    dlg.className = 'app-dialog';
+    dlg.setAttribute('aria-labelledby', 'appDialogTitle');
+    if (message) dlg.setAttribute('aria-describedby', 'appDialogMsg');
+    dlg.innerHTML = '<form method="dialog">'
+      + `<h2 class="app-dialog-title" id="appDialogTitle">${esc(title)}</h2>`
+      + (message ? `<p class="app-dialog-msg" id="appDialogMsg">${esc(message)}</p>` : '')
+      + (asksText ? `<input class="app-dialog-input" type="text" value="${esc(value)}" aria-labelledby="appDialogTitle" autocomplete="off" spellcheck="false">` : '')
+      + '<div class="app-dialog-actions">'
+      + '<button type="button" class="set-btn" data-dialog-cancel>Cancel</button>'
+      + `<button type="submit" class="set-btn ${danger ? 'set-btn-danger' : 'set-btn-primary'}">${esc(confirmLabel)}</button>`
+      + '</div></form>';
+    const input = dlg.querySelector('input');
+    const ok = dlg.querySelector('button[type="submit"]');
+    const cancel = dlg.querySelector('[data-dialog-cancel]');
+    let answer = asksText ? null : false;
+    const sync = () => { ok.disabled = asksText && !input.value.trim(); };
+    if (input) input.addEventListener('input', sync);
+    cancel.addEventListener('click', () => dlg.close());
+    dlg.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();   // Cancel is type="button", so Enter in the field always means OK
+      if (ok.disabled) return;
+      answer = asksText ? input.value.trim() : true;
+      dlg.close();
+    });
+    dlg.addEventListener('close', () => { dlg.remove(); resolve(answer); });
+    document.body.appendChild(dlg);
+    sync();
+    dlg.showModal();
+    if (input) { input.focus(); input.select(); }
+    else (danger ? cancel : ok).focus();   // a destructive question starts on Cancel
+  });
+}
+let _appNoticeTimer = null;
+function appNotice(text, ms = 7000) {
+  let el = document.getElementById('appNotice');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'appNotice';
+    el.className = 'app-notice';
+    el.setAttribute('role', 'alert');
+    el.hidden = true;
+    el.innerHTML = '<span class="app-notice-text"></span><button type="button" class="app-notice-close" aria-label="Dismiss">' + lineIcon('close') + '</button>';
+    el.querySelector('button').addEventListener('click', () => { el.hidden = true; });
+    document.body.appendChild(el);
+  }
+  el.querySelector('.app-notice-text').textContent = text;
+  el.hidden = false;
+  clearTimeout(_appNoticeTimer);
+  _appNoticeTimer = setTimeout(() => { el.hidden = true; }, ms);
+}
+
 // ── Keyboard accelerators (power users) ──
 // 1–7 jump to the seven top tabs (in nav order), t toggles theme, / focuses the
 // Screener search. Suppressed while typing in a field (Esc blurs it) and in the
@@ -519,9 +699,15 @@ function _isTypingTarget(el) {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (document.body.classList.contains('card-mode') || document.body.classList.contains('fx-card-mode')) return;
+  if (document.querySelector('dialog[open]')) return;   // an open question keeps its keys: no tab switch behind it
   const typing = _isTypingTarget(e.target);
   if (e.key === 'Escape' && typing) { e.target.blur(); return; }
   if (typing) return;
+  // Rows, sortable headers and tiles that open something take focus (tabindex="0") without being
+  // buttons, so Enter and Space did nothing on them. Give them a button's keys.
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[tabindex="0"][onclick]:not(a, button)')) {
+    e.preventDefault(); e.target.click(); return;
+  }
   if (e.key >= '1' && e.key <= '8') {
     const p = PAGES[+e.key - 1];
     if (p) { e.preventDefault(); switchPage(p.id); }
@@ -571,8 +757,14 @@ function watchlistQuote(key) {
   return { close, pct, decimals: cfg.tick_decimals ?? 2, unit: cfg.unit || '' };
 }
 
+let _watchlistWasEmpty = null;   // renderWatchlist: did the last render collapse the column?
+
 function renderWatchlist() {
   watchlist = watchlist.filter(key => isFxPairKey(key) ? fxPairLegsValid(key) : INDEX[key]);
+  // Never collapsed in card-mode: the bot's cards are drawn at the width of the Futures column, and
+  // the collapsed column widened the chart from 880 to 1055, changing every card's proportions.
+  const empty = !watchlist.length && !document.body.classList.contains('card-mode')
+    && !new URLSearchParams(location.search).has('card');
   document.querySelectorAll('.watchlist-sidebar').forEach(panel => {
     const context = panel.dataset.watchlistContext || activePage();
     const activeKey = activeMarketKey(context);
@@ -580,10 +772,16 @@ function renderWatchlist() {
     const count = panel.querySelector('[data-watchlist-count]');
     const addBtn = panel.querySelector('[data-watchlist-add]');
     if (count) count.textContent = watchlist.length === 1 ? '1 market' : `${watchlist.length} markets`;
+    // An empty list collapses its column to a rail (styles.css, "An empty watchlist").
+    panel.classList.toggle('is-empty', empty);
+    panel.parentElement?.classList.toggle('watchlist-collapsed', empty);
     if (addBtn) {
       const exists = watchlist.includes(activeKey);
+      const name = INDEX[activeKey] ? INDEX[activeKey].display_name : 'this market';
       addBtn.disabled = exists;
-      addBtn.textContent = exists ? 'Saved' : '+ Market';
+      addBtn.textContent = exists ? 'Saved' : (empty ? '+' : '+ Market');
+      addBtn.title = `Add ${name} to your watchlist`;
+      addBtn.setAttribute('aria-label', exists ? `${name} is in your watchlist` : `Add ${name} to your watchlist`);
     }
     if (!body) return;
     if (!watchlist.length) {
@@ -606,10 +804,14 @@ function renderWatchlist() {
           <span class="watchlist-meta">${esc(cat)}</span>
           ${quoteHtml}
         </button>
-        <button class="watchlist-remove" type="button" onclick="removeFromWatchlist('${key}', event)" title="Remove">×</button>
+        <button class="watchlist-remove" type="button" onclick="removeFromWatchlist('${key}', event)" title="Remove" aria-label="Remove ${esc(name)} from watchlist">×</button>
       </div>`;
     }).join('');
   });
+  // Collapsing or reopening the column changes the width every chart was drawn at; the resize
+  // handlers (boot.js, the Weekly Outlook, the Charts tab) redraw them.
+  if (_watchlistWasEmpty !== null && _watchlistWasEmpty !== empty) window.dispatchEvent(new Event('resize'));
+  _watchlistWasEmpty = empty;
 }
 
 async function openWatchlistMarket(key, context = activePage()) {
@@ -678,6 +880,27 @@ async function loadCategory(slug) {
 
 // ── Seasonals page ──
 
+// Seasonal calendar: ONE definition, used by every surface that reads a date as a position in
+// the year — the Seasonals tab's price curves (buildSeasonalCurve) and the Open-Interest
+// seasonal overlay (indicators.js). A second copy would drift exactly where it must not: both
+// index into the same 365-slot grid, and a leap-day handled differently in one of them shifts
+// every curve after Feb 28 against the other by a day.
+//
+// Feb 29 has no slot (365 fixed days) — the caller decides whether to skip it or fold it into
+// Feb 28's neighbourhood.
+function dayOfYearNoLeap(dateStr) {
+  const [year, month, day] = String(dateStr).slice(0, 10).split('-').map(Number);
+  if (!year || !month || !day || (month === 2 && day === 29)) return null;
+  const t = Date.UTC(2021, month - 1, day);
+  const start = Date.UTC(2021, 0, 1);
+  return Math.round((t - start) / 86400000);
+}
+
+function seasonalYear(dateStr) {
+  return Number(String(dateStr).slice(0, 4));
+}
+
+
 function buildCommoditySidebarHtml(idPrefix, clickHandler) {
   const cats = {};
   for (const [k, v] of Object.entries(INDEX)) {
@@ -688,7 +911,7 @@ function buildCommoditySidebarHtml(idPrefix, clickHandler) {
   let html = '';
   for (const cat of orderedCats) {
     html += `<div class="aside-section">
-      <div class="aside-label">${CAT_ICONS[cat]||''} ${cat}</div>`;
+      <div class="aside-label">${catIcon(cat)}${esc(cat)}</div>`;
     for (const [k, v] of cats[cat]) {
       html += `<button class="commodity-item" id="${idPrefix}-${k}" type="button" onclick="${clickHandler}('${k}')">${esc(v.display_name)}</button>`;
     }
@@ -729,6 +952,15 @@ function fmtInt(n) {
 }
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+// Chart axis and crosshair dates: "Sep 15 '25". The bare ISO tail the axes used to print
+// ("25-09-15") read as 25 September 2015. Built from the string, never through Date: a UTC-parsed
+// "2025-09-15" is the 14th anywhere west of Greenwich.
+const AXIS_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtAxisDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  return m ? `${AXIS_MONTHS[+m[2] - 1]} ${m[3]} '${m[1].slice(2)}` : String(iso || '');
 }
 
 function fmtExpiry(iso) {

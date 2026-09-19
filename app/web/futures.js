@@ -142,27 +142,28 @@ function renderTable(cfg) {
   const dec = cfg.tick_decimals;
   // FRONT badge marks the lead (highest-volume) contract, not row 0 — see frontContractIndex.
   const frontIdx = frontContractIndex(cfg.contracts);
-  document.getElementById('curveBody').innerHTML = cfg.contracts.map((c,i) => {
+  const body = document.getElementById('curveBody');
+  const restoreFocus = keepFocusIn(body);   // a row picked with Enter is replaced by this render
+  body.innerHTML = cfg.contracts.map((c,i) => {
     const price = fmtNum(c.last, dec);
     const chg = fmtNum(c.change, dec);
     const pct = c.change_pct;
     const up = (pct ?? 0) >= 0;
     const vol = fmtInt(c.volume);
-    const oi = fmtInt(c.open_interest);
     const fb = i === frontIdx ? '<span class="front-badge">FRONT</span>' : '';
     const delivery = esc(c.delivery_month_label || c.label || '');
     const contractSymbol = [c.contract_symbol, c.yf_symbol].filter(Boolean).join(' · ');
     const active = chartState.chartMode === 'contract' && chartState.contractSymbol === c.yf_symbol;
-    return `<tr class="curve-row ${active ? 'active' : ''}" onclick="selectCurveContract(${i})" title="Show this contract in the main chart">
+    return `<tr class="curve-row ${active ? 'active' : ''}" tabindex="0" data-focus-key="curve-${i}" onclick="selectCurveContract(${i})" title="Show this contract in the main chart">
       <td><span class="contract-label">${delivery}${fb}</span><div class="contract-sym">Single contract · ${esc(contractSymbol)}</div></td>
       <td>${price!==null?price:'<span class="na">n/a</span>'}</td>
       <td class="${up?'pos':'neg'}">${chg!==null?(up?'+':'')+chg:'<span class="na">–</span>'}</td>
       <td class="${up?'pos':'neg'}">${pct!==null&&pct!==undefined?(up?'+':'')+pct.toFixed(2)+'%':'<span class="na">–</span>'}</td>
       <td>${vol!==null?vol:'<span class="na">–</span>'}</td>
-      <td>${oi!==null?oi:'<span class="na">–</span>'}</td>
       <td class="expiry-cell">${fmtExpiry(c.expiry)}</td>
     </tr>`;
   }).join('');
+  restoreFocus();
 }
 
 function renderSpecs(cfg) {
@@ -268,23 +269,15 @@ async function switchCommodity(key) {
   if (typeof restartLiveLayer === 'function') restartLiveLayer();
 }
 
-// ── Futures Strength heatmap (bottom of the Futures tab) ────────────────────
-// Mirrors the FX strength board (forex.js) but for the futures universe, and shows
-// ONLY full setups: markets where all 3 signals (Seasonals · COT-Hedging · Term
-// Structure) align in one direction — a full 3/3, using the same setup definition
-// the Screener's Weekly Outlook and the content bot use (screenerSetup, from
-// screener.js), but filtered down to count === 3 here at the call site.
-// screenerSetup itself still returns 2/3 partials — the Weekly Outlook needs those
-// (its "completing this week" section lifts a 2/3 to 3/3) — this board just doesn't
-// show them: a 2/3 is a two-to-one split among three signals, not a setup one
-// signal short, and doesn't belong on a board that reads as "these are aligned."
-// Drawn as two bias columns, reusing the FX board's .fx-* styling verbatim. Reads
-// the shared screenerData; pure on-screen view, never invoked in card-mode (so
-// content-bot PNGs are unchanged). Chip color uses fxCurrencyHeat() with max
-// pinned to 3, fed the signed setup count, so a full setup saturates the chip.
-const FUTURES_HEAT_MAX = 3;
-// FX currencies have their own heatmap on the Forex tab — exclude them here so
-// the two boards don't overlap.
+// ── 3/3 strip (top of the Futures tab) ──────────────────────────────────────
+// The futures markets where all 3 signals (Seasonals · COT Hedging · Term Structure) align in one
+// direction — a full 3/3, the setup definition the Screener, the Weekly Outlook and the content
+// bot share (screenerSetup, from screener.js), filtered to count === 3 here. A 2/3 is a two-to-one
+// split among three signals, not a setup one signal short, and is not listed.
+// One line above the chart. Until 2026-09-12 this was a two-column board under the contract
+// specs, the last thing on the page anyone reached. Reads the shared screenerData; on-screen only,
+// never rendered in card-mode (so content-bot PNGs are unchanged). FX currencies have their own
+// board on the Forex tab and are left out here, so the two do not overlap.
 const FUTURES_HEAT_EXCLUDE_CATEGORY = 'Currencies';
 
 function futuresHeatTitle(r, setup) {
@@ -292,23 +285,10 @@ function futuresHeatTitle(r, setup) {
   return `${r.display_name}: ${setup.count}/3 ${setup.dir} — ${sig}`;
 }
 
-function futuresHeatChip(item) {
+function futuresSetupChip(item) {
   const { row: r, setup } = item;
-  const signed = setup.dir === 'bullish' ? setup.count : -setup.count;   // +2/+3 or -2/-3
-  return `<button type="button" class="fx-chip" style="${fxCurrencyHeat(signed, FUTURES_HEAT_MAX)}" onclick="openScreenerMarket('${r.key}')" title="${esc(futuresHeatTitle(r, setup))}">${esc(r.display_name)} <b>${setup.count}/3</b></button>`;
-}
-
-function futuresHeatColumn(kind, title, items) {
-  const tone = kind === 'long' ? 'bull' : 'bear';
-  return `<div class="fx-bias-col ${tone}">
-    <div class="fx-bias-head">
-      <div class="fx-bias-title ${kind}">${title}</div>
-      <div class="fx-bias-count">${items.length || 0}</div>
-    </div>
-    <div class="fx-bias-list">
-      ${items.length ? items.map(futuresHeatChip).join('') : '<span class="fx-bias-empty">No 3/3 setup today</span>'}
-    </div>
-  </div>`;
+  const bull = setup.dir === 'bullish';
+  return `<button type="button" class="setup-chip ${bull ? 'bull' : 'bear'}" onclick="openScreenerMarket('${r.key}')" title="${esc(futuresHeatTitle(r, setup))}">${bull ? '▲' : '▼'} ${esc(r.display_name)}</button>`;
 }
 
 function renderFuturesHeat() {
@@ -316,25 +296,16 @@ function renderFuturesHeat() {
   if (!el) return;
   if (!Array.isArray(screenerData) || !screenerData.length) { el.hidden = true; el.innerHTML = ''; return; }
 
-  // Only full 3/3 aligned setups; 2/3 partials and everything weaker are dropped.
   const setups = screenerData
     .filter(r => r && r.category !== FUTURES_HEAT_EXCLUDE_CATEGORY)
     .map(r => ({ row: r, setup: screenerSetup(r) }))
     .filter(item => item.setup && item.setup.count === 3);
-
-  const byStrength = (a, b) => b.setup.count - a.setup.count || a.row.display_name.localeCompare(b.row.display_name);
-  const bullish = setups.filter(s => s.setup.dir === 'bullish').sort(byStrength);
-  const bearish = setups.filter(s => s.setup.dir === 'bearish').sort(byStrength);
+  const byName = (a, b) => a.row.display_name.localeCompare(b.row.display_name);
+  const bullish = setups.filter(s => s.setup.dir === 'bullish').sort(byName);
+  const bearish = setups.filter(s => s.setup.dir === 'bearish').sort(byName);
 
   el.hidden = false;
-  el.innerHTML = `
-    <div class="fx-head">
-      <div class="fx-title">Futures Strength</div>
-      <div class="fx-note">Only full 3/3 setups · Seasonals + COT-Hedging + Term Structure aligned · click a market to load its chart</div>
-    </div>
-    <div class="fx-bias-board">
-      ${futuresHeatColumn('long', 'Bullish / Long Bias', bullish)}
-      ${futuresHeatColumn('short', 'Bearish / Short Bias', bearish)}
-    </div>`;
+  el.innerHTML = '<span class="setup-strip-label">Futures at 3/3</span>'
+    + ([...bullish, ...bearish].map(futuresSetupChip).join('') || '<span class="setup-strip-empty">None today</span>')
+    + '<span class="setup-strip-note">All three signals agree · currencies on the Forex tab</span>';
 }
-

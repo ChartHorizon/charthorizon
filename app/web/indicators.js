@@ -262,3 +262,181 @@ function computeIndicator(ind, bars) {
   }
   return null;
 }
+
+// ══ Open-Interest seasonal tendency (OI-pane overlay, opt-in per tab) ══
+//
+// Not a bar indicator — it reads the market's CFTC weekly Open Interest, the very series the OI
+// pane draws, and answers "where does OI usually stand at this point of the year". ONE line, the
+// 5-year average (operator decision 2026-09-18) — not the Seasonals tab's 5/10/15/Max fan.
+//
+// A SEASONAL FACTOR, not an indexed path: every report is divided by the market's own level
+// AROUND that report — a centered one-year mean — which leaves a ratio near 1.0 carrying only the
+// within-year shape, and those ratios are averaged per day of the year. Two things fall out of
+// that choice, and both were bugs in the first cut (2026-09-18):
+//
+//   · The line is continuous across Dec 31. Indexed to each January instead, every year needs its
+//     own anchor, and the line has to BREAK at each turn of the year or the re-anchoring draws a
+//     step that is not a move in OI. Gold, silver and cotton were reported for exactly that hole.
+//   · Nothing about a calendar year leaks into the shape. Dividing by the YEAR's mean — the
+//     obvious repair, and the one tried first — moves the artefact rather than removing it: late
+//     December is then measured against one year's mean and early January against the next, so
+//     the average year-over-year growth in OI lands as a step at New Year. Measured on the
+//     2026-09-18 data that step reached 75% of the curve's whole yearly swing (feeder cattle,
+//     2Y notes, cocoa). A centered window knows nothing about Januaries, so there is no step.
+//
+// The factor is put back on the pane's scale with ONE number for the whole line (`oiSeasonalLevel`
+// below), so there is nothing per-year left to anchor, and the line means the same thing at every
+// range — a 6M window and a 12M window draw the same curve.
+//
+// Scaled rather than averaged in contracts because a market's OI level drifts across the years
+// (gold reported 492k in 2021 and 411k now), so a raw multi-year mean sits at a level no single
+// year traded. The factor keeps the SHAPE, which is what a seasonal tendency is.
+//
+// The partial current year is excluded — it is the line the overlay is drawn against, and
+// averaging it into its own benchmark flattens exactly the deviation the indicator is for.
+//
+// Depth is whatever the archive holds: fetch_cftc.py keeps the last 260 weekly reports, so there
+// are ~5 years on file and at most 4 of them complete. The curve reports `yearsUsed` and every
+// label names it, rather than printing "5Y" over four years.
+
+const OI_SEASONAL_MAX_GAP_DAYS = 21;    // two missed weekly reports; mirrors SEASONAL_MAX_GAP_DAYS
+const OI_SEASONAL_MIN_REPORTS = 40;     // of ~52 a year — a year missing three months is not a season
+const OI_SEASONAL_YEARS = 5;            // the one drawn window (yearsUsed says what was really there)
+const OI_SEASONAL_LEVEL_REPORTS = 52;   // the trailing year the curve is scaled onto
+const OI_SEASONAL_TREND_HALF_DAYS = 182;  // half of the centered window the seasonal ratio is taken against
+
+// Normalise, sort and drop what cannot carry a ratio. Shared by the builder and the level.
+function _oiSeasonalRows(oiRows) {
+  return (oiRows || [])
+    .filter(r => r && r.date && Number.isFinite(Number(r.oi)) && Number(r.oi) > 0)
+    .map(r => ({ date: String(r.date).slice(0, 10), oi: Number(r.oi) }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+// The market's own level around each report: the mean over a centered window of one year, so a
+// full season sits on either side of the middle and the seasonality cancels out of the level
+// itself. Returns null for a report whose window is not covered on BOTH sides — a one-sided mean
+// is not a level, it is half a season, and at the ends of the archive that is all there is.
+function _oiSeasonalTrend(rows) {
+  const t = rows.map(r => Date.parse(r.date));
+  const half = OI_SEASONAL_TREND_HALF_DAYS * 86400000;
+  const slack = 7 * 86400000;              // the reports are weekly; do not demand one to the day
+  const first = t[0], last = t[t.length - 1];
+  return rows.map((r, i) => {
+    if (t[i] - half < first - slack || t[i] + half > last + slack) return null;
+    let sum = 0, n = 0;
+    for (let j = 0; j < rows.length; j++) {
+      if (Math.abs(t[j] - t[i]) <= half) { sum += rows[j].oi; n++; }
+    }
+    return n >= OI_SEASONAL_MIN_REPORTS ? sum / n : null;
+  });
+}
+
+// -> { yearsRequested, yearsUsed, startYear, endYear, points[365] } | null
+// `points` are seasonal FACTORS around 1.0 on the shared 365-day grid from core.js — 1.08 means
+// "OI on this day of the year usually runs 8% above that year's own average".
+function buildOiSeasonalCurve(oiRows, yearsRequested) {
+  const rows = _oiSeasonalRows(oiRows);
+  if (!rows.length) return null;
+
+  // A year counts as complete once it is reported into mid-December — the same cutoff the price
+  // curves use, so a January run does not throw away the year that just ended.
+  const last = rows[rows.length - 1].date;
+  const lastMonthDay = Number(last.slice(5, 7)) * 100 + Number(last.slice(8, 10));
+  const latestFullYear = seasonalYear(last) - (lastMonthDay >= 1215 ? 0 : 1);
+  const wantedStart = latestFullYear - yearsRequested + 1;
+
+  const trend = _oiSeasonalTrend(rows);
+  const byYear = new Map();
+  rows.forEach((r, i) => {
+    const y = seasonalYear(r.date);
+    if (y < wantedStart || y > latestFullYear) return;
+    const lvl = trend[i];
+    if (!Number.isFinite(lvl) || lvl <= 0) return;          // no covered window -> no ratio
+    if (!byYear.has(y)) byYear.set(y, []);
+    byYear.get(y).push({ date: r.date, factor: r.oi / lvl });
+  });
+
+  const paths = [];
+  const usedYears = [];
+  Array.from(byYear.keys()).sort((a, b) => a - b).forEach(year => {
+    const yr = byYear.get(year);
+    if (yr.length < OI_SEASONAL_MIN_REPORTS) return;
+    if (Number(yr[0].date.slice(5, 7)) > 2) return;          // a year first reported in June is not a year
+    for (let i = 1; i < yr.length; i++) {
+      if ((Date.parse(yr[i].date) - Date.parse(yr[i - 1].date)) / 86400000 > OI_SEASONAL_MAX_GAP_DAYS) return;
+    }
+    // The year's own reports as (day of year -> factor), then held forward across the weeks
+    // between them and back over the days before the first report.
+    const reported = [];
+    yr.forEach(r => {
+      const idx = dayOfYearNoLeap(r.date);                   // Feb 29: no slot, that week is skipped
+      if (idx === null || idx < 0 || idx > 364) return;
+      reported.push({ idx, factor: r.factor });
+    });
+    if (!reported.length) return;
+    const values = new Array(365).fill(null);
+    let cursor = 0, held = reported[0].factor;               // back-fill: January before the first report
+    reported.forEach(({ idx, factor }) => {
+      while (cursor <= idx && cursor < 365) values[cursor++] = held;
+      held = factor;
+      values[idx] = held;
+      cursor = Math.max(cursor, idx + 1);
+    });
+    while (cursor < 365) values[cursor++] = held;            // hold the last report to year end
+    paths.push(values);
+    usedYears.push(year);
+  });
+  if (!paths.length) return null;
+
+  const points = new Array(365).fill(null).map((_, i) => {
+    const vals = paths.map(path => path[i]).filter(v => Number.isFinite(v));
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  });
+  return {
+    yearsRequested,
+    yearsUsed: paths.length,
+    startYear: usedYears[0],
+    endYear: usedYears[usedYears.length - 1],
+    points
+  };
+}
+
+// The ONE number that puts the factor back on the pane's contract scale: the level at which the
+// average season is drawn. Taken from the trailing year of actual reports, matched day for day
+// against the curve, so a partial year at the edge cannot tilt it — over a full year the factors
+// average out and this is simply "the market's current annual OI level".
+//
+// One number for the whole line, and it comes from the WHOLE series: that is what makes the curve
+// continuous and range-independent. Re-levelling per visible year is what forced the January
+// break, and re-levelling per window would make the same line mean "since March" at 6M and
+// "since January" at 12M.
+function oiSeasonalLevel(oiRows, curve) {
+  if (!curve) return null;
+  const rows = _oiSeasonalRows(oiRows).slice(-OI_SEASONAL_LEVEL_REPORTS);
+  let sumActual = 0, sumFactor = 0, n = 0;
+  rows.forEach(r => {
+    const idx = dayOfYearNoLeap(r.date);
+    if (idx === null) return;
+    const f = curve.points[idx];
+    if (!Number.isFinite(f) || f <= 0) return;
+    sumActual += r.oi; sumFactor += f; n++;
+  });
+  if (!n || !(sumFactor > 0)) return null;
+  return (sumActual / n) / (sumFactor / n);
+}
+
+// The drawn line: one value per drawn OI point, or null where the curve has nothing to say (a
+// leap-day report, a slot no year reached). Aligned 1:1 to `points`; the caller breaks the path
+// at a null — there is no other break left.
+function oiSeasonalOverlay(points, curve, level) {
+  if (!curve || !Number.isFinite(level) || level <= 0 || !Array.isArray(points)) return [];
+  return points.map(p => {
+    if (!p || !p.date) return null;
+    const idx = dayOfYearNoLeap(p.date);
+    if (idx === null) return null;
+    const f = curve.points[idx];
+    if (!Number.isFinite(f) || f <= 0) return null;
+    return { date: p.date, value: f * level };
+  });
+}

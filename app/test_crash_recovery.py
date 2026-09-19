@@ -30,6 +30,7 @@ import os
 import socketserver
 import tempfile
 import unittest
+from http import HTTPStatus
 from unittest import mock
 
 import commodity_dashboard as cd
@@ -381,6 +382,62 @@ class ClientDisconnectTests(unittest.TestCase):
             except ValueError:
                 srv.handle_error(None, ("127.0.0.1", 2))
             self.assertEqual(reported, [("127.0.0.1", 2)])
+
+
+class _PathOnlyHandler(start.DashboardHandler):
+    """No socket and no request parsing: only the path is set, so what log_request decides
+    to report is all the tests below observe."""
+
+    def __init__(self, path):
+        self.path = path
+
+
+class FrontendFailureLogTests(unittest.TestCase):
+    """A file of the page that could not be served must leave a line in the console.
+
+    2026-09-13, the first launch of a fresh Windows 1.2.8 install: the page opened on a
+    blank board because boot.js never ran, and a reload fixed it. Every request line was
+    silenced, so nothing said which file had failed or why — and it did not reproduce.
+    """
+
+    def _report(self, path, status, cause=None):
+        h = _PathOnlyHandler(path)
+        with mock.patch.object(start, "warn") as warn:
+            if cause is None:
+                h.log_request(status)
+            else:
+                try:
+                    raise cause
+                except OSError:      # send_head() answers an OSError from open() with a 404
+                    h.log_request(status)
+        return [call.args[0] for call in warn.call_args_list]
+
+    def test_a_script_that_could_not_be_served_is_reported_with_its_cause(self):
+        lines = self._report("/web/core.js?v=31", HTTPStatus.NOT_FOUND,
+                             PermissionError(13, "Permission denied"))
+        self.assertEqual(len(lines), 1)
+        for part in ("/web/core.js", "404", "PermissionError"):
+            self.assertIn(part, lines[0])
+
+    def test_the_page_itself_is_reported(self):
+        for path in ("/", "/index.html", "/loading.html"):
+            self.assertEqual(len(self._report(path, 404)), 1, path)
+
+    def test_a_file_that_was_served_stays_silent(self):
+        for status in (200, 304):
+            self.assertEqual(self._report("/web/core.js?v=31", status), [])
+
+    def test_data_and_api_misses_stay_silent(self):
+        # loading.html polls ff_data/config.js with a 404 until a first run has written it.
+        for path in ("/ff_data/config.js", "/api/contract-history?symbol=GCZ26.CMX",
+                     "/favicon.ico"):
+            self.assertEqual(self._report(path, 404), [], path)
+
+    def test_a_request_that_never_parsed_does_not_raise(self):
+        h = start.DashboardHandler.__new__(start.DashboardHandler)   # no self.path at all
+        with mock.patch.object(start, "warn") as warn:
+            h.log_request(400)
+        self.assertEqual(warn.call_args_list, [])
 
 
 if __name__ == "__main__":

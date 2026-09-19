@@ -91,6 +91,24 @@ function saveDrawingsForKey(key, arr) {
   all[key] = arr;
   try { localStorage.setItem(DRAW_STORE_KEY, JSON.stringify(all)); } catch (e) {}
 }
+
+// ── "extend right": run a shape on to the right edge instead of stopping at its second anchor ──
+// Only rect and trend. A horizontal line, a horizontal ray and the fib levels already reach the
+// edge by definition, and on a vertical line, a mark, a freehand path or a Fib-time grid the idea
+// means nothing -- so these two are exactly what the setting and the right-click switch offer.
+const DRAW_EXTEND_RIGHT_TYPES = ['rect', 'trend'];
+const DRAW_EXTEND_DEFAULT_KEY = 'charthorizon.drawExtendRight.v1';
+function drawingCanExtendRight(d) { return !!d && DRAW_EXTEND_RIGHT_TYPES.indexOf(d.type) >= 0; }
+function drawingExtendsRight(d) { return drawingCanExtendRight(d) && !!(d.style && d.style.extendRight); }
+// Settings checkbox: the default for NEWLY drawn rects/trends only. Existing drawings keep
+// whatever they were given -- flipping this must never silently rewrite work already on a chart.
+function getDrawExtendRightDefault() {
+  try { return localStorage.getItem(DRAW_EXTEND_DEFAULT_KEY) === '1'; } catch (e) { return false; }
+}
+function setDrawExtendRightDefault(on) {
+  try { localStorage.setItem(DRAW_EXTEND_DEFAULT_KEY, on ? '1' : '0'); } catch (e) {}
+}
+
 // Unique id within a market's list, no Date/random: max existing numeric id + 1.
 function nextDrawId(arr) {
   let max = 0;
@@ -127,10 +145,41 @@ function drawingGeometry(d, coord) {
     return { pts: d.points.map(p => ({ x: coord.xForTime(new Date(p.date).getTime()), y: coord.yForPrice(p.price) })) };
   }
   const a = d.points[0], b = d.points[1];   // trend / fib / rect / fibtime
-  return {
+  const g = {
     ax: coord.xForTime(new Date(a.date).getTime()), ay: coord.yForPrice(a.price),
     bx: coord.xForTime(new Date(b.date).getTime()), by: coord.yForPrice(b.price),
   };
+  // extRx says how far right the shape is DRAWN, never where its anchors are: handlePoints below
+  // deliberately keeps the handles on the real anchors, so grabbing one does not slam it against
+  // the chart edge. Render and hit-test read it through rectBounds / trendSegment so all three
+  // agree on the same outline.
+  if (drawingExtendsRight(d)) g.extRx = coord.plotRight;
+  return g;
+}
+// The drawn outline of a rect: its own bounds, or stretched to the right edge when extended.
+// Never negative-width -- an anchor scrolled off to the right of the edge would otherwise
+// produce an invalid SVG rect.
+function rectBounds(g) {
+  const lx = Math.min(g.ax, g.bx);
+  return {
+    lx, rx: Math.max(lx, g.extRx != null ? g.extRx : Math.max(g.ax, g.bx)),
+    ty: Math.min(g.ay, g.by), by: Math.max(g.ay, g.by),
+  };
+}
+// The drawn segment of a trend line: extended along ITS OWN slope to the right edge (a trend
+// line is not horizontal), by moving whichever anchor is the right-hand one. A vertical line and
+// an edge already left of the anchors both fall through to the plain segment.
+function trendSegment(g) {
+  const plain = { ax: g.ax, ay: g.ay, bx: g.bx, by: g.by };
+  if (g.extRx == null) return plain;
+  const bRight = g.bx >= g.ax;
+  const x0 = bRight ? g.ax : g.bx, y0 = bRight ? g.ay : g.by;
+  const x1 = bRight ? g.bx : g.ax, y1 = bRight ? g.by : g.ay;
+  if (x1 === x0 || g.extRx <= x1) return plain;
+  const yEnd = y0 + (y1 - y0) * ((g.extRx - x0) / (x1 - x0));
+  return bRight
+    ? { ax: g.ax, ay: g.ay, bx: g.extRx, by: yEnd }
+    : { ax: g.extRx, ay: yEnd, bx: g.bx, by: g.by };
 }
 function handlePoints(d, g) {
   if (d.type === 'hline') return [{ x: (g.x1 + g.x2) / 2, y: g.y, pointIndex: 0 }];
@@ -212,11 +261,13 @@ function renderOneDrawing(d, coord, selected) {
     grp.appendChild(priceTag(coord, g.y, d.points[0].price, color || null));
     _lineLabel(grp, d, coord.plotLeft + 6, g.y - 5, color);
   } else if (d.type === 'trend') {
-    grp.appendChild(svgEl('line', { class: 'chart-draw-line', x1: g.ax, y1: g.ay, x2: g.bx, y2: g.by, style }));
+    const seg = trendSegment(g);
+    grp.appendChild(svgEl('line', { class: 'chart-draw-line', x1: seg.ax, y1: seg.ay, x2: seg.bx, y2: seg.by, style }));
+    // Label stays on the segment the user actually drew, not on the midpoint of the extension.
     _lineLabel(grp, d, (g.ax + g.bx) / 2, (g.ay + g.by) / 2 - 5, color);
   } else if (d.type === 'rect') {
-    const lx = Math.min(g.ax, g.bx), rx = Math.max(g.ax, g.bx);
-    const ty = Math.min(g.ay, g.by), bottom = Math.max(g.ay, g.by);
+    const rb = rectBounds(g);
+    const lx = rb.lx, rx = rb.rx, ty = rb.ty, bottom = rb.by;
     grp.appendChild(svgEl('rect', { class: 'chart-draw-rect', x: lx, y: ty, width: rx - lx, height: bottom - ty, style: _drawStyleCss(d, true) }));
     // Optional internal guides (toggled from the right-click menu): the 50% midline and the
     // 25%/75% quarter levels, drawn across the box width and following the rect's colour.
@@ -350,28 +401,59 @@ function renderChartDrawings(svg, coord) {
 
 // ── entry point #2: interaction. Full implementation. ──
 
+// A filled shape hit in two ways: ON its outline (a stroke hit, area 0) or somewhere INSIDE it
+// (a body hit, carrying the area it covers). pickDrawingAt ranks the two differently. Null when
+// the point is outside altogether. A box thinner than 2*TOL is all outline, which is right.
+function boxHitArea(px, py, lx, ty, rx, by, TOL) {
+  if (px < lx - TOL || px > rx + TOL || py < ty - TOL || py > by + TOL) return null;
+  const inside = px > lx + TOL && px < rx - TOL && py > ty + TOL && py < by - TOL;
+  return inside ? Math.max(0, rx - lx) * Math.max(0, by - ty) : 0;
+}
+
 // Hit-test a drawing in pixel space. Handles (point index) only when the drawing is selected.
+// `area` is how pickDrawingAt breaks a tie between overlapping drawings: 0 means the point is ON
+// the drawing (a line, an outline, a handle), otherwise it is the pixel area of the body it fell
+// inside. A thin shape is therefore always "on" and never loses to a box drawn over it.
 function hitTestDrawing(d, coord, px, py, isSelected) {
   const TOL = 6;
   const g = drawingGeometry(d, coord);
   if (isSelected) {
     const hs = handlePoints(d, g);
     // Return the handle's array index; reshape looks the descriptor back up via handlePoints().
-    for (let i = 0; i < hs.length; i++) if (Math.hypot(px - hs[i].x, py - hs[i].y) <= TOL + 2) return { hit: true, handle: i };
+    for (let i = 0; i < hs.length; i++) if (Math.hypot(px - hs[i].x, py - hs[i].y) <= TOL + 2) return { hit: true, handle: i, area: 0 };
   }
-  let hit = false;
+  let hit = false, area = 0;
   if (d.type === 'hline') hit = Math.abs(py - g.y) <= TOL && px >= g.x1 - TOL && px <= g.x2 + TOL;
   else if (d.type === 'hray') hit = Math.abs(py - g.y) <= TOL && px >= g.x1 - TOL && px <= g.x2 + TOL;
   else if (d.type === 'vline') hit = Math.abs(px - g.x) <= TOL && py >= g.top - TOL && py <= g.bottom + TOL;
-  else if (d.type === 'trend') hit = distToSegment(px, py, g.ax, g.ay, g.bx, g.by) <= TOL;
-  else if (d.type === 'rect') hit = px >= Math.min(g.ax, g.bx) - TOL && px <= Math.max(g.ax, g.bx) + TOL && py >= Math.min(g.ay, g.by) - TOL && py <= Math.max(g.ay, g.by) + TOL;
+  else if (d.type === 'trend') { const s = trendSegment(g); hit = distToSegment(px, py, s.ax, s.ay, s.bx, s.by) <= TOL; }
+  else if (d.type === 'rect') { const r = rectBounds(g), a = boxHitArea(px, py, r.lx, r.ty, r.rx, r.by, TOL); if (a !== null) { hit = true; area = a; } }
   else if (d.type === 'fib') { const lx = Math.max(coord.plotLeft, Math.min(g.ax, g.bx)); hit = px >= lx - TOL && px <= coord.plotRight + TOL && fibLevelYs(d, coord).some(y => Math.abs(py - y) <= TOL); }
-  else if (d.type === 'text') { const w = (d.text || '').length * 7 + 8; hit = px >= g.ax - TOL && px <= g.ax + w && py >= g.ay - 14 && py <= g.ay + 6; }
-  else if (d.type === 'symbol' || d.type === 'arrowup' || d.type === 'arrowdown') hit = px >= g.ax - 12 && px <= g.ax + 12 && py >= g.ay - 18 && py <= g.ay + 18;
+  else if (d.type === 'text') { const w = (d.text || '').length * 7 + 8; hit = px >= g.ax - TOL && px <= g.ax + w && py >= g.ay - 14 && py <= g.ay + 6; area = (w + TOL) * 20; }
+  else if (d.type === 'symbol' || d.type === 'arrowup' || d.type === 'arrowdown') { hit = px >= g.ax - 12 && px <= g.ax + 12 && py >= g.ay - 18 && py <= g.ay + 18; area = 24 * 36; }
   else if (d.type === 'fibtime') { const t0 = new Date(d.points[0].date).getTime(), t1 = new Date(d.points[1].date).getTime(), unit = t1 - t0; hit = py >= coord.plotTop - TOL && py <= coord.plotBottom + TOL && fibTimeLevelObjs(d).some(o => Math.abs(px - coord.xForTime(t0 + o.n * unit)) <= TOL); }
-  else if (d.type === 'long' || d.type === 'short') { const top = Math.min(g.stopY, g.targetY), bot = Math.max(g.stopY, g.targetY); hit = px >= g.leftX - TOL && px <= g.rightX + TOL && py >= top - TOL && py <= bot + TOL; }
+  else if (d.type === 'long' || d.type === 'short') { const top = Math.min(g.stopY, g.targetY), bot = Math.max(g.stopY, g.targetY), a = boxHitArea(px, py, g.leftX, top, g.rightX, bot, TOL); if (a !== null) { hit = true; area = Math.abs(py - g.entryY) <= TOL ? 0 : a; } }
   else if (d.type === 'pencil' || d.type === 'marker') { const pts = g.pts, t = TOL + (d.type === 'marker' ? 7 : 1); for (let i = 1; i < pts.length; i++) if (distToSegment(px, py, pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y) <= t) { hit = true; break; } }
-  return { hit, handle: -1 };
+  return { hit, handle: -1, area };
+}
+
+// Pick the drawing under a point. NOT simply the topmost hit: a click ON something (a handle, a
+// line, an outline) beats a click INSIDE a filled body, and between two bodies the smaller one
+// wins. Topmost-wins left a small rect drawn under a large one unselectable for good -- the large
+// body answered every click inside it, so the small one could never be picked up, reshaped or
+// deleted again (reported 2026-09-05). This rule costs the loser of an overlap only the pixels the
+// smaller shape already covers; it stays reachable everywhere else on its own body, so nothing is
+// ever stranded. Ties go to the topmost, hence the strict `<` on a top-down walk.
+function pickDrawingAt(items, coord, px, py) {
+  let best = null;
+  for (let i = (items || []).length - 1; i >= 0; i--) {
+    const d = items[i];
+    const ht = hitTestDrawing(d, coord, px, py, d.id === drawState.selectedId);
+    if (!ht.hit) continue;
+    if (ht.handle >= 0) return { drawing: d, handle: ht.handle, area: 0 };   // a grabbed handle always wins
+    if (!best || ht.area < best.area) best = { drawing: d, handle: -1, area: ht.area };
+  }
+  return best;
 }
 
 // Interaction: ONE mousedown on the crosshair hit-zone, branching on the live drawState.tool.
@@ -479,9 +561,11 @@ function bindChartDrawingInteractions(wrap, coord, rerender) {
       return;
     }
     if (type === 'text') {
-      const txt = window.prompt('Text:');
-      if (txt && txt.trim()) commit({ type: 'text', text: txt.trim(), points: [anchor()] });
-      else { drawState.tool = 'cursor'; renderDrawToolbar(); rerender(); }
+      const at = anchor();
+      openDrawTextField(evt.clientX, evt.clientY, (txt) => {
+        if (txt) commit({ type: 'text', text: txt, points: [at] });
+        else { drawState.tool = 'cursor'; renderDrawToolbar(); rerender(); }
+      });
       return;
     }
     // Both anchors use the (always-light) magnet: they snap to a candle O/H/L/C only when the cursor
@@ -498,7 +582,9 @@ function bindChartDrawingInteractions(wrap, coord, rerender) {
         const stop = type === 'long' ? entry - dist / 2 : entry + dist / 2;
         return { type, points: [{ date: a.date, price: entry }, { date: b.date, price: entry }], stop, target };
       }
-      return { type, points: [a, b] };
+      const dr = { type, points: [a, b] };
+      if (drawingCanExtendRight(dr) && getDrawExtendRightDefault()) dr.style = { extendRight: true };
+      return dr;
     };
     const onMove = (e2) => { const q = local(e2); if (q) previewShow(build(cx(q.x), cy(q.y))); };
     const onUp = (e2) => {
@@ -518,12 +604,9 @@ function bindChartDrawingInteractions(wrap, coord, rerender) {
   function startCursor(evt, p0) {
     const key = currentDrawKey();
     const items = drawingsForKey(key);
-    let target = null, handleIndex = -1;
-    for (let i = items.length - 1; i >= 0; i--) {
-      const ht = hitTestDrawing(items[i], coord, p0.x, p0.y, items[i].id === drawState.selectedId);
-      if (ht.hit) { target = items[i]; handleIndex = ht.handle; break; }
-    }
-    if (!target) { if (drawState.selectedId) { drawState.selectedId = null; rerender(); } return; }
+    const picked = pickDrawingAt(items, coord, p0.x, p0.y);
+    if (!picked) { if (drawState.selectedId) { drawState.selectedId = null; rerender(); } return; }
+    const target = picked.drawing, handleIndex = picked.handle;
     evt.preventDefault();
     drawState.selectedId = target.id;
     const sx = p0.x, sy = p0.y;
@@ -622,12 +705,9 @@ function bindChartDrawingInteractions(wrap, coord, rerender) {
   hit.addEventListener('contextmenu', (evt) => {
     const p = local(evt);
     if (!p) return;
-    const items = drawingsForKey(currentDrawKey());
-    let target = null;
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (hitTestDrawing(items[i], coord, p.x, p.y, false).hit) { target = items[i]; break; }
-    }
-    if (!target) return;
+    const picked = pickDrawingAt(drawingsForKey(currentDrawKey()), coord, p.x, p.y);
+    if (!picked) return;
+    const target = picked.drawing;
     evt.preventDefault();
     drawState.tool = 'cursor';
     drawState.selectedId = target.id;
@@ -931,7 +1011,7 @@ const DRAW_COLORS = [
   '#f9a8d4', '#f472b6', '#ec4899', '#db2777', '#be185d', '#9d174d',  // pink
   '#ffffff', '#e5e7eb', '#94a3b8', '#64748b', '#334155', '#111827',  // neutrals
 ];
-let _drawCtxId = null, _drawCtxX = 0, _drawCtxY = 0, _drawCtxFibEdit = null;
+let _drawCtxId = null, _drawCtxX = 0, _drawCtxY = 0, _drawCtxFibEdit = null, _drawCtxTextEdit = null;   // _drawCtxTextEdit: id whose text field is open
 
 function _drawSetStyle(id, patch) {
   const key = currentDrawKey();
@@ -943,9 +1023,11 @@ function _drawSetStyle(id, patch) {
   saveDrawingsForKey(key, arr);
   repaintChartForDrawings();   // re-render the chart with the new style (the menu lives in <body>, survives)
 }
-function openDrawContextMenu(x, y, id) { _drawCtxId = id; _drawCtxX = x; _drawCtxY = y; _drawCtxFibEdit = null; _renderDrawContextMenu(); }
-function closeDrawContextMenu() { _drawCtxId = null; _drawCtxFibEdit = null; const m = document.getElementById('drawContextMenu'); if (m) m.remove(); }
+function openDrawContextMenu(x, y, id) { _drawCtxId = id; _drawCtxX = x; _drawCtxY = y; _drawCtxFibEdit = null; _drawCtxTextEdit = null; _renderDrawContextMenu(); }
+function closeDrawContextMenu() { _drawCtxId = null; _drawCtxFibEdit = null; _drawCtxTextEdit = null; const m = document.getElementById('drawContextMenu'); if (m) m.remove(); }
 function _renderDrawContextMenu() {
+  const draft = document.getElementById('drawCtxText');   // a half-typed text survives a colour click
+  const draftValue = draft ? draft.value : null;
   const old = document.getElementById('drawContextMenu');
   if (old) old.remove();
   const id = _drawCtxId;
@@ -953,6 +1035,7 @@ function _renderDrawContextMenu() {
   const d = drawingsForKey(currentDrawKey()).find(x => x.id === id);
   if (!d) { _drawCtxId = null; return; }
   const st = d.style || {};
+  const textField = (what) => `<div class="draw-ctx-row"><input type="text" class="draw-ctx-textinput" id="drawCtxText" value="${esc(draftValue != null ? draftValue : (d.text || ''))}" placeholder="${what}" aria-label="${what}" autocomplete="off" onkeydown="drawCtxTextKey(event,'${id}')"><button class="draw-ctx-btn" type="button" onclick="drawCtxSaveText('${id}')">Save</button></div>`;
   const cur = (st.color || '').toLowerCase();
   const swatches = DRAW_COLORS.map(c =>
     `<button class="draw-ctx-swatch${cur === c.toLowerCase() ? ' active' : ''}" style="background:${c}" title="${c}" onclick="drawCtxSetColor('${id}','${c}')"></button>`).join('');
@@ -973,6 +1056,12 @@ function _renderDrawContextMenu() {
     + `<button class="draw-ctx-btn${!st.dash ? ' active' : ''}" type="button" onclick="drawCtxSetDash('${id}',false)">Solid</button>`
     + `<button class="draw-ctx-btn${st.dash ? ' active' : ''}" type="button" onclick="drawCtxSetDash('${id}',true)">Dashed</button>`
     + `</div>`
+    + (drawingCanExtendRight(d)
+      ? `<div class="draw-ctx-section">Extend</div>`
+        + `<div class="draw-ctx-row">`
+        + `<button class="draw-ctx-btn${st.extendRight ? ' active' : ''}" type="button" onclick="drawCtxSetExtendRight('${id}',${!st.extendRight})">Right edge</button>`
+        + `</div>`
+      : '')
     + (d.type === 'rect'
       ? `<div class="draw-ctx-section">Levels</div>`
         + `<div class="draw-ctx-row">`
@@ -1051,13 +1140,15 @@ function _renderDrawContextMenu() {
       : '')
     + ((d.type === 'trend' || d.type === 'hline' || d.type === 'hray' || d.type === 'vline')
       ? `<div class="draw-ctx-section">Label</div>`
-        + `<div class="draw-ctx-row"><button class="draw-ctx-btn" type="button" onclick="drawCtxEditText('${id}')">${d.text ? 'Edit label…' : 'Add label…'}</button>`
-        + (d.text ? `<button class="draw-ctx-btn" type="button" onclick="drawCtxClearLabel('${id}')">Clear</button>` : '')
-        + `</div>`
+        + (_drawCtxTextEdit === id ? textField('Label')
+          : `<div class="draw-ctx-row"><button class="draw-ctx-btn" type="button" onclick="drawCtxEditText('${id}')">${d.text ? 'Edit label…' : 'Add label…'}</button>`
+            + (d.text ? `<button class="draw-ctx-btn" type="button" onclick="drawCtxClearLabel('${id}')">Clear</button>` : '')
+            + `</div>`)
       : '')
     + (d.type === 'text'
       ? `<div class="draw-ctx-section">Text</div>`
-        + `<div class="draw-ctx-row"><button class="draw-ctx-btn" type="button" onclick="drawCtxEditText('${id}')">Edit text…</button></div>`
+        + (_drawCtxTextEdit === id ? textField('Text')
+          : `<div class="draw-ctx-row"><button class="draw-ctx-btn" type="button" onclick="drawCtxEditText('${id}')">Edit text…</button></div>`)
         + `<div class="draw-ctx-section">Size</div>`
         + `<div class="draw-ctx-row">`
         + [['S', 11], ['M', 14], ['L', 18], ['XL', 24]].map(([lbl, px]) => `<button class="draw-ctx-btn${(st.fontSize || 14) === px ? ' active' : ''}" type="button" onclick="drawCtxSetTextSize('${id}',${px})">${lbl}</button>`).join('')
@@ -1074,6 +1165,7 @@ function _renderDrawContextMenu() {
 function drawCtxSetColor(id, c) { _drawSetStyle(id, { color: c }); _renderDrawContextMenu(); }
 function drawCtxSetWidth(id, w) { const d = drawingsForKey(currentDrawKey()).find(x => x.id === id); _drawSetStyle(id, { width: (d && d.style && d.style.width === w) ? null : w }); _renderDrawContextMenu(); }
 function drawCtxSetDash(id, on) { _drawSetStyle(id, { dash: !!on }); _renderDrawContextMenu(); }
+function drawCtxSetExtendRight(id, on) { _drawSetStyle(id, { extendRight: !!on }); _renderDrawContextMenu(); }
 function drawCtxSetMid(id, on) { _drawSetStyle(id, { mid: !!on }); _renderDrawContextMenu(); }
 function drawCtxSetQuarters(id, on) { _drawSetStyle(id, { quarters: !!on }); _renderDrawContextMenu(); }
 function drawCtxFibEditToggle(id, r) { _drawCtxFibEdit = (_drawCtxFibEdit === r ? null : r); _renderDrawContextMenu(); }
@@ -1177,17 +1269,34 @@ function drawCtxClearLabel(id) {
   _renderDrawContextMenu();
 }
 function drawCtxSetTextSize(id, px) { _drawSetStyle(id, { fontSize: px }); _renderDrawContextMenu(); }
+// Text and labels are edited in a field inside this menu (window.prompt looked like another program and
+// froze the tab, live candle included). Enter saves, Esc steps back to the button.
 function drawCtxEditText(id) {
-  const key = currentDrawKey();
-  const cur = drawingsForKey(key).find(x => x.id === id);
-  if (!cur) return;
-  const v = window.prompt('Text:', cur.text || '');
-  if (v != null) {
-    const arr = drawingsForKey(key);
-    const d = arr.find(x => x.id === id);
-    if (d) { d.text = v.trim(); saveDrawingsForKey(key, arr); repaintChartForDrawings(); }
-  }
+  _drawCtxTextEdit = id;
   _renderDrawContextMenu();
+  const f = document.getElementById('drawCtxText');
+  if (f) { f.focus(); f.select(); }
+}
+function drawCtxSaveText(id) {
+  const f = document.getElementById('drawCtxText');
+  const key = currentDrawKey();
+  const arr = drawingsForKey(key);
+  const d = arr.find(x => x.id === id);
+  if (f && d) {
+    const v = f.value.trim();
+    // An empty label removes the label; an empty text mark would be an invisible one, so it keeps its text.
+    if (v || d.type !== 'text') {
+      if (v) d.text = v; else delete d.text;
+      saveDrawingsForKey(key, arr);
+      repaintChartForDrawings();
+    }
+  }
+  _drawCtxTextEdit = null;
+  _renderDrawContextMenu();
+}
+function drawCtxTextKey(e, id) {
+  if (e.key === 'Enter') { e.preventDefault(); drawCtxSaveText(id); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); _drawCtxTextEdit = null; _renderDrawContextMenu(); }
 }
 function drawCtxDelete(id) { closeDrawContextMenu(); deleteDrawingById(id); }
 
@@ -1253,8 +1362,48 @@ function exportChartScreenshot() {
   img.src = url;
 }
 
+// ── Text tool: the text is typed into a field placed where the chart was clicked ──
+// (window.prompt looked like another program and froze the tab, the live candle included.) Enter, Tab
+// or a click elsewhere places the text; Esc drops it. The field lives in <body>, so the chart can
+// repaint underneath it (the live layer does, every few seconds) without losing what was typed.
+let _drawTextField = null;   // { el, onDone }
+function openDrawTextField(clientX, clientY, onDone) {
+  finishDrawTextField(false);
+  const el = document.createElement('input');
+  el.type = 'text';
+  el.id = 'drawTextField';
+  el.className = 'draw-text-field';
+  el.placeholder = 'Type, then Enter';
+  el.autocomplete = 'off';
+  el.spellcheck = false;
+  el.setAttribute('aria-label', 'Text on the chart');
+  // First letter on the click, baseline at the click's height: where the text will be drawn.
+  el.style.left = Math.max(8, Math.min(clientX - 8, window.innerWidth - 240)) + 'px';
+  el.style.top = Math.max(8, clientY - 17) + 'px';
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); finishDrawTextField(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finishDrawTextField(false); }
+  });
+  _drawTextField = { el, onDone };
+  document.body.appendChild(el);
+  setTimeout(() => el.focus(), 0);   // after the mousedown that opened it has finished
+}
+function finishDrawTextField(keep) {
+  const f = _drawTextField;
+  if (!f) return;
+  _drawTextField = null;
+  const txt = keep ? f.el.value.trim() : '';
+  f.el.remove();
+  f.onDone(txt);
+}
+
 // Dismiss the edit menu on any click outside it (capture, so it runs before the chart handlers).
 document.addEventListener('mousedown', (e) => {
+  if (_drawTextField && e.target !== _drawTextField.el) {
+    const onChart = !!(e.target.closest && e.target.closest('.chart-svg-wrap'));
+    finishDrawTextField(true);
+    if (onChart) { e.preventDefault(); e.stopPropagation(); return; }   // that click only places the text
+  }
   const m = document.getElementById('drawContextMenu');
   if (m && !m.contains(e.target)) closeDrawContextMenu();
   const f = document.getElementById('drawSymbolFlyout'), b = document.getElementById('drawSymbolBtn');

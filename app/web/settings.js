@@ -131,6 +131,7 @@ function openSettings() {
   if (typeof renderSettingsAppearance === 'function') renderSettingsAppearance();
   if (typeof renderSettingsLayouts === 'function') renderSettingsLayouts();
   if (typeof renderSettingsTimezone === 'function') renderSettingsTimezone();
+  if (typeof renderSettingsDrawings === 'function') renderSettingsDrawings();
   if (typeof renderSettingsBackup === 'function') renderSettingsBackup();
   if (typeof renderSettingsAbout === 'function') {
     renderSettingsAbout();                                    // draw immediately (version may still be pending)
@@ -169,7 +170,7 @@ function renderSettingsLayouts() {
 
   host.innerHTML =
     `<div class="set-card-h"><div class="set-card-title">Chart Layouts</div><div class="set-card-sub">Colors &amp; style per theme · "Standard" is always available</div></div>` +
-    `<div class="set-themetabs">${themeTabs}</div>` +
+    `<div class="set-themetabs"><span class="set-themetabs-label">Edit the layout for</span>${themeTabs}</div>` +
     `<div class="set-presetbar">` +
       `<select class="set-presetsel" onchange="selectPreset(this.value)">${presetOpts}</select>` +
       `<button type="button" class="set-btn" onclick="newPreset()">New</button>` +
@@ -234,26 +235,27 @@ function newPreset() {
   renderSettingsLayouts();
 }
 
-function renamePreset() {
+async function renamePreset() {
   const theme = settingsEditTheme || currentTheme();
   const store = loadPresetStore();
   const t = store[theme];
   const preset = t.presets.find(p => p.id === t.activeId);
   if (!preset || preset.builtin) return;
-  const name = (prompt('Layout name:', preset.name) || '').trim();
+  const name = await appAsk({ title: 'Rename layout', value: preset.name, confirmLabel: 'Rename' });
   if (!name) return;
   preset.name = name;
   savePresetStore(store);
   renderSettingsLayouts();
 }
 
-function deletePreset() {
+async function deletePreset() {
   const theme = settingsEditTheme || currentTheme();
   const store = loadPresetStore();
   const t = store[theme];
   const preset = t.presets.find(p => p.id === t.activeId);
   if (!preset || preset.builtin) return;
-  if (!confirm('Delete layout "' + preset.name + '"?')) return;
+  const ok = await appAsk({ title: `Delete "${preset.name}"?`, message: `Charts in ${theme} mode go back to the Standard layout.`, confirmLabel: 'Delete', danger: true });
+  if (!ok) return;
   t.presets = t.presets.filter(p => p.id !== preset.id);
   t.activeId = 'standard';
   savePresetStore(store);
@@ -324,6 +326,28 @@ function refreshSettingsThemeUI() {
   if (document.getElementById('settingsAppearance')) renderSettingsAppearance();
 }
 
+// ── Drawings: defaults for the Charts-tab drawing tools ──
+// Only the DEFAULT for newly drawn objects. Every existing rectangle and trend line keeps its
+// own switch (right-click on it -> Extend -> Right edge), so ticking this never rewrites work
+// that is already on a chart.
+function renderSettingsDrawings() {
+  const host = document.getElementById('settingsDrawings');
+  if (!host) return;
+  const on = (typeof getDrawExtendRightDefault === 'function') ? getDrawExtendRightDefault() : false;
+  host.innerHTML =
+    `<div class="set-card-h"><div class="set-card-title">Drawings</div><div class="set-card-sub">Charts tab &middot; defaults for new objects</div></div>` +
+    `<label class="set-checkrow">` +
+      `<input type="checkbox"${on ? ' checked' : ''} onchange="setSettingsDrawExtendRight(this.checked)">` +
+      `<span>Extend new rectangles and trend lines to the right edge</span>` +
+    `</label>` +
+    `<div class="set-hint">Applies to objects drawn from now on. Any single object can be switched with a right-click on it.</div>`;
+}
+
+function setSettingsDrawExtendRight(on) {
+  if (typeof setDrawExtendRightDefault === 'function') setDrawExtendRightDefault(!!on);
+  renderSettingsDrawings();
+}
+
 // ── Backup: export / import all settings as a JSON file ──
 function renderSettingsBackup() {
   const host = document.getElementById('settingsBackup');
@@ -342,6 +366,7 @@ function exportSettings() {
     version: 1,
     themeMode: (typeof getThemeMode === 'function') ? getThemeMode() : 'system',
     timezone: (typeof getTimezone === 'function') ? getTimezone() : 'auto',
+    drawExtendRight: (typeof getDrawExtendRightDefault === 'function') ? getDrawExtendRightDefault() : false,
     presets: loadPresetStore(),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -364,16 +389,20 @@ function importSettings() {
     const file = input.files && input.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onerror = () => alert('Invalid settings file.');
-    reader.onload = () => {
+    const notSettings = 'That file is not a ChartHorizon settings backup. Choose a file saved with Export.';
+    reader.onerror = () => appNotice('ChartHorizon could not read that file.');
+    reader.onload = async () => {
       let data;
-      try { data = JSON.parse(reader.result); } catch (e) { alert('Invalid settings file.'); return; }
+      try { data = JSON.parse(reader.result); } catch (e) { appNotice(notSettings); return; }
       if (!data || data._type !== 'charthorizon-settings' || !data.presets || !data.presets.light || !data.presets.dark) {
-        alert('Invalid settings file.');
+        appNotice(notSettings);
         return;
       }
-      if (!confirm('Import settings? This replaces your current presets, theme and timezone.')) return;
+      const ok = await appAsk({ title: 'Import settings?', message: 'This replaces your chart layouts, theme and timezone in this browser.', confirmLabel: 'Import' });
+      if (!ok) return;
       savePresetStore(data.presets);
+      // Optional field: files written before this setting existed simply leave it off.
+      if (typeof setDrawExtendRightDefault === 'function') setDrawExtendRightDefault(!!data.drawExtendRight);
       if (typeof setTimezone === 'function') setTimezone(data.timezone || 'auto');
       if (typeof initHeaderClock === 'function') initHeaderClock();
       settingsEditTheme = null;   // re-default the layout editor to the (possibly new) active theme

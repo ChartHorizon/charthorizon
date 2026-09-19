@@ -74,7 +74,7 @@ if (_cardKey === 'fx') {
   } catch (e) {}
   bootWarmup();
   switchCommodity(currentKey);
-  // Futures Strength heatmap at the bottom of the Futures tab — normal dashboard
+  // The 3/3 strip at the top of the Futures tab — normal dashboard
   // only (the card-mode branches above never reach here, so bot PNGs are unchanged).
   if (typeof ensureScreenerData === 'function') {
     ensureScreenerData().then(() => { try { renderFuturesHeat(); } catch (e) {} });
