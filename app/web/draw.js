@@ -457,8 +457,8 @@ function pickDrawingAt(items, coord, px, py) {
 }
 
 // Interaction: ONE mousedown on the crosshair hit-zone, branching on the live drawState.tool.
-// Measure ('measure') and pure inspect ('crosshair') are no-ops here (measure runs via chart.js's
-// gated legacy handler). A full chart rebuild (rerender) happens only on COMMIT, never per-move —
+// Under 'crosshair' it only takes a press that lands on a drawing; every other press there is
+// chart.js's drag-to-measure. A full chart rebuild (rerender) happens only on COMMIT, never per-move —
 // in-progress shapes/drags render into a lightweight preview <g>, like the existing measure tool.
 const MAGNET_SNAP_PX = 8;   // magnet is always light: only snap when the cursor is within this many px of a candle level
 
@@ -689,16 +689,31 @@ function bindChartDrawingInteractions(wrap, coord, rerender) {
     document.addEventListener('mouseup', onUp, { once: true });
   }
 
-  hit.addEventListener('mousedown', (evt) => {
-    if (evt.button !== 0) return;
+  // Bound on the wrap in the CAPTURE phase, not on the hit-zone itself: chart.js binds its
+  // drag-to-measure (measureStart) to that same hit-zone first, so a listener there runs second.
+  // Under the Crosshair tool a press ON a drawing must win -- it grabs the drawing (select, move,
+  // reshape) and the tool stays the crosshair, as in TradingView. Before, the press measured
+  // instead and a drawing could only be picked up again by right-click (reported 2026-10-11).
+  // A press on empty chart still measures, and drops any selection once the button is released.
+  wrap.addEventListener('mousedown', (evt) => {
+    if (evt.button !== 0 || evt.target !== hit) return;
     const tool = drawState.tool;
-    if (tool === 'crosshair') return;   // crosshair = inspect + drag-to-measure, handled by the legacy measure path in chart.js
     const p = local(evt);
     if (!p) return;
+    if (tool === 'crosshair') {
+      if (pickDrawingAt(drawingsForKey(currentDrawKey()), coord, p.x, p.y)) {
+        evt.stopPropagation();   // keeps measureStart from ever seeing this press
+        startCursor(evt, p);
+      } else if (drawState.selectedId) {
+        drawState.selectedId = null;
+        document.addEventListener('mouseup', () => rerender(), { once: true });   // not now: that would rebuild the chart under the measure
+      }
+      return;
+    }
     if (tool === 'cursor') { startCursor(evt, p); return; }
     if (!inPlot(p)) return;
     startCreate(evt, p, tool);
-  });
+  }, true);
 
   // Right-click a drawing → select it and open the edit menu (color / thickness / style / delete).
   // Off a drawing, leave the native context menu alone.
@@ -729,7 +744,7 @@ function repaintChartForDrawings() {
 // Per-tool metadata; tools are exposed either as direct buttons or grouped into a flyout "area".
 const TOOL_META = {
   cursor:    { title: 'Cursor — select & move (Esc)', icon: '<path d="M5 3l14 7-6 1.5L9.5 18z"/>' },
-  crosshair: { title: 'Crosshair — inspect; hold left button + drag to measure', icon: '<path d="M12 3v6M12 15v6M3 12h6M15 12h6"/>' },
+  crosshair: { title: 'Crosshair — inspect; drag to measure, or drag a drawing to move it', icon: '<path d="M12 3v6M12 15v6M3 12h6M15 12h6"/>' },
   trend:     { title: 'Trend line', icon: '<path d="M4 19L20 5"/>' },
   hline:     { title: 'Horizontal line', icon: '<path d="M3 12h18"/>' },
   hray:      { title: 'Horizontal ray — extends right only', icon: '<path d="M4 12h16"/><path d="M4 8v8"/>' },
@@ -797,7 +812,7 @@ function toggleMagnet() {
 }
 function setDrawTool(name) {
   drawState.tool = name;
-  if (name !== 'cursor') drawState.selectedId = null;   // selection only meaningful with the cursor
+  if (name !== 'cursor') drawState.selectedId = null;   // a tool switch drops the selection, except to the cursor
   if (typeof closeDrawContextMenu === 'function') closeDrawContextMenu();
   if (typeof closeSymbolFlyout === 'function') closeSymbolFlyout();
   if (typeof closeVisFlyout === 'function') closeVisFlyout();

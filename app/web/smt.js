@@ -751,7 +751,10 @@ function smtSvgToCanvas(targetWidth) {
   const w = Math.max(...dims.map(d => d.w));
   let totalH = titleH;
   for (const d of dims) totalH += labelH + d.h + gap;
-  const scale = (targetWidth || CHART_EXPORT_WIDTH) / w;
+  // Density floor, not a fixed width (`exportScale`, chart.js): these three charts are laid out
+  // at the content width, so pinning the canvas to CHART_EXPORT_WIDTH shrank the PNG the wider
+  // the window got. Macro Shift is never a card, so it always takes the floor.
+  const scale = exportScale(targetWidth, w, false);
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(w * scale);
   canvas.height = Math.round(totalH * scale);

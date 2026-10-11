@@ -8,6 +8,24 @@ const CHART_EXPORT_CSS = `
 `;
 const CHART_EXPORT_WIDTH = 1200; // ~on-screen display size; height stays proportional to the chart.
 const CHART_EXPORT_TITLE_H = 70; // header band: brand rows + a metadata row (data-as-of / export time).
+// A rasterisation DENSITY, which is not what CHART_EXPORT_WIDTH is, and confusing the two is
+// what made the Macro Shift export look soft. That constant is an output *contract*: the card
+// exports are cut against 1200px downstream (Telegram, the blog, the cover chart), so card mode
+// keeps it exactly. Every other export rasterises whatever the window happens to be showing,
+// and there `targetWidth / svgW` is only an upscale while the source SVG is narrower than
+// 1200 — which is true of the Futures chart (its column is ~880 wide, so 1.36x) and false of
+// every full-width chart. Macro Shift lays its SVG out at the content width (1306px at a
+// 1400px viewport, 1634px at 1728px), so the same line was a *downscale* to 0.92x / 0.73x,
+// against the 2x a retina screen paints it at — and it got worse the wider the window. So the
+// interactive exports take a floor of 2, i.e. at least as much detail as the screen beside
+// them. Not devicePixelRatio: that would make the same chart export differently per machine.
+const CHART_EXPORT_MIN_SCALE = 2;
+
+// The one definition of that rule — chart.js, smt.js and the Charts tab all rasterise through it.
+function exportScale(targetWidth, svgW, cardMode) {
+  const fit = (targetWidth || CHART_EXPORT_WIDTH) / svgW;
+  return cardMode ? fit : Math.max(fit, CHART_EXPORT_MIN_SCALE);
+}
 // Brand mark stamped on every image that leaves the app (download / share / X / card-mode).
 // The domain, not the product name: a shared chart should say where it came from.
 const EXPORT_BRAND = 'Chart-Horizon.com';
@@ -58,7 +76,37 @@ function exportNowStamp() {
   return `${day} · ${time}`;
 }
 
+// The Charts tab draws through this same loadChart, into its own body — so it needs no export
+// path of its own, only its own answer to "what is on screen". It is reached by an explicit
+// kind and never by sniffing a visible page: Futures and Charts both render a
+// `.chart-svg-wrap svg`, so a guess between them would export the other tab.
+// `asOf` reads the DRAWN series (see `exportAsOfDate`), which on this tab means swapping
+// bigChartState in first — the same borrow `renderBigChart` and `bigChartActiveSymbol` make,
+// because `getActiveChartSource` resolves continuous-vs-front-month out of `chartState`.
+function bigChartExportContext() {
+  const meta = INDEX[bigChartState.key] || {};
+  const cfg = currentBigChartCfg();
+  const saved = chartState;
+  chartState = bigChartState;
+  let asOf = null;
+  try { asOf = exportAsOfDate(cfg, true); } finally { chartState = saved; }
+  return {
+    kind: 'bigchart',
+    svg: document.querySelector('#bigchartBody .chart-svg-wrap svg'),
+    category: (meta.category || '').toUpperCase(),
+    name: meta.display_name || 'Chart',
+    symbol: document.getElementById('bigchartSym')?.textContent || '',
+    asOf,
+    shareButtonId: 'btnBigChartShare',
+    shareLabelId: 'btnBigChartShareLabel',
+    xButtonId: 'btnBigChartX',
+    xLabelId: 'btnBigChartXLabel'
+  };
+}
+
 function getChartExportContext(kind = null) {
+  // An explicit kind wins over the Seasonals sniff below, which fires on any kind but 'overview'.
+  if (kind === 'bigchart') return bigChartExportContext();
   const seasonalsActive = kind === 'seasonals' || (kind !== 'overview' && !document.getElementById('seasonalsPage')?.hidden);
   if (seasonalsActive) {
     const meta = INDEX[seasonalState.key] || {};
@@ -351,10 +399,38 @@ function drawSvgText(ctx, el) {
   }
 }
 
+// SVG elements the browser never paints where they sit — they only define something a painted
+// element REFERS to. drawSvgNode walks unknown children generically, so without this list it
+// descends into them and paints their geometry as if it were a shape. The Charts tab's drawing
+// layer wraps the price pane in a <clipPath> (draw.js), and that clip's <rect> carries no fill
+// attribute, which on a canvas means black: the first export of that tab came out as a solid
+// black slab over the whole price pane. Futures never contained one, which is why this survived.
+const SVG_NON_RENDERED_TAGS = new Set([
+  'style', 'title', 'desc', 'metadata', 'defs', 'clippath', 'mask', 'marker',
+  'pattern', 'symbol', 'filter', 'lineargradient', 'radialgradient'
+]);
+
+// Honour `clip-path="url(#id)"`, so a drawing that runs past the price pane is cut off in the
+// PNG exactly as it is on screen. The one clip this app emits is a single <rect>; anything else
+// is left unclipped rather than clipped wrongly.
+function applySvgClipPath(ctx, node) {
+  const ref = node.getAttribute('clip-path');
+  const m = ref && /^url\(\s*["']?#([^"')\s]+)["']?\s*\)$/.exec(ref.trim());
+  if (!m) return;
+  const root = node.ownerSVGElement;
+  const clip = root && Array.from(root.querySelectorAll('clipPath')).find(c => c.id === m[1]);
+  const rect = clip && clip.querySelector('rect');
+  if (!rect) return;
+  ctx.beginPath();
+  ctx.rect(parseNum(rect.getAttribute('x')), parseNum(rect.getAttribute('y')),
+           parseNum(rect.getAttribute('width')), parseNum(rect.getAttribute('height')));
+  ctx.clip();
+}
+
 function drawSvgNode(ctx, node) {
   if (!node || node.nodeType !== 1) return;
   const tag = node.tagName.toLowerCase();
-  if (tag === 'style' || tag === 'title') return;
+  if (SVG_NON_RENDERED_TAGS.has(tag)) return;
   const cls = node.getAttribute('class') || '';
   // The live dot too, as buildExportSvg already removes it: it pulses (SMIL opacity 1 -> 0.2), and
   // the computed opacity read below put it into each PNG at whatever phase the export caught.
@@ -368,6 +444,7 @@ function drawSvgNode(ctx, node) {
   ctx.save();
   ctx.globalAlpha *= svgOpacity(node);
   applySvgTransform(ctx, node);
+  applySvgClipPath(ctx, node);   // after the transform: a clip-path lives in the element's own space
 
   if (tag === 'rect') drawSvgRect(ctx, node);
   else if (tag === 'line') drawSvgLine(ctx, node);
@@ -446,9 +523,9 @@ function chartSvgToCanvas(targetWidth = CHART_EXPORT_WIDTH, kind = null) {
   // Card-mode footer: disclaimer always, runway line in addition when present.
   const footerH = exportCtx.cardMode ? (exportCtx.runway ? 46 : 24) : 0;
   const totalH = innerH + titleH + footerH;
-  const scale = targetWidth / w;
+  const scale = exportScale(targetWidth, w, exportCtx.cardMode);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(targetWidth);
+  canvas.width = Math.round(w * scale);
   canvas.height = Math.round(totalH * scale);
   const ctx = canvas.getContext('2d');
   ctx.setTransform(scale, 0, 0, scale, 0, 0);

@@ -461,6 +461,21 @@
               <span>Anchor right</span>
             </label>
             <button class="bigchart-latest-btn" id="bigchartLatestBtn" type="button" onclick="jumpBigChartToLatest()" title="Jump to the newest candle (keeps the current zoom)" disabled>→| Latest</button>
+            <!-- Same three actions as the Futures chart, through the same helpers: this tab draws
+                 with the same loadChart, so 'bigchart' only tells getChartExportContext which body
+                 to read. Drawings live in that SVG and come along into the image. -->
+            <button class="chart-action-btn" id="btnBigChartPng" type="button" onclick="downloadChart('bigchart')" title="Download chart as PNG image">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5v8M5 7l3 3 3-3M2.5 11.5v1a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1"/></svg>
+              PNG
+            </button>
+            <button class="chart-action-btn" id="btnBigChartShare" type="button" onclick="shareChart('bigchart')" title="Share chart (or copy image to clipboard)">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="3.5" r="1.8"/><circle cx="4" cy="8" r="1.8"/><circle cx="12" cy="12.5" r="1.8"/><path d="M5.6 7.1l4.8-2.6M5.6 8.9l4.8 2.6"/></svg>
+              <span id="btnBigChartShareLabel">Share</span>
+            </button>
+            <button class="chart-action-btn" id="btnBigChartX" type="button" aria-label="Share on X" onclick="shareToX('bigchart')" title="Share on X: copies the chart image so you can paste it into the post (Cmd/Ctrl+V)">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+              <span id="btnBigChartXLabel"></span>
+            </button>
           </div>
         </div>
       </div>
@@ -500,17 +515,17 @@
 <script src="ff_data/config.js"></script>
 <script src="web/core.js?v=34"></script>
 <script src="web/indicators.js?v=3"></script>
-<script src="web/chart.js?v=50"></script>
+<script src="web/chart.js?v=51"></script>
 <script src="web/futures.js?v=9"></script>
 <script src="web/seasonals.js?v=9"></script>
 <script src="web/screener.js?v=32"></script>
 <script src="web/forex.js?v=10"></script>
-<script src="web/smt.js?v=11"></script>
+<script src="web/smt.js?v=12"></script>
 <script src="web/tools.js?v=3"></script>
 <script src="web/refresh.js?v=5"></script>
 <script src="web/live.js?v=9"></script>
 <script src="web/bigchart.js?v=20"></script>
-<script src="web/draw.js?v=29"></script>
+<script src="web/draw.js?v=30"></script>
 <script src="web/settings.js?v=19"></script>
 <script src="web/disclaimer.js?v=1"></script>
 <script src="web/boot.js?v=14"></script>
