@@ -479,6 +479,7 @@ class YahooGateway:
                     "high": high,
                     "low": low,
                     "state": row.get("marketState"),
+                    "volume": _num(row.get("regularMarketVolume")),
                 }
         return out
 

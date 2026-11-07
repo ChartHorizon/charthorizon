@@ -50,7 +50,14 @@ function renderRefreshProgress(status) {
     node.classList.toggle('is-error', state === 'error');
     node.classList.toggle('indeterminate', running && total === 0);
     if (btn) btn.disabled = running;
-    if (running) {
+    const fronts = running && status.phase === 'fronts';
+    const frontsTotal = Number(status && status.fronts_total) || 0;
+    const frontsDone = Number(status && status.fronts_done) || 0;
+    if (fronts) {
+      if (label) label.textContent = 'Front months…';
+      if (fill) fill.style.width = (frontsTotal > 0 ? Math.min(100, Math.round(frontsDone / frontsTotal * 100)) : 0) + '%';
+      if (sub) sub.textContent = `${frontsDone}/${frontsTotal}`;
+    } else if (running) {
       if (label) label.textContent = status.current ? `Updating ${status.current}…` : 'Updating…';
       if (fill) fill.style.width = pct + '%';
       if (sub) sub.textContent = total > 0 ? `${done}/${total} · ${pct}%` : 'running…';
@@ -223,6 +230,9 @@ async function applyRefreshedData(status) {
     // repaint, measured. Ordering matters and is why this is last: the layer must resolve its
     // symbol from a chart already on screen (same note in bigchart.js selectBigChartMarket).
     if (typeof restartLiveLayer === 'function') restartLiveLayer();
+    // Re-attach the leads and nexts the swap just discarded, from the server cache the
+    // refresh's fronts phase filled. Background, not awaited; no-op in card mode.
+    if (typeof bootReattachFronts === 'function') bootReattachFronts();
     // Remember what the page now shows so the heartbeat won't reload the same data again.
     // The status's own stamp, not the reloaded config's: if yet another run landed while this
     // reload was in progress, the next poll then still sees it as newer.

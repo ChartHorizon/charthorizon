@@ -399,7 +399,7 @@ class BatchQuoteTest(unittest.TestCase):
         {"symbol": "GCZ26.CMX", "regularMarketPrice": 4680.6, "regularMarketOpen": 4577.0,
          "regularMarketDayHigh": 4690.4, "regularMarketDayLow": 4565.5,
          "regularMarketTime": 1787345998, "gmtOffSetMilliseconds": -14400000,
-         "marketState": "CLOSED"},
+         "marketState": "CLOSED", "regularMarketVolume": 1234},
         {"symbol": "ZCZ26.CBT", "regularMarketPrice": 508.5, "regularMarketOpen": 502.0,
          "regularMarketDayHigh": 509.0, "regularMarketDayLow": 499.0,
          "regularMarketTime": 1787336399, "gmtOffSetMilliseconds": -14400000,
@@ -418,6 +418,12 @@ class BatchQuoteTest(unittest.TestCase):
                              json_fetcher=fetch_json)
         return gw, calls
 
+    def test_quote_carries_volume_or_none(self):
+        gw, _ = self._gw()
+        out = gw.quotes(["GCZ26.CMX", "ZCZ26.CBT"])
+        self.assertEqual(out["GCZ26.CMX"]["volume"], 1234)
+        self.assertIsNone(out["ZCZ26.CBT"]["volume"])
+
     def test_continuous_symbols_are_never_batchable(self):
         # Measured: 14/16 =F symbols disagree with their own chart series, up to 9.44 %.
         self.assertFalse(yg.is_batchable("GC=F"))
@@ -435,7 +441,7 @@ class BatchQuoteTest(unittest.TestCase):
     def test_the_quote_shape_matches_the_live_cache_contract(self):
         gw, _ = self._gw()
         q = gw.quotes(["GCZ26.CMX"])["GCZ26.CMX"]
-        self.assertEqual(sorted(q), ["day", "high", "low", "open", "price", "state"])
+        self.assertEqual(sorted(q), ["day", "high", "low", "open", "price", "state", "volume"])
         self.assertEqual(q["price"], 4680.6)
         self.assertEqual(q["open"], 4577.0)
         self.assertEqual(q["state"], "CLOSED")

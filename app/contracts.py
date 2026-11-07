@@ -53,6 +53,7 @@ __all__ = [
     'build_total_volume_contract_candidates',
     'build_yf_symbol',
     'next_contract_months',
+    'pick_lead_and_next',
 ]
 
 
@@ -202,3 +203,33 @@ def build_contract_symbol(root, year, month):
     code = MONTH_CODES[month]
     yy = str(year)[-2:]
     return f"{root}{code}{yy}"
+
+
+def pick_lead_and_next(candidates, volumes, previous_contracts=None):
+    """Choose a market's (lead, next) candidates from one batch volume quote.
+
+    Lead = highest positive volumes[yf_symbol] (ties: earlier in the chain); else the
+    candidate with the highest positive volume in `previous_contracts` (the stored
+    list); else candidates[0]. Next = the candidate right after the lead, or None.
+    The volumes decide ORDER only; they are never written anywhere.
+    """
+    if not candidates:
+        return None, None
+
+    def best(vol_of):
+        top, top_i = 0, None
+        for i, cand in enumerate(candidates):
+            v = vol_of(cand.get("yf_symbol"))
+            if v and v > top:
+                top, top_i = v, i
+        return top_i
+
+    idx = best(lambda sym: (volumes or {}).get(sym))
+    if idx is None and previous_contracts:
+        stored = {c.get("yf_symbol"): c.get("volume") for c in previous_contracts
+                  if isinstance(c, dict)}
+        idx = best(lambda sym: stored.get(sym))
+    if idx is None:
+        idx = 0
+    nxt = candidates[idx + 1] if idx + 1 < len(candidates) else None
+    return candidates[idx], nxt

@@ -178,7 +178,8 @@ function _bootOfferSkip() {
 // ── Cold-start warm-up ───────────────────────────────────────────────────────
 // Two passes: _bootOpeningMarket() holds the splash, _bootLoadRest() runs behind the open
 // dashboard. The total Yahoo cost is unchanged — ONE batch quote request for the board plus
-// up to 39 contract histories (zero once ff_data/contract_history/ is warm) — it simply no
+// up to 78 contract histories, every market's lead and next (zero once
+// ff_data/contract_history/ is warm) — it simply no
 // longer stands in front of the reveal.
 //
 // Priority is the one thing that differs between the passes. The opening market asks as
@@ -233,6 +234,24 @@ function _bootFrontContracts() {
   return out;
 }
 
+// A market's NEXT contract: the first one after the lead that has a yf_symbol, the same
+// definition as liveResolveVariants' nextIdx (live.js). The generator's fronts phase writes
+// lead and next of every market into the server's contract-history cache.
+function _bootNextContracts() {
+  const out = [];
+  for (const key of Object.keys(INDEX || {})) {
+    const meta = INDEX[key];
+    const cfg = meta && catCache[meta.slug] && catCache[meta.slug][key];
+    const contracts = (cfg && cfg.contracts) || [];
+    const idx = (typeof frontContractIndex === 'function') ? frontContractIndex(contracts) : -1;
+    if (idx < 0) continue;
+    for (let i = idx + 1; i < contracts.length; i++) {
+      if (contracts[i] && contracts[i].yf_symbol) { out.push(contracts[i]); break; }
+    }
+  }
+  return out;
+}
+
 // The cold contract histories, with BOUNDED concurrency. Strictly sequential took ~4s per
 // contract against real Yahoo — nearly three minutes for a full board — and the gateway
 // rate-caps the outbound requests regardless, so serialising bought nothing. Warm contracts cost nothing: fetchContractHistory returns
@@ -255,9 +274,11 @@ async function _bootWarmHistories(fronts) {
 
 // A board refresh that is ALREADY running. start.py kicks one on every warm start (the
 // double-click path), before it serves — and the server gateway refuses anything
-// non-interactive while ff_data/refresh.lock exists. The Yahoo phases after this would be
-// declined before they left the process and would count 39/39 against no-ops, so wait it
-// out first. Any failure (endpoint missing, bad JSON) just returns and lets them run.
+// non-interactive while ff_data/refresh.lock exists. The board-wide live batch quote would
+// be declined before it left the process, so it waits the refresh out here. The contract
+// histories do not: they wait only for the fronts phase (_bootWaitForFronts below) and are
+// then local cache hits the stand-down never sees. Any failure (endpoint missing, bad JSON)
+// just returns and lets the batch run.
 //
 // This no longer holds the splash — it runs after the reveal, and the user watches the very
 // same refresh in the watchlist progress bar, which is also what reloads every loaded
@@ -275,6 +296,35 @@ async function _bootWaitForRefresh() {
     _bootPhase('Updating market data', Number(status.done) || 0, Number(status.total) || 0);
     await new Promise(r => setTimeout(r, BOOT_REFRESH_POLL_MS));
   }
+}
+
+// Wait for the generator's FRONTS phase (every market's lead and next, written into the
+// server's contract-history cache) to be over. Returns as soon as no refresh is running or
+// the per-market loop has started ('rest'). A null phase means the generator has not written
+// its first status yet: keep waiting. Any failure returns and lets the warm-up run.
+async function _bootWaitForFronts() {
+  for (;;) {
+    let status = null;
+    try {
+      const res = await fetch('/api/refresh-status', { cache: 'no-store' });
+      if (!res.ok) return;
+      status = await res.json();
+    } catch (e) { return; }
+    if (!status || status.state !== 'running' || status.phase === 'rest') return;
+    _bootPhase('Front months', Number(status.fronts_done) || 0, Number(status.fronts_total) || 0);
+    await new Promise(r => setTimeout(r, BOOT_REFRESH_POLL_MS));
+  }
+}
+
+// After a finished refresh swapped every contract object (refresh.js applyRefreshedData):
+// warm leads, then nexts, from the server cache the fronts phase just filled. Card mode is
+// the content bot's page and must not change.
+async function bootReattachFronts() {
+  if (document.body.classList.contains('card-mode')) return;
+  try {
+    await _bootWarmHistories(_bootFrontContracts());
+    await _bootWarmHistories(_bootNextContracts());
+  } catch (e) { /* background */ }
 }
 
 // The splash pass: the opening market's category file and the screener (both local), then
@@ -303,21 +353,44 @@ async function _bootOpeningMarket() {
   }
 }
 
-// The background pass: everything the splash no longer waits for. Order is unchanged from
-// when this ran in front of the reveal — quotes BEFORE histories, deliberately. The quote
-// phase is ONE request for the whole board; the history phase is up to 39. Warming
-// histories first drained the preload budget below its floor and the single most valuable
-// request of the whole warm-up was the one that got refused — the board came up with 1 of
-// 39 live prices.
+// The board-wide live price: ONE batch request for every market's lead contract.
+async function _bootLiveBatch() {
+  const symbols = [...new Set(_bootFrontContracts().map(c => c.yf_symbol))];
+  if (symbols.length && typeof livePrefetch === 'function') {
+    await livePrefetch(symbols, { priority: 'preload' });
+  }
+}
+
+// Whether a board refresh is running right now: one status read. A failure reads as "not
+// running", the same way the two waits above give up and let the warm-up go on.
+async function _bootRefreshRunning() {
+  try {
+    const res = await fetch('/api/refresh-status', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const status = await res.json();
+    return !!(status && status.state === 'running');
+  } catch (e) { return false; }
+}
+
+// The background pass: everything the splash no longer waits for. Its order depends on
+// whether a refresh is running, read once after the board has loaded.
 //
-// When a refresh finishes mid-pass, refresh.js clears catCache and rebuilds every contract
-// object, so rows warmed a moment earlier are discarded with the objects that held them —
-// measured: 44 histories fetched, 1 still attached afterwards. That is not the loss it
-// looks like. What this pass is really for is the SERVER-side cache in
-// ff_data/contract_history/, which the refresh had just emptied (clear_contract_history_cache)
-// and which survives any in-memory swap; refilling it turns the first click on a market from
-// a ~4s Yahoo fetch into a ~10ms local read. Choreographing the two passes around each other
-// would buy back only that 10ms.
+// A refresh running (every warm start kicks one): it writes every market's lead and next
+// contract into the server's contract-history cache first (the fronts phase), and a preload
+// request for those symbols is a cache hit the gateway never sees, so it is served even
+// while the refresh holds its lock; a miss is declined and comes back empty, which is not
+// kept, so a click later asks at interactive. Hence: wait for the fronts phase only, warm
+// leads, then nexts, then wait out the rest of the refresh before the board-wide live batch
+// (preload is declined while it runs).
+//
+// No refresh running (a reload after one, say): every history miss now goes to Yahoo at
+// preload, so the live batch goes FIRST. It is ONE request for the whole board against up
+// to 78 for the histories; warming histories first drained the preload budget below its
+// floor and the single most valuable request of the warm-up was the one refused — the board
+// came up with 1 of 39 live prices.
+//
+// When a refresh finishes, refresh.js rebuilds every contract object and calls
+// bootReattachFronts() to attach the same histories again from the cache.
 async function _bootLoadRest() {
   // Let the reveal's fade finish first (CSS, 450ms). The category files below are ~57 MB of
   // JSON and every parse blocks the main thread, which would otherwise land as a stutter
@@ -325,13 +398,17 @@ async function _bootLoadRest() {
   await new Promise(r => setTimeout(r, 500));
   try {
     await _bootLoadBoard();
-    await _bootWaitForRefresh();
-    const fronts = _bootFrontContracts();
-    const symbols = [...new Set(fronts.map(c => c.yf_symbol))];
-    if (symbols.length && typeof livePrefetch === 'function') {
-      await livePrefetch(symbols, { priority: 'preload' });   // ONE batch request for all
+    if (await _bootRefreshRunning()) {
+      await _bootWaitForFronts();
+      await _bootWarmHistories(_bootFrontContracts());
+      await _bootWarmHistories(_bootNextContracts());
+      await _bootWaitForRefresh();
+      await _bootLiveBatch();
+    } else {
+      await _bootLiveBatch();
+      await _bootWarmHistories(_bootFrontContracts());
+      await _bootWarmHistories(_bootNextContracts());
     }
-    await _bootWarmHistories(fronts);
   } catch (e) { /* background: a failure costs freshness here, never the open dashboard */ }
 }
 

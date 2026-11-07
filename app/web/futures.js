@@ -71,7 +71,7 @@ async function activateSelectedContract(cfg, fallbackToContinuous = false) {
 // Re-establish the Futures tab's chart, forward curve and spec card against the CURRENT
 // catCache. This is the after-a-board-refresh path: that reload replaces every contract
 // object, and the fresh front month carries no chart_history at all (it lives behind
-// /api/contract-history — a cache `--refresh` clears too). repaintOverviewThemed() is a
+// /api/contract-history, a cache the refresh rewrites under the page). repaintOverviewThemed() is a
 // THEME repaint and only DRAWS, so it painted "No chart history available for <symbol>"
 // over the single-contract view this tab opens in, and the user had to click the market
 // again to get a chart back. In contract mode we fetch first — the same path that click

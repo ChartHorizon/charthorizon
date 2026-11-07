@@ -80,6 +80,7 @@ __all__ = [
     'YahooFinanceClient',
     '_cached_seasonal_last_year',
     '_clean_contract_history_row',
+    '_clean_continuous_history',
     '_contract_is_active_for_day',
     '_contract_is_pre_active_for_day',
     '_drop_spike_revert_outliers',
@@ -159,6 +160,47 @@ class YahooFinanceClient:
             return best_frame
         cutoff = best_frame.index.max() - timedelta(days=want)
         return best_frame[best_frame.index >= cutoff]
+
+    # ── Explicit hand-off between pool threads ──────────────────────────────
+    # Each thread owns a private client (yfinance Tickers are not thread-safe), so a
+    # frame one thread fetched is invisible to the next. These methods let a phase
+    # export what it fetched and the next phase seed it — no shared, locked cache.
+    # Cached frames are never mutated in place (quote() slices with .tail,
+    # _cached_superset slices by mask), so the same frame object may sit in two caches.
+
+    def cached_history(self, symbol, period, interval="1d"):
+        """The cached frame for this key, or one sliced from a longer cached frame,
+        else None. Never issues a request."""
+        frame = self._history_cache.get((symbol, period, interval))
+        if frame is not None:
+            return frame
+        return self._cached_superset(symbol, period, interval)
+
+    def cached_quote(self, symbol):
+        """The cached quote dict for this symbol, or None. Never issues a request."""
+        q = self._quote_cache.get(symbol)
+        return dict(q) if q is not None else None
+
+    def cache_snapshot(self):
+        return (frozenset(self._history_cache), frozenset(self._quote_cache))
+
+    def cache_added_since(self, snapshot):
+        """Only the entries cached after `snapshot` was taken."""
+        hist_keys, quote_keys = snapshot
+        return {
+            "history": {k: v for k, v in list(self._history_cache.items())
+                        if k not in hist_keys},
+            "quotes": {k: dict(v) for k, v in list(self._quote_cache.items())
+                       if k not in quote_keys},
+        }
+
+    def seed(self, cached):
+        """Adopt a `cache_added_since` result. Never overwrites an entry this client
+        already holds."""
+        for k, v in (cached.get("history") or {}).items():
+            self._history_cache.setdefault(k, v)
+        for k, v in (cached.get("quotes") or {}).items():
+            self._quote_cache.setdefault(k, dict(v))
 
     def _history(self, symbol, period, interval="1d", quiet=False):
         cache_key = (symbol, period, interval)
@@ -460,6 +502,23 @@ def _drop_spike_revert_outliers(history, jump=0.06, neighbor_tol=0.03):
         if dev_prev >= jump and dev_next >= jump and neighbours_agree and is_local_extreme:
             keep[i] = False
     return [r for r, k in zip(rows, keep) if k]
+
+
+def _clean_continuous_history(history):
+    """The native =F price history as the board writes it: every row normalised
+    (_clean_contract_history_row, incomplete candles rejected), one bar per date in date
+    order, the newest YF_PRICE_HISTORY_MAX_POINTS kept, isolated spike-and-revert prints
+    dropped. One definition for the complete run (fetch_yfinance_liquid_continuous_history)
+    and a first run's first pass, so the board the dashboard opens on draws the same series
+    the complete run replaces it with."""
+    by_date = {}
+    for row in history or []:
+        clean = _clean_contract_history_row(row)
+        if clean:
+            clean["source"] = "yfinance_continuous_fallback"
+            by_date[clean["date"]] = clean
+    rows = [by_date[day] for day in sorted(by_date)]
+    return _drop_spike_revert_outliers(rows[-YF_PRICE_HISTORY_MAX_POINTS:])
 
 
 def fetch_seasonal_price_history(cfg, fallback_history=None):
@@ -1043,14 +1102,6 @@ def fetch_yfinance_liquid_continuous_history(
             if active_contracts and empty_streak >= YF_LIQUID_CONTINUOUS_EMPTY_STOP:
                 break
 
-    # Build the clean continuous fallback (dense, trades every day).
-    fallback_by_date = {}
-    for row in fallback_history or []:
-        clean = _clean_contract_history_row(row)
-        if clean:
-            clean["source"] = "yfinance_continuous_fallback"
-            fallback_by_date[clean["date"]] = clean
-
     # Calendar spread (front-next): front = the lead (highest-volume) contract, next =
     # the nearest expiry after it — see the helper. Computed whenever a lead month and a
     # following month exist.
@@ -1066,9 +1117,7 @@ def fetch_yfinance_liquid_continuous_history(
     # the stitched overlay was the cause of the spotty rolls. The individual
     # contracts are still fetched above for the volume pane and the calendar
     # spread below — just not used to stitch the price chart.
-    history = [fallback_by_date[day] for day in sorted(fallback_by_date)]
-    history = history[-YF_PRICE_HISTORY_MAX_POINTS:]
-    history = _drop_spike_revert_outliers(history)
+    history = _clean_continuous_history(fallback_history)
 
     contract_total_volume = _total_volume_rows_from_by_date(
         total_by_date,
@@ -1207,17 +1256,23 @@ def resolve_settled_contracts(cfg, history, contracts, fetch=None):
     return found
 
 
-def select_yfinance_contracts(cfg, count=6):
+def select_yfinance_contracts(cfg, count=6, offline=False):
     """
     Selects the first `count` Yahoo contracts with real price data.
     Front-month symbols that are no longer listed are skipped quietly.
+
+    `offline=True` never asks Yahoo: a symbol without a cached quote counts as
+    unavailable (the caller seeded the client from an earlier phase).
     """
     candidates = build_contract_candidates(cfg, count=max(YF_CONTRACT_LOOKAHEAD, count))
     selected = []
     skipped = []
 
     for c in candidates:
-        data = _yf_client.quote(c["yf_symbol"], quiet=True)
+        if offline:
+            data = _yf_client.cached_quote(c["yf_symbol"]) or dict(BLANK)
+        else:
+            data = _yf_client.quote(c["yf_symbol"], quiet=True)
         if data.get("available"):
             c.update(data)
             selected.append(c)
@@ -1233,10 +1288,13 @@ def select_yfinance_contracts(cfg, count=6):
             if len(selected) >= count:
                 break
 
-    if skipped:
-        print(f"   · Yahoo: {len(selected)}/{len(candidates)} contracts selected, {len(skipped)} missing/expired skipped")
-    else:
-        print(f"   ✓ Yahoo: {len(selected)}/{len(candidates)} contracts available")
+    # Offline (a first pass) "skipped" means "not fetched yet", not missing or expired:
+    # every market would report it, so say nothing.
+    if not offline:
+        if skipped:
+            print(f"   · Yahoo: {len(selected)}/{len(candidates)} contracts selected, {len(skipped)} missing/expired skipped")
+        else:
+            print(f"   ✓ Yahoo: {len(selected)}/{len(candidates)} contracts available")
 
     # Sort chronologically; backfilled empty months could otherwise be out of order.
     selected.sort(key=lambda c: (c.get("year", 0), c.get("month", 0)))

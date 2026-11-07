@@ -16,13 +16,29 @@
 <body>
   <div>
     <div class="s">Preparing your first dashboard…</div>
-    <div class="p">Fetching market data — this takes 1–2 minutes on first launch.<br>
+    <div class="p"><span id="status">Fetching market data — this usually takes under a minute on first launch.</span><br>
       <span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
   </div>
   <script>
     setInterval(function(){
       fetch('ff_data/config.js', {cache:'no-store'}).then(function(r){ if(r.ok) location.href='index.html'; }).catch(function(){});
     }, 4000);
+    // Text only: the redirect above stays the single way out of this page.
+    setInterval(function(){
+      fetch('api/refresh-status', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(p){
+        var el = document.getElementById('status');
+        if(p && el && p.state === 'error'){
+          el.textContent = 'ChartHorizon could not load market data. Close it and start it again.';
+          var dots = document.querySelectorAll('.dot');
+          for(var i = 0; i < dots.length; i++) dots[i].style.display = 'none';
+          return;
+        }
+        if(!p || !el || p.state !== 'running') return;
+        var n = p.fronts_total, d = p.fronts_done || 0;
+        if(p.phase === 'fronts' && n && d < n) el.textContent = 'Front months ' + d + '/' + n;
+        else if((p.phase === 'fronts' && n) || p.phase === 'rest') el.textContent = 'Building your board…';
+      }).catch(function(){});
+    }, 1000);
   </script>
 </body>
 </html>

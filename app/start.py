@@ -23,9 +23,11 @@ import sys
 import argparse
 import subprocess
 import threading
+import time
 import webbrowser
 
 import app_version
+import contract_history_cache
 import live_cache
 import packaging_fingerprint
 import yahoo_gateway
@@ -64,18 +66,13 @@ import json
 import tempfile
 import re
 import urllib.parse
-from datetime import datetime, time, timedelta
-
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    ZoneInfo = None
+from datetime import datetime
 
 PORT = 8000
 HTML_FILE = "index.html"
 GENERATOR = "commodity_dashboard.py"
 REQUIRED = ["yfinance", "python-dateutil", "pypdf", "curl_cffi"]
-YFINANCE_EOD_READY_ET = time(17, 30)
+YFINANCE_EOD_READY_ET = contract_history_cache.SETTLE_READY_ET
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
 LOCK_FILE = os.path.join("ff_data", "refresh.lock")
 LOCK_MAX_AGE = 1800  # seconds — a refresh never takes this long; older lock = stale
@@ -487,51 +484,14 @@ def dashboard_exists():
 
 
 def _eastern_now():
-    """Current New York time; dateutil keeps this Python 3.7 compatible."""
-    if ZoneInfo is not None:
-        return datetime.now(ZoneInfo("America/New_York"))
-    from dateutil import tz
-    return datetime.now(tz.gettz("America/New_York"))
-
-
-def _is_session_day(day):
-    """A US futures session: a weekday that is not an exchange holiday. The holiday table is
-    the generator's own (calendar_utils); imported lazily, like yfinance, because this module
-    runs before the launcher has installed dateutil."""
-    from calendar_utils import _is_business_day
-    return _is_business_day(day)
-
-
-def _latest_business_day_on_or_before(day):
-    while not _is_session_day(day):
-        day -= timedelta(days=1)
-    return day
-
-
-def _previous_business_day(day):
-    return _latest_business_day_on_or_before(day - timedelta(days=1))
+    return contract_history_cache.eastern_now()
 
 
 def _latest_settled_eod_date(now_et=None):
-    """Latest session date whose settled EoD bar should already exist from yfinance.
-
-    This is the settle cutoff for the contract-history endpoint's unsettled-tail
-    guard (`_drop_unsettled_tail`) — a still-forming bar is never served. We use
-    17:30 ET as a practical delay buffer after the US futures close; before that,
-    today's bar has not settled yet, so the previous session is the latest settled date.
-
-    It is a REQUIREMENT as well as a trim: the contract-history cache refetches a history
-    that ends before it, and card mode refuses to export a candle behind it
-    (`/api/settled-eod`). That is why exchange holidays count here. Trimming past a date
-    with no bar is harmless; demanding a Labor Day bar would refuse every card all evening.
-    """
-    now_et = now_et or _eastern_now()
-    today = now_et.date()
-    if not _is_session_day(today):
-        return _latest_business_day_on_or_before(today)
-    if now_et.time() < YFINANCE_EOD_READY_ET:
-        return _previous_business_day(today)
-    return today
+    """Latest session date whose settled EoD bar should already exist (the cutoff for
+    `_drop_unsettled_tail`, the cache refetch and `/api/settled-eod`). The rule lives in
+    `contract_history_cache`, shared with the generator subprocess."""
+    return contract_history_cache.latest_settled_eod_date(now_et or _eastern_now())
 
 
 def settled_eod_payload(now_et=None):
@@ -551,10 +511,13 @@ def _parse_date(value):
         return None
 
 
-def _run_generator_subprocess():
+def _run_generator_subprocess(first_pass=False):
     """Run the generator once; return its process return code. No sys.exit, so it is
-    safe to call from a background thread."""
+    safe to call from a background thread. first_pass makes the generator write a
+    first-pass board after its fronts phase (a first run, nothing on disk yet)."""
     cmd = [sys.executable, "--run-generator"] if FROZEN else [sys.executable, GENERATOR]
+    if first_pass:
+        cmd.append("--first-pass")
     if not FROZEN and not os.path.exists(GENERATOR):
         print(f"\n✗ {GENERATOR} not found!")
         return 1
@@ -582,13 +545,12 @@ def generate_dashboard():
 _refresh_spawn_lock = threading.Lock()
 
 
-def _run_locked_refresh():
+def _run_locked_refresh(first_pass=False):
     """Runs the generator while holding the lock; finalizes progress + releases.
     The lock is assumed already acquired by the caller. (The trigger is already
     recorded in the lock + progress file, so it is not needed here.)"""
     try:
-        clear_contract_history_cache()
-        rc = _run_generator_subprocess()
+        rc = _run_generator_subprocess(first_pass=first_pass)
         if rc == 0:
             _write_progress(state="done",
                             finished_at=datetime.now().isoformat(timespec="seconds"))
@@ -600,7 +562,7 @@ def _run_locked_refresh():
         release_refresh_lock()
 
 
-def start_background_refresh(trigger="manual"):
+def start_background_refresh(trigger="manual", first_pass=False):
     """Spawn a background refresh thread if none is running. Returns an API dict.
     Used by the manual endpoint AND the warm-start auto-trigger."""
     with _refresh_spawn_lock:
@@ -608,16 +570,48 @@ def start_background_refresh(trigger="manual"):
             return {"running": True, "already": True}
         _write_progress(state="running", trigger=trigger, total=None, done=0,
                         current=None, category=None,
+                        phase=None, fronts_done=0, fronts_total=None,
                         started_at=datetime.now().isoformat(timespec="seconds"),
                         finished_at=None, latest_eod=None, data_version=None, error=None)
         try:
-            threading.Thread(target=_run_locked_refresh, daemon=True).start()
+            threading.Thread(target=_run_locked_refresh, args=(first_pass,),
+                             daemon=True).start()
         except Exception:
             # Thread spawn failed (interpreter shutdown / thread limit) — don't
             # leave the file lock orphaned for up to LOCK_MAX_AGE.
             release_refresh_lock()
             return {"running": False, "error": "spawn-failed"}
         return {"running": True, "started": True}
+
+
+FIRST_RUN_RETRY_SECONDS = 10
+
+
+def _start_first_run(retry_seconds=FIRST_RUN_RETRY_SECONDS, wait=time.sleep):
+    """Start a first run's locked refresh (with a first pass). Returns the retry thread when
+    the lock was taken, else None.
+
+    The first run has no board to fall back on: loading.html waits for config.js, and only a
+    refresh writes one. A lock held elsewhere is usually a genuine refresh in another
+    process, which writes the board and lets the splash redirect; but a lock whose pid is
+    alive and is not a refresh at all would leave the splash waiting for good. So the start
+    is retried until it succeeds or the board exists, whichever comes first."""
+    if not start_background_refresh("first-run", first_pass=True).get("already"):
+        return None
+    warn("Another refresh holds the lock — the first run starts as soon as it is free.")
+    thread = threading.Thread(target=_retry_first_run, args=(retry_seconds, wait),
+                              daemon=True)
+    thread.start()
+    return thread
+
+
+def _retry_first_run(retry_seconds, wait):
+    while not dashboard_exists():
+        wait(retry_seconds)
+        if dashboard_exists():
+            return
+        if start_background_refresh("first-run", first_pass=True).get("started"):
+            return
 
 
 def foreground_refresh():
@@ -627,7 +621,6 @@ def foreground_refresh():
         warn("Another refresh is already running — skipped.")
         return
     try:
-        clear_contract_history_cache()
         generate_dashboard()   # generator writes its own running->done progress
         _write_progress(state="done",
                         finished_at=datetime.now().isoformat(timespec="seconds"))
@@ -645,31 +638,12 @@ def free_port(port):
     return port
 
 
-# Serializes the lazy contract-history cache (request threads read/write it) against
-# the refresh thread wiping it, so a wipe mid-request cannot race the open()/replace().
+# Serializes the lazy contract-history cache reads/writes across request threads.
 _contract_cache_lock = threading.Lock()
 
 
 def _contract_history_cache_path(symbol, period):
-    safe_symbol = re.sub(r"[^A-Za-z0-9_.=-]+", "_", symbol)
-    safe_period = re.sub(r"[^A-Za-z0-9_.=-]+", "_", period)
-    cache_dir = os.path.join("ff_data", "contract_history")
-    return os.path.join(cache_dir, f"{safe_symbol}_{safe_period}.json")
-
-
-def clear_contract_history_cache():
-    """Discard the cached single-contract histories.
-
-    They are built lazily on the first click of a contract row and otherwise reused
-    forever. On --refresh they have to go, or contracts that were already clicked
-    keep showing stale prices after the update.
-    """
-    import shutil
-    cache_dir = os.path.join("ff_data", "contract_history")
-    with _contract_cache_lock:
-        if os.path.isdir(cache_dir):
-            shutil.rmtree(cache_dir, ignore_errors=True)
-            ok("Single-contract cache cleared (reloaded on demand)")
+    return contract_history_cache.cache_path(symbol, period)
 
 
 def _trim_leading_flat(rows):
@@ -786,42 +760,27 @@ def get_contract_history(symbol, period="5y",
 
     # Network fetch deliberately outside the lock (slow) — only the FS ops are serialized.
     history = _history_rows(symbol, period, priority=priority)
-    payload = {
-        "symbol": symbol,
-        "period": period,
-        "source": "yfinance",
-        "contract_type": "single_expiry_month",
-        "history": history,
-        # Which settle this answer was built for, and when: _contract_history_is_current.
-        "settled_through": cutoff.isoformat(),
-        "fetched_at": now.timestamp(),
-    }
-    # NEVER cache an empty result: that happens mostly during a refresh (cache just
-    # cleared + Yahoo throttled by that refresh). Caching the empty answer would leave the
+    payload = contract_history_cache.build_payload(
+        symbol, period, history, cutoff, now.timestamp())
+    # NEVER cache an empty result: that happens mostly during a refresh (Yahoo
+    # throttled by a refresh). Caching the empty answer would leave the
     # contract blank until the next refresh ("No chart history"). This way the next call
     # fetches fresh — as soon as Yahoo answers again, the history is there. An outdated
-    # cache we were trying to replace is still served meanwhile: an older chart beats a
-    # blank one, and card mode refuses to export it anyway.
+    # cache we were trying to replace is still served meanwhile to a click: an older chart
+    # beats a blank one, and card mode refuses to export it anyway.
+    # Never to a preload, though. While a refresh holds the lock the gateway declines every
+    # preload request, so this branch is where the warm-up lands for every out-of-date file;
+    # the page keeps whatever non-empty answer it gets on the contract, and a later click
+    # would reuse the old rows without ever asking at interactive. The empty answer is not
+    # kept, so that click asks for itself.
     if not history:
-        return cached if isinstance(cached, dict) and cached.get("history") else payload
+        if (priority == yahoo_gateway.PRIORITY_INTERACTIVE
+                and isinstance(cached, dict) and cached.get("history")):
+            return cached
+        return payload
     with _contract_cache_lock:
-        cache_dir = os.path.dirname(cache_path)
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            # Write atomically (tempfile + os.replace) so a crash / full disk cannot
-            # leave half a JSON file behind that crashes every later read.
-            fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".ch_", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
-                os.replace(tmp, cache_path)
-            except OSError:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-        except OSError:
-            pass   # Cache is best-effort: on FS trouble we still serve the history.
+        # Best-effort: on FS trouble we still serve the history.
+        contract_history_cache.write_payload(cache_path, payload)
     return payload
 
 
@@ -1353,15 +1312,6 @@ def serve(open_browser=True):
         httpd.shutdown()
 
 
-def _first_run_generate():
-    """Generate ff_data/ in the background on first launch (frozen), then the splash's
-    poll loop redirects to the dashboard."""
-    try:
-        generate_dashboard()
-    except SystemExit:
-        pass
-
-
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--refresh", action="store_true")
@@ -1371,6 +1321,7 @@ def main():
     parser.add_argument("--no-serve", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--run-generator", action="store_true")
+    parser.add_argument("--first-pass", action="store_true")
     args = parser.parse_args()
 
     print("═" * 60)
@@ -1385,8 +1336,7 @@ def main():
         # Re-exec entry point for the frozen build: behaves like running
         # commodity_dashboard.py as __main__ (cwd is already DATA_ROOT).
         import commodity_dashboard as cd
-        data = cd.gather_commodity_data(count=6)
-        cd.generate_html(data)
+        cd.run_generator(args.first_pass)
         return
 
     # Quarantined DMG/Download launches run via macOS App-Translocation from a
@@ -1398,13 +1348,16 @@ def main():
 
     check_python()
     ensure_packages()
-    if (args.refresh or not dashboard_exists()) and not (FROZEN and not dashboard_exists() and not args.refresh):
-        if args.refresh:
-            # Always pull the freshest yfinance data (no EoD skip-gate any more).
-            # The generator still stores settled EoD only — never intraday.
-            foreground_refresh()
+    first_run = False
+    if args.refresh:
+        # Always pull the freshest yfinance data (no EoD skip-gate any more).
+        # The generator still stores settled EoD only — never intraday.
+        foreground_refresh()
+    elif not dashboard_exists():
+        if args.no_serve:
+            generate_dashboard()      # data-only mode: blocking, complete
         else:
-            generate_dashboard()      # first run with no data — unconditional
+            first_run = True
     else:
         step("Using existing dashboard files")
         ok("No new data download needed")
@@ -1413,20 +1366,20 @@ def main():
         ok("Web server was not started")
         return
 
-    # Warm start (data already present, no CLI --refresh): serve instantly and always
-    # kick a background refresh so the page is pulling the freshest yfinance data on
-    # every open. The in-watchlist bar polls /api/refresh-status. (The lock serializes
-    # against any other refresh; the generator still ingests settled EoD only.)
-    if (not args.refresh) and dashboard_exists():
-        start_background_refresh("auto")
-
-    # Frozen first launch with no data yet: open the splash and fetch in the background,
-    # so a double-clicked app shows progress instead of a dead window. (Dev keeps the
-    # original blocking behaviour — data already generated above.)
-    if FROZEN and not dashboard_exists():
+    if first_run:
+        # First launch with no data yet (frozen and source alike): open the splash and
+        # run the ordinary locked background refresh with a first pass, so the page
+        # opens after the fronts phase and phase 2 lands in place via data_version. A lock
+        # held elsewhere is retried rather than leaving the splash waiting (_start_first_run).
         global HTML_FILE
         HTML_FILE = "loading.html"
-        threading.Thread(target=_first_run_generate, daemon=True).start()
+        _start_first_run()
+    elif not args.refresh:
+        # Warm start (data already present, no CLI --refresh): serve instantly and always
+        # kick a background refresh so the page is pulling the freshest yfinance data on
+        # every open. The in-watchlist bar polls /api/refresh-status. (The lock serializes
+        # against any other refresh; the generator still ingests settled EoD only.)
+        start_background_refresh("auto")
     serve(open_browser=not args.no_browser)
 
 
