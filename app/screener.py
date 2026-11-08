@@ -64,14 +64,17 @@ __all__ = [
     '_seasonal_aggregate_dir',
     '_seasonal_confirmed_votes',
     '_seasonal_curve_direction',
+    '_seasonal_direction_at',
     '_seasonal_distinct_curves',
     '_seasonal_drop_minor_seasons',
     '_seasonal_gated_sequence',
+    '_seasonal_min_move',
     '_seasonal_path',
     '_seasonal_runs',
     '_seasonal_season_share',
     '_seasonal_signal_at',
     '_seasonal_smear',
+    '_seasonal_vote',
     '_seasonal_window_curve',
     '_signal_dir',
     '_three_three_seasonal_at',
@@ -81,6 +84,7 @@ __all__ = [
     'build_three_three_periods',
     'mark_seasonal_roll_days',
     'merge_three_three_periods',
+    'seasonal_curves_by_market',
     'seasonal_runway',
     'screener_score',
 ]
@@ -267,6 +271,15 @@ def _seasonal_path(curve, start, days):
     return [curve[i % n] + (i // n) * carry for i in range(start, start + days + 1)]
 
 
+def _seasonal_min_move(curve):
+    """The move a forward window must make on this curve to count: scaled to the curve's own
+    yearly range, with a floor and a cap. None for a curve too flat to ever fire."""
+    curve_range = max(curve) - min(curve)
+    if curve_range < 0.5:
+        return None
+    return max(0.35, min(1.15, curve_range * 0.12))
+
+
 def _seasonal_curve_direction(curve, cur):
     """+1 / -1 if a significant seasonal trend is genuinely UNDERWAY at day-of-year
     `cur`, else 0. The signal is evaluated strictly on the forward window
@@ -277,11 +290,16 @@ def _seasonal_curve_direction(curve, cur):
     ends_soon bonus). Move is scaled to the curve's own yearly range (with a floor),
     so flat years never fire. A window over the year end reads on into next January
     (_seasonal_path)."""
-    curve_range = max(curve) - min(curve)
-    if curve_range < 0.5:
+    return _seasonal_direction_at(curve, cur, _seasonal_min_move(curve))
+
+
+def _seasonal_direction_at(curve, cur, min_move):
+    """_seasonal_curve_direction with the curve's _seasonal_min_move already taken: the vote
+    over a whole year reads it once per curve, not once per day (a 365-element max and min
+    each time, ~60 % of the vote's cost)."""
+    if min_move is None:
         return 0
     min_consistency = 0.62
-    min_move = max(0.35, min(1.15, curve_range * 0.12))
     path = _seasonal_path(curve, cur, SEASONAL_LOOKAHEAD_DAYS)
     move = path[-1] - path[0]
     if abs(move) < min_move:
@@ -446,7 +464,11 @@ def _seasonal_distinct_curves(seasonal_history):
 def _seasonal_aggregate_dir(curves, doy):
     """3-of-4 vote across the distinct curves at one day-of-year -> +1 / -1 / 0.
     Fires only when >=3 curves share a direction AND none points the opposite way."""
-    dirs = [_seasonal_curve_direction(c, doy) for c in curves]
+    return _seasonal_vote([_seasonal_curve_direction(c, doy) for c in curves])
+
+
+def _seasonal_vote(dirs):
+    """The 3-of-4 rule over one day's curve directions (see _seasonal_aggregate_dir)."""
     bull = dirs.count(1)
     bear = dirs.count(-1)
     if bull >= 3 and bear == 0:
@@ -557,7 +579,9 @@ def _seasonal_gated_sequence(curves):
     n = 365
     if not curves or len(curves) < 4:
         return [0] * n
-    raw = [_seasonal_aggregate_dir(curves, d) for d in range(n)]
+    moves = [_seasonal_min_move(c) for c in curves]       # _seasonal_aggregate_dir, per day
+    raw = [_seasonal_vote([_seasonal_direction_at(c, d, m) for c, m in zip(curves, moves)])
+           for d in range(n)]
     conf = _seasonal_confirmed_votes(raw)
     return _seasonal_smear(_seasonal_drop_minor_seasons(conf, curves))
 
@@ -788,8 +812,20 @@ def _screener_structure_signal(contracts, spread_series=None, as_of=None):
     return "premium" if front > nxt else "discount"
 
 
-def build_screener_summary(by_cat):
-    """One lean record per market with the three screener signals and their score."""
+def seasonal_curves_by_market(by_cat):
+    """{market key: _seasonal_distinct_curves of its seasonal history}, built once per run
+    and handed to build_screener_summary and build_three_three_log, which read the same
+    curves (each used to build its own)."""
+    return {key: _seasonal_distinct_curves(
+                (mk.get("continuous_contract") or {}).get("seasonal_history") or [])
+            for payload in by_cat.values() for key, mk in payload.items()}
+
+
+def build_screener_summary(by_cat, seasonal_curves=None):
+    """One lean record per market with the three screener signals and their score.
+    `seasonal_curves` is seasonal_curves_by_market(by_cat), when the caller already has it;
+    a market it does not name builds its own."""
+    seasonal_curves = seasonal_curves or {}
     out = []
     for cat, payload in by_cat.items():
         for key, mk in payload.items():
@@ -799,7 +835,8 @@ def build_screener_summary(by_cat):
             # Build the distinct seasonal curves once and share them between the
             # signal and the event (both otherwise rebuild them from scratch).
             seasonal_history = cc.get("seasonal_history") or []
-            seasonal_curves = _seasonal_distinct_curves(seasonal_history)
+            curves = (seasonal_curves[key] if key in seasonal_curves
+                      else _seasonal_distinct_curves(seasonal_history))
             # Latest settled bar of this market — the reference the structure signal
             # measures the calendar spread's lag against (see _screener_structure_signal).
             history = cc.get("history") or []
@@ -811,7 +848,7 @@ def build_screener_summary(by_cat):
                 "slug": _slug(cat),
                 "last": front.get("last"),
                 "change_pct": front.get("change_pct"),
-                "seasonal": _screener_seasonal_signal(seasonal_history, curves=seasonal_curves),
+                "seasonal": _screener_seasonal_signal(seasonal_history, curves=curves),
                 "cot_hedge": _screener_cot_hedge_signal(mk.get("cot_series") or []),
                 # The same verdict one COT release earlier. The window is anchored on the
                 # series' LAST point (see _screener_cot_hedge_signal), so dropping that
@@ -840,7 +877,7 @@ def build_screener_summary(by_cat):
                     spread_series=mk.get("calendar_spread_series") or [],
                     as_of=latest_bar_date,
                 ),
-                "seasonal_event": _screener_seasonal_event(seasonal_history, curves=seasonal_curves),
+                "seasonal_event": _screener_seasonal_event(seasonal_history, curves=curves),
             }
             row["score"] = screener_score(row)
             out.append(row)
@@ -981,23 +1018,28 @@ def merge_three_three_periods(previous, fresh, window_start):
     return kept + [dict(p) for p in (fresh or [])]
 
 
-def build_three_three_log(by_cat, screener_rows, previous=None, today=None):
+def build_three_three_log(by_cat, screener_rows, previous=None, today=None,
+                          seasonal_curves=None):
     """{key: {active, periods, runway?}} for every market that has a 3/3 period to show.
 
     `previous` is the log as it stands on disk (see merge_three_three_periods) and
     `screener_rows` is what build_screener_summary just produced — the live verdict for
     today, which both opens a period the reconstruction cannot reach (a market with no
-    usable spread history is 3/3 from today) and closes one it refutes.
+    usable spread history is 3/3 from today) and closes one it refutes. `seasonal_curves`
+    is the map build_screener_summary was given (seasonal_curves_by_market); a market it
+    does not name builds its own curves.
     """
+    seasonal_curves = seasonal_curves or {}
     previous = previous or {}
     today = today or date.today().isoformat()
     scores = {r.get("key"): r.get("score") for r in (screener_rows or [])}
     log = {}
     for payload in by_cat.values():
         for key, mk in payload.items():
+            curves = seasonal_curves.get(key)
             periods = merge_three_three_periods(
                 (previous.get(key) or {}).get("periods") or [],
-                build_three_three_periods(mk),
+                build_three_three_periods(mk, curves),
                 _spread_window_start(mk))
             score = scores.get(key)
             cur_dir = "bullish" if score == 3 else "bearish" if score == -3 else None
@@ -1021,7 +1063,7 @@ def build_three_three_log(by_cat, screener_rows, previous=None, today=None):
             entry = {"active": active, "periods": periods}
             if active and cur_dir:
                 try:
-                    rw = seasonal_runway(mk, today=date.fromisoformat(today))
+                    rw = seasonal_runway(mk, today=date.fromisoformat(today), curves=curves)
                 except ValueError:
                     rw = None
                 if rw:

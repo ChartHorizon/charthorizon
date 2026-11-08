@@ -63,6 +63,7 @@ __all__ = [
     '_merge_volume_series',
     '_oi_series_from_cot',
     '_recent_max_gap_days',
+    '_recent_max_gap_of_dates',
     '_safe_cache_token',
     '_series_dates',
     '_series_health',
@@ -148,7 +149,11 @@ def _recent_max_gap_days(rows, window_days=YF_HISTORY_GAP_WINDOW_DAYS):
 
     Returns 0 for a series with fewer than two dates in the window.
     """
-    dates = _series_dates(rows)
+    return _recent_max_gap_of_dates(_series_dates(rows), window_days)
+
+
+def _recent_max_gap_of_dates(dates, window_days=YF_HISTORY_GAP_WINDOW_DAYS):
+    """_recent_max_gap_days over the series' _series_dates, for a caller that has them."""
     if len(dates) < 2:
         return 0
     cutoff = dates[-1] - timedelta(days=window_days)
@@ -198,7 +203,7 @@ def _series_health(rows, *, kind="generic"):
         # What the gappiness gate judges. Reported beside max_gap_days so the two can
         # disagree visibly: "gappy long ago, clean where it counts" is a normal, healthy
         # state for a market whose early Yahoo history is sparse.
-        "recent_gap_days": _recent_max_gap_days(rows),
+        "recent_gap_days": _recent_max_gap_of_dates(dates),   # the same dates, parsed once
     }
 
 

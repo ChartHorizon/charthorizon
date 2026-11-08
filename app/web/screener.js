@@ -726,7 +726,7 @@ async function wkEnsureFrontHistory(cfg) {
     const period = (typeof CONTRACT_HISTORY_PERIOD !== 'undefined') ? CONTRACT_HISTORY_PERIOD : '5y';
     const res = await fetch(`/api/contract-history?symbol=${encodeURIComponent(front.yf_symbol)}&period=${period}`);
     const payload = await res.json().catch(() => ({}));
-    if (res.ok && Array.isArray(payload.history)) front.chart_history = payload.history;
+    if (res.ok && Array.isArray(payload.history)) front.chart_history = drawableContractHistory(payload.history);
   } catch (e) { /* fall back to continuous */ }
 }
 

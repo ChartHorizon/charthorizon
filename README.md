@@ -58,6 +58,11 @@ ChartHorizon ships with **no data**. On first launch it fetches end-of-day data 
 per-user folder on your machine and renders it locally. It runs a small web server on
 `localhost` and opens your browser — nothing leaves your computer.
 
+It can tell you when a newer version is out, but only if you ask: **Settings → Updates**
+has a *Check now* button and an automatic daily check, both off until you use them. Either
+one downloads a single small file from chart-horizon.com and compares versions on your
+machine — the request carries nothing about you, not even the version you run.
+
 ## The same board, in writing
 
 The desk that builds this reads the board every evening and writes up the markets worth

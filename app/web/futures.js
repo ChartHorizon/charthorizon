@@ -15,7 +15,7 @@ async function _fetchContractHistoryRows(symbol, opts) {
   if (!res.ok) {
     throw new Error(payload.error || 'Contract history could not be loaded.');
   }
-  return payload.history || [];
+  return drawableContractHistory(payload.history);
 }
 
 async function fetchContractHistory(contract, opts) {

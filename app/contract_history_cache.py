@@ -21,8 +21,9 @@ except ImportError:  # Python 3.7
     ZoneInfo = None
 
 __all__ = [
-    "PERIOD", "SETTLE_READY_ET", "eastern_now", "latest_settled_eod_date",
-    "cache_path", "build_payload", "write_payload", "prune",
+    "PERIOD", "SETTLE_READY_ET", "EXPIRED_SETTLE_DAYS", "eastern_now",
+    "latest_settled_eod_date", "cache_path", "build_payload", "is_complete_answer",
+    "write_payload", "keep", "prune",
 ]
 
 PERIOD = "5y"
@@ -30,14 +31,22 @@ SETTLE_READY_ET = time(17, 30)
 # write_payload's temps (".ch_*.tmp") older than this belong to a killed writer: a live one
 # holds its temp for the length of one json.dump.
 STALE_TEMP_SECONDS = 3600
+# How long after its last trading day a contract's history is taken as final, so that one
+# answer serves every later settle (is_complete_answer). A margin, not a measurement: the
+# scheduled expiry (compute_expiry) can sit a few days off the exchange's real one.
+EXPIRED_SETTLE_DAYS = 7
+
+
+def _eastern_tz():
+    if ZoneInfo is not None:
+        return ZoneInfo("America/New_York")
+    from dateutil import tz
+    return tz.gettz("America/New_York")
 
 
 def eastern_now() -> datetime:
     """Current New York time; dateutil keeps this Python 3.7 compatible."""
-    if ZoneInfo is not None:
-        return datetime.now(ZoneInfo("America/New_York"))
-    from dateutil import tz
-    return datetime.now(tz.gettz("America/New_York"))
+    return datetime.now(_eastern_tz())
 
 
 def _is_session_day(day: date) -> bool:
@@ -80,18 +89,75 @@ def cache_path(symbol: str, period: str, data_dir: str = "ff_data") -> str:
     return os.path.join(data_dir, "contract_history", f"{safe_symbol}_{safe_period}.json")
 
 
-def build_payload(symbol: str, period: str, history: list, settled_through: date,
-                  fetched_at: float) -> dict:
-    return {
+def build_payload(symbol: str, period: str, history: list, settled_through: date | None,
+                  fetched_at: float, complete_for: date | None = None,
+                  expiry: str | None = None,
+                  contract_type: str = "single_expiry_month") -> dict:
+    """The one file shape both processes read.
+
+    `settled_through` is the server's: the settle this file can be served for without a
+    refetch (_contract_history_is_current). The generator passes None for an answer whose
+    rows stop before that settle (a thin month that did not print, or no rows at all), so the
+    server refetches it at once instead of holding it behind its 600 s retry floor.
+
+    `complete_for` and `expiry` are the generator's and only it writes them (the server's
+    payload carries neither, so a file the server rewrites drops them): this file is Yahoo's
+    whole answer as of the settle `complete_for` — see is_complete_answer."""
+    payload = {
         "symbol": symbol,
         "period": period,
         "source": "yfinance",
-        "contract_type": "single_expiry_month",
+        "contract_type": contract_type,
         "history": history,
         # Which settle this answer was built for, and when: _contract_history_is_current.
-        "settled_through": settled_through.isoformat(),
+        "settled_through": settled_through.isoformat() if settled_through else None,
         "fetched_at": fetched_at,
     }
+    if complete_for is not None:
+        payload["complete_for"] = complete_for.isoformat()
+    if expiry:
+        payload["expiry"] = str(expiry)[:10]
+    return payload
+
+
+def _iso_date(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def is_complete_answer(payload, cutoff: date) -> bool:
+    """True when the generator may take this file's rows instead of asking Yahoo, for the
+    session settled at `cutoff`.
+
+    The generator ingests settled bars only, so within one settle a second request can only
+    return what the first one did. Three conditions make that safe:
+
+      * the generator wrote it (`complete_for`): the rows are its own ingest rows, and a file
+        the server rewrote carries no such field;
+      * it was asked AFTER its session's calendar day ended in New York. A run straight after
+        the settle (the 23:30 CET job is 17:30 ET) may hold a bar whose volume Yahoo is still
+        completing; that file is asked again once, by the next run after midnight ET;
+      * it answers this very settle — or the contract had expired more than
+        EXPIRED_SETTLE_DAYS before the settle it answers, when nothing about it changes again.
+
+    Anything unreadable is simply asked again."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("history"), list):
+        return False
+    complete_for = _iso_date(payload.get("complete_for"))
+    if complete_for is None or complete_for > cutoff:
+        return False
+    try:
+        fetched = datetime.fromtimestamp(float(payload.get("fetched_at")), _eastern_tz())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    if fetched.date() <= complete_for:
+        return False
+    if complete_for == cutoff:
+        return True
+    expiry = _iso_date(payload.get("expiry"))
+    return expiry is not None and expiry + timedelta(days=EXPIRED_SETTLE_DAYS) < complete_for
 
 
 def write_payload(path: str, payload: dict, replace=os.replace) -> bool:
@@ -115,6 +181,15 @@ def write_payload(path: str, payload: dict, replace=os.replace) -> bool:
             except OSError:
                 pass
         return False
+
+
+def keep(path: str) -> None:
+    """Mark a file as still in use for prune(), which goes by mtime: a file the generator
+    takes instead of rewriting is otherwise never touched again. Never raises."""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
 
 
 def prune(max_age_days: float = 7, now_ts: float | None = None,

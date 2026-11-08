@@ -133,6 +133,10 @@ function openSettings() {
   if (typeof renderSettingsTimezone === 'function') renderSettingsTimezone();
   if (typeof renderSettingsDrawings === 'function') renderSettingsDrawings();
   if (typeof renderSettingsBackup === 'function') renderSettingsBackup();
+  if (typeof renderSettingsUpdates === 'function') {         // update.js
+    renderSettingsUpdates();
+    loadUpdateState().then(() => renderSettingsUpdates());
+  }
   if (typeof renderSettingsAbout === 'function') {
     renderSettingsAbout();                                    // draw immediately (version may still be pending)
     loadSettingsVersion().then(() => renderSettingsAbout());  // and redraw once the server has answered

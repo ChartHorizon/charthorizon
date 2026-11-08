@@ -75,6 +75,7 @@ from contracts import build_contract_candidates, build_total_volume_contract_can
 from local_first_merge import _merge_volume_series
 import yahoo_gateway
 import dead_symbols
+import contract_history_cache
 
 __all__ = [
     'YahooFinanceClient',
@@ -108,6 +109,80 @@ __all__ = [
 
 
 
+# The period of the native `=F` price chart (fetch_price_chart_history). The generator keeps
+# that answer in ff_data/contract_history/ beside the single contracts' 5y ones.
+CONTINUOUS_CHART_PERIOD = "20y"
+# The periods a generator-written file is kept at, i.e. the ones _reused_frame looks for.
+_REUSE_PERIODS = (contract_history_cache.PERIOD, CONTINUOUS_CHART_PERIOD)
+
+# Reuse of the files of one settle (contract_history_cache.is_complete_answer). Off unless a
+# generator run turned it on for its settle — the server, the content bot and every test that
+# imports this module keep asking Yahoo as before. Set once before a run's pool starts and
+# cleared after it, so the workers only ever read it; the count is under the lock.
+_reuse_lock = threading.Lock()
+_reuse = {"cutoff": None, "count": 0}
+
+
+def enable_cache_reuse(cutoff):
+    """Let this process answer a 1d request from the file a previous run wrote for the
+    settle `cutoff`, instead of asking Yahoo again (see YahooFinanceClient._reused_frame)."""
+    with _reuse_lock:
+        _reuse["cutoff"] = cutoff
+        _reuse["count"] = 0
+
+
+def disable_cache_reuse():
+    with _reuse_lock:
+        _reuse["cutoff"] = None
+
+
+def cache_reuse_cutoff():
+    """The settle reuse is on for, or None."""
+    return _reuse["cutoff"]
+
+
+def cache_reuse_count():
+    """How many answers have been read from the files since reuse was enabled."""
+    return _reuse["count"]
+
+
+def _frame_from_rows(rows):
+    """A Yahoo-shaped daily frame (Open/High/Low/Close/Volume on a date index) rebuilt from a
+    file's rows, so every reader of a frame — quote(), chart_history(), _settlement_rows —
+    works on it unchanged. The rows are the generator's own ingest rows (chart_history), and
+    rebuilding them changes nothing: the rounding and both trims are idempotent. None when a
+    row cannot be read; the caller then asks Yahoo."""
+    def num(value):
+        return float("nan") if value is None else float(value)
+    try:
+        import pandas as pd
+        index = pd.DatetimeIndex([date.fromisoformat(str(r["date"])[:10]) for r in rows])
+        return pd.DataFrame({
+            "Open": [num(r["open"]) for r in rows],
+            "High": [num(r["high"]) for r in rows],
+            "Low": [num(r["low"]) for r in rows],
+            "Close": [num(r["close"]) for r in rows],
+            "Volume": [num(r.get("volume")) for r in rows],
+        }, index=index)
+    except (ImportError, KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def load_kept_answer(symbol, period, cutoff):
+    """The frame of the file a run kept for (symbol, period), when it is a complete answer
+    for the settle `cutoff` (contract_history_cache.is_complete_answer) and its rows can be
+    read; else None. The one test of "may this file stand in for a request", shared by the
+    reader (_reused_frame) and the generator's writer, which keeps such a file unchanged."""
+    try:
+        with open(contract_history_cache.cache_path(symbol, period), encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not contract_history_cache.is_complete_answer(payload, cutoff):
+        return None
+    return _frame_from_rows(payload["history"])
+
+
 # Approximate calendar span of each yfinance `period` string, for the run cache's
 # superset lookup. Only the ORDER matters — a request is served from any cached frame
 # that covers at least as much ground, sliced back to the requested window.
@@ -124,6 +199,7 @@ class YahooFinanceClient:
         self._ticker_cache = {}
         self._quote_cache = {}
         self._history_cache = {}
+        self._reused_keys = set()   # (symbol, period, interval) this client read from a file
 
     def _ticker(self, symbol):
         if yf is None:
@@ -211,6 +287,10 @@ class YahooFinanceClient:
         if superset is not None:
             return superset            # derived; not re-cached (it would duplicate memory)
 
+        reused = self._reused_frame(symbol, period, interval)
+        if reused is not None:
+            return reused
+
         ticker = self._ticker(symbol)
         if ticker is None:
             return None
@@ -232,6 +312,34 @@ class YahooFinanceClient:
         if hist is not None:
             self._history_cache[cache_key] = hist
         return hist
+
+    def _reused_frame(self, symbol, period, interval):
+        """The answer a previous run kept for this settle (enable_cache_reuse), cut to
+        `period`, else None. Read from a file at the smallest kept period that covers the
+        request, and cached like a fetched frame, so later reads and the hand-off to the
+        next phase work as they always have. A `max` request is never answered: no file
+        covers it."""
+        cutoff = _reuse["cutoff"]
+        want = _PERIOD_DAYS.get(period)
+        if cutoff is None or interval != "1d" or want is None:
+            return None
+        for kept in _REUSE_PERIODS:
+            if _PERIOD_DAYS[kept] < want:
+                continue
+            frame = load_kept_answer(symbol, kept, cutoff)
+            if frame is None:
+                continue
+            key = (symbol, kept, interval)
+            self._history_cache[key] = frame
+            self._reused_keys.add(key)
+            with _reuse_lock:
+                _reuse["count"] += 1
+            return frame if kept == period else self._cached_superset(symbol, period, interval)
+        return None
+
+    def answered_from_cache(self, symbol, period=contract_history_cache.PERIOD):
+        """True when this client read `symbol`'s answer from a file instead of asking."""
+        return (symbol, period, "1d") in self._reused_keys
 
     def quote(self, yf_symbol, quiet=False):
         if yf_symbol in self._quote_cache:
@@ -363,18 +471,23 @@ class YahooFinanceClient:
             return []
 
         try:
+            # Column-wise, not iterrows(): one Series per row made this ~26 ms for a 5y
+            # contract, which a refresh hid behind Yahoo's rate limit and a run that reads
+            # its answers back from ff_data/contract_history (no network wait) did not —
+            # ~440 contracts per run. Same values, same order (test_cache_reuse.RowBuildTest).
+            dates = hist.index.strftime("%Y-%m-%d")
+            cols = [hist[name].tolist() for name in ("Open", "High", "Low", "Close", "Volume")]
             out = []
-            for idx, row in hist.iterrows():
-                o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-                if any(v != v for v in (o, h, l, c)):  # NaN-Check
+            for day, o, h, l, c, v in zip(dates, *cols):
+                if o != o or h != h or l != l or c != c:  # NaN-Check
                     continue
                 out.append({
-                    "date": idx.strftime("%Y-%m-%d"),
+                    "date": day,
                     "open": _round_price(float(o)),
                     "high": _round_price(float(h)),
                     "low": _round_price(float(l)),
                     "close": _round_price(float(c)),
-                    "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else None,
+                    "volume": int(v) if v == v else None,
                 })
             return _drop_unsettled_tail(_trim_leading_flat(out))
         except Exception as e:
@@ -447,7 +560,7 @@ def _note_contract_result(contract, rows, today=None):
     dead_symbols.record_empty(_dead_memo, symbol, contract.get("expiry"), today)
 
 
-def fetch_chart_history(yf_continuous, period="20y"):
+def fetch_chart_history(yf_continuous, period=CONTINUOUS_CHART_PERIOD):
     """
     Fetches daily OHLC + volume history for a yfinance chart symbol.
     ~20 years of daily data -> Daily/Weekly/Monthly/Quarterly and all ranges can be
@@ -466,7 +579,7 @@ def fetch_chart_history(yf_continuous, period="20y"):
         return []
 
 
-def fetch_price_chart_history(cfg, period="20y"):
+def fetch_price_chart_history(cfg, period=CONTINUOUS_CHART_PERIOD):
     """Loads the main chart history through the configured yfinance symbol."""
     symbol = cfg.get("yf_continuous")
     return symbol, fetch_chart_history(symbol, period=period)
@@ -1235,10 +1348,13 @@ def resolve_settled_contracts(cfg, history, contracts, fetch=None):
         return {}
     if fetch is None:
         def fetch(symbol):
-            frame = _yf_client._history(symbol, "1mo")
-            if frame is None:                 # the gateway declined: no answer about this symbol
+            # Asked at the period the generator keeps (one request either way, Yahoo throttles
+            # requests, not bytes), so a probe of a month the chain skips is kept for the next
+            # run of this settle like every other answer; only its last month is read.
+            if _yf_client._history(symbol, contract_history_cache.PERIOD) is None:
+                # the gateway declined: no answer about this symbol
                 raise yahoo_gateway.RateLimitedError(f"{symbol}: gateway declined the request")
-            return _settlement_rows(frame)
+            return _settlement_rows(_yf_client.cached_history(symbol, "1mo"))
     last_day = trailing[-1][0]
     found = {}
     for symbol in _settled_contract_candidates(cfg, contracts, date.fromisoformat(last_day)):

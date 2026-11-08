@@ -437,9 +437,9 @@ class FrontsCacheFileTest(_FrontsBase):
         seen = []
         real = cd._write_contract_history
 
-        def recorder(symbol, now_et=None):
+        def recorder(symbol, now_et=None, **kw):
             seen.append(now_et)
-            return real(symbol, now_et=now_et)
+            return real(symbol, now_et=now_et, **kw)
         with mock.patch.object(chc, "eastern_now", clock), \
                 mock.patch.object(cd, "_write_contract_history", recorder):
             self.run_gather(workers=2)
@@ -467,16 +467,25 @@ class SettleEdgeTest(_FrontsBase):
         self.assertEqual(payload["history"][-1]["date"], "2026-09-04")
         self.assertEqual(self.requests, [])
 
-    def test_dropped_current_bar_writes_no_file(self):
+    def test_dropped_current_bar_is_never_served_as_current(self):
         self._at(datetime(2026, 9, 11, 18, 0, tzinfo=ET))
-        # 1,000 lots against a 50,000 norm: under 15 %, so the generator drops 09-11 ...
+        # 1,000 lots against a 50,000 norm: under 15 %, so the generator drops 09-11. The
+        # file is the next run's (complete_for), but carries no server stamp: inside the
+        # 600 s retry floor the server must still refetch it, or the 23:30 bot's card would
+        # be STALE_CARD on Thursday's candle.
         self._seed("CLV26.NYM", _frame_to(date(2026, 9, 11), days=300, freq="B",
                                           volume=50000, last_volume=1000))
-        self.assertFalse(cd._write_contract_history("CLV26.NYM", now_et=self.now))
-        self.assertFalse(os.path.exists(chc.cache_path("CLV26.NYM", "5y")))
-        # ... while the same frame with a full 09-11 session is written.
+        self.assertTrue(cd._write_contract_history("CLV26.NYM", now_et=self.now))
+        short = self._payload("CLV26.NYM")
+        self.assertEqual(short["history"][-1]["date"], "2026-09-10")
+        self.assertIsNone(short["settled_through"])
+        self.assertFalse(start._contract_history_is_current(
+            short, date(2026, 9, 11), self.now.timestamp() + 1))
+        # ... while the same frame with a full 09-11 session is served as it is.
         self._seed("CLX26.NYM", _frame_to(date(2026, 9, 11), days=300, freq="B", volume=50000))
         self.assertTrue(cd._write_contract_history("CLX26.NYM", now_et=self.now))
+        self.assertTrue(start._contract_history_is_current(
+            self._payload("CLX26.NYM"), date(2026, 9, 11), self.now.timestamp() + 1))
         self.assertEqual(self.requests, [])
 
     def _payload(self, symbol):
@@ -859,11 +868,144 @@ class FirstPassGatherTest(_FirstPassBase):
         self.assertEqual(hits, [])
 
 
+STORED_SEASONAL_CLOSE = 9.25
+STORED_TOTAL_VOLUME = 60000
+
+
+class WarmFirstPassTest(_FirstPassBase):
+    """Every background refresh writes a first pass, and on a warm start it lands on the
+    open page over a complete board from the previous run. It must put the front months
+    on that board without making any of the rest worse until phase 2 replaces it."""
+
+    def stored_board(self, volume_end):
+        """The previous run's complete board, on disk: six priced contracts, a spread,
+        this year's seasonal history and a total-volume series ending on `volume_end`."""
+        vol_days = [d.date().isoformat()
+                    for d in pd.date_range(end=pd.Timestamp(volume_end), periods=20, freq="D")]
+        season_days = [d.date().isoformat()
+                       for d in pd.date_range(end=pd.Timestamp(date.today()), periods=30,
+                                              freq="D")]
+        stored = {}
+        for k in KEYS:
+            cands = self.cands[k][:6]
+            stored[k] = {
+                "display_name": self.markets[k]["display_name"],
+                "category": self.markets[k]["category"],
+                "contracts": [dict(c, last=50.0 + i, change=0.25, change_pct=0.5,
+                                   volume=3000 + i, open_interest=None, available=True,
+                                   source="yfinance") for i, c in enumerate(cands)],
+                "calendar_spread_series": [
+                    {"date": d, "spread": -0.4, "front_contract": cands[1]["contract_symbol"],
+                     "next_contract": cands[2]["contract_symbol"], "front_close": 51.0,
+                     "next_close": 51.4, "source": "yfinance_liquid_contracts"}
+                    for d in vol_days],
+                "continuous_contract": {
+                    "history": [],
+                    "seasonal_history": [
+                        {"date": d, "open": STORED_SEASONAL_CLOSE,
+                         "high": STORED_SEASONAL_CLOSE, "low": STORED_SEASONAL_CLOSE,
+                         "close": STORED_SEASONAL_CLOSE, "volume": 100}
+                        for d in season_days],
+                    "total_volume_series": [
+                        {"date": d, "volume": STORED_TOTAL_VOLUME,
+                         "source": "yfinance_contract_sum",
+                         "method": "summed_yfinance_single_contract_histories",
+                         "contract_count": 6} for d in vol_days],
+                },
+            }
+        os.makedirs("ff_data", exist_ok=True)
+        with open(os.path.join("ff_data", "data_energy.json"), "w", encoding="utf-8") as f:
+            json.dump(stored, f)
+        return stored
+
+    def config(self):
+        with open(os.path.join("ff_data", "config.js"), encoding="utf-8") as f:
+            raw = f.read()
+        return json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+
+    def total_volume(self, key):
+        return self.written()[key]["continuous_contract"]["total_volume_series"]
+
+    def test_warm_first_pass_reuses_the_stored_seasonal_history(self):
+        # The seasonal `max` is fetched once a year. A warm first pass must not fetch it 39
+        # times in front of the board it exists to deliver early.
+        stored = self.stored_board(volume_end=self.cutoff)
+        fronts = self.run_fronts(existing=stored)
+        after_fronts = len(self.requests)
+        dataset = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            for k in KEYS:
+                _k, entry, _added = cd._first_pass_market(k, self.markets[k], {}, 6, fronts[k])
+                self.assertEqual(entry["continuous_contract"]["seasonal_history"], [])
+                dataset[k] = entry
+        self.assertEqual(self.requests[after_fronts:],
+                         [(self.markets[k]["yf_continuous"], "20y") for k in KEYS])
+        self.generate(dataset, first_pass=True)
+        for k in KEYS:
+            seasonal = self.written()[k]["continuous_contract"]["seasonal_history"]
+            self.assertTrue(seasonal)
+            self.assertEqual({r["close"] for r in seasonal}, {STORED_SEASONAL_CLOSE})
+
+    def test_warm_first_pass_holds_total_volume_at_the_stored_last_day(self):
+        # On the first pass only lead and next carry the new session, so its sum there is a
+        # fraction of the market's (a third, for crude). The newest bar waits for phase 2.
+        held = self.cutoff - timedelta(days=1)
+        stored = self.stored_board(volume_end=held)
+        first = self.first_pass_dataset(existing=stored)
+        self.generate(first, first_pass=True)
+        for k in KEYS:
+            rows = self.total_volume(k)
+            self.assertEqual(rows[-1]["date"], held.isoformat())
+            stored_days = {r["date"] for r in
+                           stored[k]["continuous_contract"]["total_volume_series"]}
+            self.assertEqual({r["volume"] for r in rows if r["date"] in stored_days},
+                             {STORED_TOTAL_VOLUME})
+        self.generate(self.complete_dataset(first))
+        for k in KEYS:
+            self.assertEqual(self.total_volume(k)[-1]["date"], self.cutoff.isoformat())
+
+    def test_a_true_first_pass_still_shows_the_newest_volume(self):
+        # Nothing stored to hold to: a first run's board has only what this run fetched.
+        self.generate(self.first_pass_dataset(), first_pass=True)
+        for k in KEYS:
+            self.assertEqual(self.total_volume(k)[-1]["date"], self.cutoff.isoformat())
+
+    def test_first_pass_board_is_announced_to_the_open_page(self):
+        # refresh.js applies a board in place when its version is new; a first pass leaves
+        # the run "running", so it is announced beside that state.
+        self.generate(self.first_pass_dataset(), first_pass=True)
+        progress = self.progress()
+        self.assertEqual(progress.get("first_pass_version"), self.config()["dataVersion"])
+        self.assertNotEqual(progress.get("state"), "done")
+
+    def test_warm_first_pass_does_not_report_its_unfetched_rows_as_failures(self):
+        stored = self.stored_board(volume_end=self.cutoff)
+        first = self.first_pass_dataset(existing=stored)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cd.generate_html(first, first_pass=True)
+        self.assertNotIn("fresh Yahoo quote unavailable", out.getvalue())
+        for k in KEYS:
+            reused = [c for c in self.written()[k]["contracts"]
+                      if c.get("source") == "previous_local_store"]
+            self.assertEqual(len(reused), 4)          # shown with the previous values
+
+    def test_a_run_clears_the_previous_first_pass_stamp(self):
+        os.makedirs("ff_data", exist_ok=True)
+        with open(PROGRESS, "w", encoding="utf-8") as f:
+            json.dump({"state": "done", "first_pass_version": "20260101000000"}, f)
+        seen = []
+        self.run_gather(workers=1,
+                        on_first_pass=lambda d: seen.append(
+                            self.progress().get("first_pass_version", "missing")))
+        self.assertEqual(seen, [None])
+
+
 class RunGeneratorTest(unittest.TestCase):
     def test_first_pass_flag_wires_the_hook(self):
         calls = []
 
-        def gather(count=6, on_first_pass=None):
+        def gather(count=6, on_first_pass=None, fresh=False):
             calls.append(("gather", count, on_first_pass is not None))
             if on_first_pass is not None:
                 on_first_pass({"first": True})
@@ -879,6 +1021,18 @@ class RunGeneratorTest(unittest.TestCase):
             ("gather", 6, True), ("html", {"first": True}, True), ("html", {"full": True}, False),
             ("gather", 6, False), ("html", {"full": True}, False),
         ])
+
+    def test_fresh_flag_reaches_gather(self):
+        seen = []
+
+        def gather(count=6, on_first_pass=None, fresh=False):
+            seen.append(fresh)
+            return {}
+        with mock.patch.object(cd, "gather_commodity_data", gather), \
+                mock.patch.object(cd, "generate_html", lambda *a, **kw: None):
+            cd.run_generator(False)
+            cd.run_generator(True, fresh=True)
+        self.assertEqual(seen, [False, True])
 
 
 if __name__ == "__main__":

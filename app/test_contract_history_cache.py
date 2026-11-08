@@ -157,5 +157,94 @@ class PayloadTest(unittest.TestCase):
                 os.chdir(old)
 
 
+FRI, MON = date(2026, 11, 6), date(2026, 11, 9)
+
+
+def _answer(complete_for=FRI, fetched=None, expiry=None, history=None):
+    """A generator-written file: Yahoo's complete answer as of the settle `complete_for`."""
+    fetched = fetched or _et(2026, 11, 7, 3, 0)          # Saturday night, NY time
+    return chc.build_payload("CLF27.NYM", "5y", history if history is not None else [],
+                             complete_for, fetched.timestamp(),
+                             complete_for=complete_for, expiry=expiry)
+
+
+class CompleteAnswerTest(unittest.TestCase):
+    """is_complete_answer: may the generator take this file instead of asking Yahoo?"""
+
+    def test_an_answer_fetched_after_its_session_serves_the_same_settle(self):
+        self.assertTrue(chc.is_complete_answer(_answer(), FRI))
+
+    def test_an_answer_asked_on_the_session_day_itself_is_asked_again(self):
+        # 23:45 CET on Friday is 17:45 ET: a just-settled bar Yahoo may still correct.
+        evening = _answer(fetched=_et(2026, 11, 6, 17, 45))
+        self.assertFalse(chc.is_complete_answer(evening, FRI))
+
+    def test_a_new_settle_is_always_asked_for(self):
+        self.assertFalse(chc.is_complete_answer(_answer(), MON))
+
+    def test_a_server_file_is_never_taken(self):
+        server = chc.build_payload("CLF27.NYM", "5y", [], FRI, _et(2026, 11, 7, 3, 0).timestamp())
+        self.assertNotIn("complete_for", server)
+        self.assertFalse(chc.is_complete_answer(server, FRI))
+
+    def test_an_expired_contract_keeps_its_answer_across_settles(self):
+        expired = _answer(expiry="2026-10-20")
+        self.assertTrue(chc.is_complete_answer(expired, MON))
+        self.assertTrue(chc.is_complete_answer(expired, date(2026, 12, 18)))
+
+    def test_a_contract_expired_only_days_before_is_asked_again(self):
+        # Within EXPIRED_SETTLE_DAYS of its last trading day Yahoo may still be correcting it.
+        just_expired = _answer(expiry="2026-11-02")
+        self.assertFalse(chc.is_complete_answer(just_expired, MON))
+        self.assertTrue(chc.is_complete_answer(just_expired, FRI))   # its own settle still is
+
+    def test_a_contract_still_trading_is_not_expired(self):
+        self.assertFalse(chc.is_complete_answer(_answer(expiry="2026-12-18"), MON))
+
+    def test_malformed_files_are_asked_again(self):
+        good = _answer()
+        broken = [None, [], "x",
+                  dict(good, history=None),
+                  dict(good, complete_for="not a date"),
+                  dict(good, fetched_at=None),
+                  dict(good, fetched_at="soon")]
+        for payload in broken:
+            with self.subTest(payload=payload):
+                self.assertFalse(chc.is_complete_answer(payload, FRI))
+
+    def test_a_short_answer_carries_no_server_stamp(self):
+        # Rows that stop before the settle: the server must refetch it at once (null stamp),
+        # the generator may still take it as Yahoo's whole answer for that settle.
+        rows = [{"date": "2026-11-04", "close": 1.0}]
+        short = chc.build_payload("CLF28.NYM", "5y", rows, None, _et(2026, 11, 7, 3, 0).timestamp(),
+                                  complete_for=FRI)
+        self.assertIsNone(short["settled_through"])
+        self.assertTrue(chc.is_complete_answer(short, FRI))
+        self.assertFalse(start._contract_history_is_current(
+            short, FRI, _et(2026, 11, 7, 3, 1).timestamp()))
+
+    def test_payload_names_its_contract_type(self):
+        cont = chc.build_payload("CL=F", "20y", [], FRI, 1.0, contract_type="continuous_front_month")
+        self.assertEqual(cont["contract_type"], "continuous_front_month")
+
+
+class KeepTest(unittest.TestCase):
+    def test_keep_refreshes_the_mtime_prune_reads(self):
+        import time
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = chc.cache_path("OLD.CBT", "5y", data_dir=tmp)
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("{}")
+            os.utime(path, (now - 8 * 86400, now - 8 * 86400))
+            chc.keep(path)
+            self.assertEqual(chc.prune(now_ts=now, data_dir=tmp), 0)
+            self.assertTrue(os.path.exists(path))
+
+    def test_keep_never_raises(self):
+        chc.keep("/nonexistent/dir/file.json")
+
+
 if __name__ == "__main__":
     unittest.main()

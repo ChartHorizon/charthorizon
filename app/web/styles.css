@@ -1327,6 +1327,25 @@ html.booting #bootSplash {
 .app-notice-close .line-icon { margin: 0; }
 @keyframes app-notice-in { from { opacity: 0; transform: translate(-50%, 6px); } }
 @media (prefers-reduced-motion: reduce) { .app-notice { animation: none; } }
+/* "A newer version is out" (update.js). Bottom-right, so it never sits on top of the centred
+   .app-notice; it stays until it is closed, because a release is not a passing message. */
+.update-notice {
+  position: fixed; right: 20px; bottom: 20px; z-index: 1150;
+  display: flex; align-items: center; gap: 0.75rem; max-width: calc(100vw - 32px);
+  padding: 0.45rem 0.45rem 0.45rem 0.9rem; border-radius: var(--r-sm);
+  background: var(--tooltip-bg); color: var(--tooltip-text); box-shadow: var(--shadow-md);
+  font-size: 13px; line-height: 1.4; animation: update-notice-in 0.16s ease-out;
+}
+.update-notice-current { opacity: 0.75; }
+.update-notice-link {
+  flex: none; display: inline-flex; align-items: center; min-height: 26px; padding: 0 0.7rem;
+  border-radius: 6px; background: rgba(127, 127, 127, 0.22); color: inherit;
+  font-weight: 600; text-decoration: none;
+}
+.update-notice-link:hover, .update-notice-link:focus-visible { background: rgba(127, 127, 127, 0.36); }
+@keyframes update-notice-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .update-notice { animation: none; } }
+@media (max-width: 600px) { .update-notice { left: 16px; right: 16px; bottom: 16px; } .update-notice-current { display: none; } }
 /* Charts tab text tool: the field the text is typed into, at the clicked spot (openDrawTextField, draw.js) */
 .draw-text-field {
   position: fixed; z-index: 1000; width: 220px; padding: 4px 7px;
@@ -1342,6 +1361,9 @@ html.booting #bootSplash {
 .set-kv-k { color: var(--muted); }
 .set-kv-v { color: var(--text2); font-variant-numeric: tabular-nums; }
 .set-about-link { color: var(--accent-text); }
+.set-update { font-size: 13px; color: var(--text); margin-bottom: 10px; }
+.set-update-new strong { color: var(--accent-text); }
+.set-hint-after-btn { margin-top: 8px; }
 /* A link that opens the risk-notice dialog rather than navigating (settings.js). */
 .set-notice-link {
   padding: 0; background: none; border: 0; font: inherit; color: var(--accent-text);

@@ -878,6 +878,79 @@ async function loadCategory(slug) {
   return promise;
 }
 
+// ── Contract history: what a chart draws ──
+
+// A session on which a contract did not trade can still carry a settlement, and Yahoo prints
+// that as open = high = low = 0 with volume 0 and the settle as the close — seen on ICE
+// listing days (OJH27 2025-09-30, CCU27 2025-10-01). Drawn, the candle's body runs from the
+// settle down to zero and the price axis follows it, which squashes the whole contract into
+// the top third of the pane. Such a bar is not drawn. The test is exact on purpose — all three
+// zero AND no volume — so no real print can meet it, a negative one included (CL May 2020).
+// Display only: the server's file keeps the row, and every contract-history fetch site runs
+// its rows through drawableContractHistory() before storing them on the contract.
+function isUntradedSettleBar(row) {
+  return !!row && Number(row.open) === 0 && Number(row.high) === 0 && Number(row.low) === 0
+    && Number(row.close) > 0 && !(Number(row.volume) > 0);
+}
+
+function drawableContractHistory(rows) {
+  return Array.isArray(rows) ? rows.filter(r => !isUntradedSettleBar(r)) : [];
+}
+
+// Which chart a user drawing belongs to: the market AND the contract drawn, never the market
+// alone (since 2026-11-08). A level drawn on GCZ26 means nothing on GCG27 — a different price,
+// by the spread — nor on the continuous series, which is a contract of its own here
+// (`symbol` null). The front month rolls, so a market-wide list carried every drawing onto the
+// next contract at the wrong price. One definition for both drawing stores: the Charts tab's
+// (draw.js) and Macro Shift's trend lines (smt.js).
+function contractDrawScope(marketKey, symbol) {
+  if (!marketKey) return null;
+  return marketKey + '@' + (symbol || 'continuous');
+}
+
+// Drawings of an EXPIRED contract are deleted (operator request 2026-11-08): neither tab can draw
+// a contract again once its last trading day has passed, so they could only pile up unseen. The
+// expiry is the board's own (`contract.expiry`, the generator's compute_expiry) and has to be
+// remembered while the contract is still listed: an expired contract drops out of
+// cfg.contracts, and with it the only place its date was written. Absence from the list is NOT
+// taken as expiry — select_yfinance_contracts skips a live month Yahoo did not quote on that run.
+// So the rule is exact and errs towards keeping: a scope with no remembered expiry (or the
+// continuous series) is never deleted. One map for both stores, since a scope names one contract.
+const DRAW_EXPIRY_KEY = 'charthorizon.drawingExpiry.v1';   // { 'gold@GCZ26.CMX': '2026-12-29' }
+let _drawExpiries = null;
+function _drawExpiryMap() {
+  if (_drawExpiries) return _drawExpiries;
+  try {
+    const v = JSON.parse(localStorage.getItem(DRAW_EXPIRY_KEY) || '{}');
+    _drawExpiries = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  } catch (e) { _drawExpiries = {}; }
+  return _drawExpiries;
+}
+function _saveDrawExpiryMap() {
+  try { localStorage.setItem(DRAW_EXPIRY_KEY, JSON.stringify(_drawExpiryMap())); } catch (e) {}
+}
+// Called by both tabs whenever they draw a non-empty list for a contract: cheap, writes only on change.
+function noteDrawScopeExpiry(scope, expiry) {
+  if (!scope || !/^\d{4}-\d{2}-\d{2}$/.test(String(expiry || ''))) return;
+  const m = _drawExpiryMap();
+  if (m[scope] === expiry) return;
+  m[scope] = expiry;
+  _saveDrawExpiryMap();
+}
+// The scopes whose contract's last trading day lies before today (local calendar day).
+function expiredDrawScopes() {
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const m = _drawExpiryMap();
+  return Object.keys(m).filter(s => typeof m[s] === 'string' && m[s] < today);
+}
+function forgetDrawScopes(scopes) {
+  const m = _drawExpiryMap();
+  let changed = false;
+  (scopes || []).forEach(s => { if (s in m) { delete m[s]; changed = true; } });
+  if (changed) _saveDrawExpiryMap();
+}
+
 // ── Seasonals page ──
 
 // Seasonal calendar: ONE definition, used by every surface that reads a date as a position in

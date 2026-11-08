@@ -21,13 +21,16 @@ from unittest import mock
 import fetch_cftc
 import fx_rates
 import net_tls
+import update_check
 
 
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
 
-    def read(self):
+    status = 200
+
+    def read(self, n=-1):
         return self._payload
 
     def __enter__(self):
@@ -79,6 +82,12 @@ class UrlopenCallsCarryCertifiContextTest(unittest.TestCase):
         recorder = _Recorder(b"")
         with mock.patch("urllib.request.urlopen", recorder):
             fx_rates.fetch_fx_rates()   # swallows its own failures and returns None
+        self._assert_shared_context(recorder)
+
+    def test_update_check(self):
+        recorder = _Recorder(b'{"version": "1.3.2"}')
+        with mock.patch("urllib.request.urlopen", recorder):
+            update_check.fetch_release_doc()
         self._assert_shared_context(recorder)
 
 

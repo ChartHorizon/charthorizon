@@ -33,6 +33,7 @@ import unittest
 from http import HTTPStatus
 from unittest import mock
 
+import atomic_replace
 import commodity_dashboard as cd
 import start
 import yahoo_gateway
@@ -204,13 +205,34 @@ class ReplaceRetryTests(_TempCwd):
     process is our own web server: boot.js pulls every category file through it while a
     refresh runs. Unretried, that PermissionError killed the refresh partway — some
     category files new, some old, no new config.js. Windows is not exercisable here, so
-    these drive the helper with sys.platform and os.replace stood in for."""
+    these drive the helper with sys.platform and os.replace stood in for. The helper lives
+    in atomic_replace (stdlib only) so that start.py's own writes can use it too."""
 
     def _run(self, replace, platform="win32"):
-        with mock.patch.object(cd.sys, "platform", platform), \
-             mock.patch.object(cd.wallclock, "sleep"), \
-             mock.patch.object(cd.os, "replace", replace):
-            cd._replace_with_retry("tmp", "target")
+        with mock.patch.object(atomic_replace.sys, "platform", platform), \
+             mock.patch.object(atomic_replace.time, "sleep"), \
+             mock.patch.object(atomic_replace.os, "replace", replace):
+            atomic_replace.replace_with_retry("tmp", "target")
+
+    def test_the_generator_still_names_the_shared_helper(self):
+        self.assertIs(cd._replace_with_retry, atomic_replace.replace_with_retry)
+
+    def test_the_server_writes_its_files_through_it(self):
+        # start.py writes the progress file the status endpoint serves once a second, and
+        # the risk-notice acknowledgement. Plain os.replace there lost the write on Windows
+        # whenever a status read held the file — the same failure the generator had.
+        calls = []
+
+        def recorder(tmp, path):
+            calls.append(path)
+            os.replace(tmp, path)
+
+        with mock.patch.object(atomic_replace, "replace_with_retry", recorder):
+            start._write_progress(state="error", error="generator-rc-1")
+            start.record_risk_notice_ack()
+        self.assertEqual(calls, [start.PROGRESS_FILE, start.RISK_ACK_FILE])
+        self.assertEqual(start._read_progress()["state"], "error")
+        self.assertTrue(start.risk_notice_payload()["accepted"])
 
     def test_a_sharing_violation_is_retried_until_the_reader_lets_go(self):
         calls = []

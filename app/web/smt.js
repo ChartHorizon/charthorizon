@@ -67,10 +67,12 @@ function smtFrontContract(cfg) {
 
 // ── Trend-line annotations: drawn into each chart's SVG (so the PNG export
 // captures them for free), anchored to (date, price) so they survive timeframe
-// and market switches. Keyed by market so a market keeps its lines in either slot.
+// and market switches. Keyed by market AND the contract drawn (smtDrawScope), so a
+// market keeps its lines in either slot and a line never carries over to another
+// contract — the next front month after a roll, or Continuous vs Front Month.
 const SMT_LINES_KEY = "charthorizon.smtLines.v1";
 let smtDraw = false;                  // draw-mode toggle (transient, not persisted)
-let smtLines = loadSmtLines();        // { marketKey: [ {a:{t,p}, b:{t,p}}, ... ] }
+let smtLines = loadSmtLines();        // { 'gold@GCZ26.CMX' | 'gold@continuous': [ {a:{t,p}, b:{t,p}}, ... ] }
 
 function loadSmtLines() {
   try {
@@ -81,7 +83,48 @@ function loadSmtLines() {
 function saveSmtLines() {
   try { localStorage.setItem(SMT_LINES_KEY, JSON.stringify(smtLines)); } catch (e) {}
 }
-function smtLinesFor(key) { return (key && smtLines[key]) || []; }
+function smtLinesFor(scope) { return (scope && smtLines[scope]) || []; }
+
+// The line list a chart of `key` owns: its front contract when Front Month actually drew one
+// (smtActualMode, set by smtLoadBars before any slot renders), else the continuous series —
+// which is also where a leg that fell back to continuous draws from, so the lines always sit
+// on the prices they were drawn against.
+function smtDrawContract(key) {   // the front contract drawn for `key`, or null for continuous
+  if (!key || smtState.contractMode !== 'frontMonth' || smtActualMode[key] !== 'frontMonth') return null;
+  const front = smtFrontContract(smtCfg(key));
+  return (front && front.yf_symbol) ? front : null;
+}
+function smtDrawScope(key) {
+  if (!key) return null;
+  const front = smtDrawContract(key);
+  return contractDrawScope(key, front ? front.yf_symbol : null);
+}
+// Drop the lines of contracts whose last trading day has passed (`expiredDrawScopes`, core.js).
+// Run once at startup from boot.js; smtLines is already in memory by then, so it is pruned in place.
+function pruneExpiredSmtLines(expired) {
+  if (!expired || !expired.length) return;
+  let changed = false;
+  expired.forEach(s => { if (s in smtLines) { delete smtLines[s]; changed = true; } });
+  if (changed) saveSmtLines();
+}
+
+// Until 2026-11-08 the lines were keyed by the market alone, which does not say which contract
+// they were drawn on. They go to the first contract the market is drawn on afterwards, and are
+// moved, not copied (a copy would follow the next roll again) — but not while Front Month is
+// picked and the front contract merely failed to load: that would park front-month lines on
+// the continuous series. Returns whether anything moved.
+function smtAdoptLegacyLines(key) {
+  if (!key || !Array.isArray(smtLines[key])) return false;
+  if (smtState.contractMode === 'frontMonth' && smtActualMode[key] !== 'frontMonth') {
+    const front = smtFrontContract(smtCfg(key));
+    if (front && front.yf_symbol) return false;
+  }
+  const scope = smtDrawScope(key);
+  if (!scope || scope === key) return false;
+  smtLines[scope] = (smtLines[scope] || []).concat(smtLines[key]);
+  delete smtLines[key];
+  return true;
+}
 
 function loadSmtState() {
   try {
@@ -188,10 +231,10 @@ function toggleSmtDraw() {
   const host = document.getElementById('smtCharts');
   if (host) host.classList.toggle('smt-drawing', smtDraw);
 }
-function clearSmtLines() {
-  delete smtLines[smtState.a];
-  delete smtLines[smtState.b];
-  delete smtLines[smtState.c];
+function clearSmtLines() {   // the lines on the charts on screen, i.e. of the contracts drawn
+  delete smtLines[smtDrawScope(smtState.a)];
+  delete smtLines[smtDrawScope(smtState.b)];
+  delete smtLines[smtDrawScope(smtState.c)];
   saveSmtLines();
   renderSmtCharts();
 }
@@ -227,10 +270,11 @@ async function smtLoadFrontContractBars(cfg, key) {
     const url = `/api/contract-history?symbol=${encodeURIComponent(front.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}`;
     const res = await fetch(url);
     const payload = await res.json();
-    if (res.ok && Array.isArray(payload.history) && payload.history.length) {
-      front.chart_history = payload.history;
+    const rows = res.ok ? drawableContractHistory(payload.history) : [];
+    if (rows.length) {
+      front.chart_history = rows;
       markFront();
-      return payload.history;
+      return rows;
     }
   } catch (e) {}
   markFallback();
@@ -496,15 +540,16 @@ function renderSmtChart(bars, opts) {
     }
   }
 
-  // User trend-line annotations for this market, projected from (date, price).
+  // User trend-line annotations for this market's drawn contract, projected from (date, price).
   let trend = '';
-  const tlines = smtLinesFor(opts.key);
+  const scope = smtDrawScope(opts.key);
+  const tlines = smtLinesFor(scope);
   for (let li = 0; li < tlines.length; li++) {
     const ln = tlines[li];
     trend += `<line class="smt-trend" data-i="${li}" x1="${smtXAtTime(ax, ln.a.t).toFixed(1)}" y1="${yAt(ln.a.p).toFixed(1)}" x2="${smtXAtTime(ax, ln.b.t).toFixed(1)}" y2="${yAt(ln.b.p).toFixed(1)}" stroke="${CHART_THEME.trend}" stroke-width="1.6" stroke-linecap="round"/>`;
   }
 
-  return `<svg class="smt-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet" data-key="${opts.key || ''}" data-plo="${pLo}" data-phi="${pHi}" data-padt="${padT}" data-ploth="${priceH}">`
+  return `<svg class="smt-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet" data-key="${opts.key || ''}" data-scope="${esc(scope || '')}" data-plo="${pLo}" data-phi="${pHi}" data-padt="${padT}" data-ploth="${priceH}">`
     + `<rect x="0" y="0" width="${W}" height="${H}" fill="${CHART_THEME.bg}" rx="7"/>`
     + grid + qLines
     + `<g shape-rendering="crispEdges">${candles}</g>` + candleLine + priceLine + liveDot
@@ -588,7 +633,7 @@ function bindSmtCrosshair() {
       const pt = smtSvgPoint(hov, ev.clientX, ev.clientY);
       let hot = -1;
       if (pt) {
-        const lines = smtLinesFor(hov.dataset.key);
+        const lines = smtLinesFor(hov.dataset.scope);
         let bestD = 12;
         for (let i = 0; i < lines.length; i++) {
           const pr = smtProjLine(pt, lines[i]);
@@ -623,6 +668,12 @@ async function renderSmtCharts() {
   const keys = [smtState.a, smtState.b, smtState.c];
   const all = await Promise.all(keys.map(k => smtLoadBars(k)));
   if (seq !== smtSeq) return;   // a newer render started — drop this stale one
+  if (keys.map(k => smtAdoptLegacyLines(k)).some(Boolean)) saveSmtLines();   // smtActualMode is set now
+  // Remember each drawn contract's expiry while it is still listed (pruneExpiredSmtLines).
+  for (const k of keys) {
+    const front = smtDrawContract(k), scope = smtDrawScope(k);
+    if (front && front.expiry && smtLinesFor(scope).length) noteDrawScopeExpiry(scope, front.expiry);
+  }
   const days = smtState.range;
   let barsList = all.map(a => smtFilterRange(a, days));
   if (smtState.interval === 'weekly') barsList = barsList.map(smtToWeekly);
@@ -692,14 +743,14 @@ function bindSmtDraw() {
       const end = smtSvgPoint(svg, ev.clientX, ev.clientY) || start;
       if (preview) { preview.remove(); preview = null; }
       const s = start; start = null;
-      const key = svg.dataset.key;
-      if (!s || !end || !key) return;
+      const scope = svg.dataset.scope;   // the contract this chart draws, stamped at render
+      if (!s || !end || !scope) return;
       if (Math.hypot(end.vbx - s.vbx, end.vby - s.vby) >= 6) {
-        (smtLines[key] = smtLines[key] || []).push({ a: { t: s.t, p: s.p }, b: { t: end.t, p: end.p } });
+        (smtLines[scope] = smtLines[scope] || []).push({ a: { t: s.t, p: s.p }, b: { t: end.t, p: end.p } });
         saveSmtLines();
         renderSmtCharts();
       } else {
-        const lines = smtLines[key] || [];
+        const lines = smtLines[scope] || [];
         let best = -1, bestD = 12;
         for (let i = 0; i < lines.length; i++) {
           const pr = smtProjLine(s, lines[i]);

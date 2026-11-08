@@ -105,6 +105,15 @@ async function pollRefreshStatus() {
       renderRefreshProgress(status);
       _refreshWasRunning = true;
       nextPollMs = REFRESH_POLL_RUNNING_MS;
+      // The run's first pass: the generator has written a board from every market's front
+      // and next month and goes on fetching the rest of the chain (start.py gives every
+      // background refresh one). Apply it now and the complete board again at 'done'. Keyed
+      // like a finished run, so a page that opened on this board, or already applied it,
+      // does not apply it a second time.
+      const firstPass = status.first_pass_version;
+      if (firstPass && firstPass !== _appliedDataVersion) {
+        await applyRefreshedData({ data_version: firstPass });
+      }
       return;
     }
 

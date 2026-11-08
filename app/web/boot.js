@@ -79,6 +79,17 @@ if (_cardKey === 'fx') {
   if (typeof ensureScreenerData === 'function') {
     ensureScreenerData().then(() => { try { renderFuturesHeat(); } catch (e) {} });
   }
+  // Delete the drawings of expired contracts before any tab draws (core.js: expiredDrawScopes).
+  // Both stores first, then the remembered expiries — forgotten earlier, the second store could
+  // no longer tell that its lists had expired.
+  try {
+    const _expiredScopes = expiredDrawScopes();
+    if (_expiredScopes.length) {
+      if (typeof pruneExpiredDrawings === 'function') pruneExpiredDrawings(_expiredScopes);
+      if (typeof pruneExpiredSmtLines === 'function') pruneExpiredSmtLines(_expiredScopes);
+      forgetDrawScopes(_expiredScopes);
+    }
+  } catch (e) {}
   // Reopen whichever top tab was active before the last reload.
   try {
     const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);
@@ -92,6 +103,11 @@ if (_cardKey === 'fx') {
     // once the splash has lifted, never over it (disclaimer.js). Only here, so the bot's
     // card-mode exports never meet a dialog; it checks card mode itself as well.
     if (typeof ensureRiskNotice === 'function') ensureRiskNotice();
+    // "A newer version is out" (update.js). Nothing is asked unless the user switched the
+    // automatic check on in Settings → Updates (off by default); then the local server asks
+    // chart-horizon.com at most once a day and sends nothing about the user. Same branch,
+    // same reason as above: the bot's card-mode page never shows the notice.
+    if (typeof ensureUpdateNotice === 'function') ensureUpdateNotice();
 }
 
 // Responsive: redraw chart on resize (debounced)

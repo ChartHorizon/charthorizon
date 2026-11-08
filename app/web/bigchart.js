@@ -353,35 +353,42 @@ async function setBigChartContractMode(mode, persist) {
   if (persist) { try { localStorage.setItem(BIGCHART_MODE_KEY, mode === 'frontMonth' ? 'frontMonth' : 'continuous'); } catch (e) {} }
   const cfg = currentBigChartCfg();
   if (!cfg) return;
-  const toContinuous = () => {
+  // `settled`: continuous is what this market is meant to show (the user's pick, or a market with
+  // no tradable contract at all), not a failed front-month fetch. Only then may it take over the
+  // drawings a pre-2026-11-08 install kept per market (adoptLegacyDrawings, draw.js) — a fetch
+  // that failed once would otherwise park the user's front-month drawings on the continuous.
+  const toContinuous = (settled) => {
     bigChartState.chartMode = 'continuous';
     bigChartState.contractSymbol = null;
     bigChartState.contractLabel = null;
+    if (settled && typeof adoptLegacyDrawings === 'function') adoptLegacyDrawings(bigChartState.key);
     renderBigChartContractBar();
     renderBigChart(cfg);
     if (typeof restartLiveLayer === 'function') restartLiveLayer();   // the drawn symbol changed
   };
-  if (mode !== 'frontMonth') { toContinuous(); return; }
+  if (mode !== 'frontMonth') { toContinuous(true); return; }
 
   const contracts = cfg.contracts || [];
   const idx = frontContractIndex(contracts);
   const lead = idx >= 0 ? contracts[idx] : null;
-  if (!lead || !lead.yf_symbol) { toContinuous(); return; }     // no tradable contract → continuous
+  if (!lead || !lead.yf_symbol) { toContinuous(true); return; } // no tradable contract → continuous
 
   if (!(lead.chart_history && lead.chart_history.length)) {     // lazy fetch (mirrors smt.js), cached on the contract
     try {
       const url = `/api/contract-history?symbol=${encodeURIComponent(lead.yf_symbol)}&period=${CONTRACT_HISTORY_PERIOD}`;
       const res = await fetch(url);
       const payload = await res.json();
-      if (res.ok && Array.isArray(payload.history) && payload.history.length) lead.chart_history = payload.history;
+      const rows = res.ok ? drawableContractHistory(payload.history) : [];
+      if (rows.length) lead.chart_history = rows;
     } catch (e) {}
   }
   if (currentBigChartCfg() !== cfg) return;                     // market changed while awaiting
-  if (!(lead.chart_history && lead.chart_history.length)) { toContinuous(); return; }   // fetch failed → continuous
+  if (!(lead.chart_history && lead.chart_history.length)) { toContinuous(false); return; }   // fetch failed → continuous
 
   bigChartState.chartMode = 'contract';
   bigChartState.contractSymbol = lead.yf_symbol;
   bigChartState.contractLabel = lead.delivery_month_label || lead.label || lead.contract_symbol || lead.yf_symbol;
+  if (typeof adoptLegacyDrawings === 'function') adoptLegacyDrawings(bigChartState.key);
   renderBigChartContractBar();
   renderBigChart(cfg);
   if (typeof restartLiveLayer === 'function') restartLiveLayer();     // the drawn symbol changed
@@ -548,7 +555,7 @@ function setBigChartTf(id) {
 async function selectBigChartMarket(key) {
   if (!INDEX[key]) return;
   bigChartState.key = key;
-  if (typeof drawState !== 'undefined') drawState.selectedId = null;   // drawings are per-market
+  if (typeof drawState !== 'undefined') drawState.selectedId = null;   // drawings are per market + contract
   if (typeof closeDrawContextMenu === 'function') closeDrawContextMenu();
   setActiveMarket(key);   // one selection across Futures / Seasonals / Charts (core.js)
   const meta = INDEX[key];

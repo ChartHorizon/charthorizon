@@ -2,8 +2,9 @@
 //
 // Self-contained drawing engine for the maximized "Charts" tab (bigchart.js). Plain
 // global-scope script (NOT an ES module), like every other app/web/*.js. Drawings are
-// stored in DATA coordinates (date + price) keyed per market in localStorage, so they
-// survive the full SVG rebuild loadChart does on every zoom / resize / timeframe change.
+// stored in DATA coordinates (date + price) keyed per market AND contract in localStorage
+// (contractDrawScope, core.js), so they survive the full SVG rebuild loadChart does on every
+// zoom / resize / timeframe change, and never carry over to another contract.
 //
 // chart.js calls renderChartDrawings(svg, coord) + bindChartDrawingInteractions(wrap,
 // coord, rerender) ONLY when opts.drawings is set (renderBigChart). So the Futures tab and
@@ -73,12 +74,58 @@ function distToSegment(px, py, x1, y1, x2, y2) {
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-// ── persistence (per market) ──
+// ── persistence (per market and contract) ──
 function loadAllDrawings() {
   try { return JSON.parse(localStorage.getItem(DRAW_STORE_KEY)) || {}; } catch (e) { return {}; }
 }
+// The list the chart on screen owns: market + the contract it draws. Resolved through the same
+// getActiveChartSource() the renderer uses (state swap and all, like bigChartActiveSymbol), so
+// a market whose front month could not be loaded and fell back to continuous shows the
+// continuous series' drawings, not the front month's over the wrong prices.
+function _currentDrawTarget() {
+  if (typeof bigChartState === 'undefined' || !bigChartState || !bigChartState.key) return null;
+  const cfg = currentBigChartCfg();
+  if (!cfg) return null;
+  const saved = chartState;
+  chartState = bigChartState;
+  try {
+    const src = getActiveChartSource(cfg);
+    const contract = src.mode === 'contract' ? src.contract : null;
+    return {
+      scope: contractDrawScope(bigChartState.key, contract ? src.symbol : null),
+      expiry: contract ? contract.expiry : null,   // remembered for pruneExpiredDrawings
+    };
+  } finally { chartState = saved; }
+}
 function currentDrawKey() {
-  return (typeof bigChartState !== 'undefined' && bigChartState) ? bigChartState.key : null;
+  const t = _currentDrawTarget();
+  return t ? t.scope : null;
+}
+// Drop the lists of contracts whose last trading day has passed (`expiredDrawScopes`, core.js).
+// Run once at startup from boot.js, which also forgets those scopes' expiries afterwards.
+function pruneExpiredDrawings(expired) {
+  if (!expired || !expired.length) return;
+  const all = loadAllDrawings();
+  let changed = false;
+  expired.forEach(s => { if (s in all) { delete all[s]; changed = true; } });
+  if (changed) { try { localStorage.setItem(DRAW_STORE_KEY, JSON.stringify(all)); } catch (e) {} }
+}
+// Until 2026-11-08 the list was keyed by the market alone. Such a list does not say which
+// contract it was drawn on, so it goes to the first contract this market is drawn on afterwards
+// — the one on screen, in the user's own Continuous / Front Month pick — and is MOVED, not
+// copied: a copy left behind under the market would follow the next roll again. Called by
+// setBigChartContractMode only once that pick has resolved, never on a fallback.
+function adoptLegacyDrawings(marketKey) {
+  const scope = currentDrawKey();
+  if (!marketKey || !scope || scope === marketKey) return;
+  const all = loadAllDrawings();
+  const legacy = all[marketKey];
+  if (!Array.isArray(legacy)) return;
+  const into = Array.isArray(all[scope]) ? all[scope] : [];
+  legacy.forEach(d => { if (d) into.push(Object.assign({}, d, { id: nextDrawId(into) })); });
+  all[scope] = into;
+  delete all[marketKey];
+  try { localStorage.setItem(DRAW_STORE_KEY, JSON.stringify(all)); } catch (e) {}
 }
 function drawingsForKey(key) {
   if (!key) return [];
@@ -381,17 +428,33 @@ function renderOneDrawing(d, coord, selected) {
   return grp;
 }
 
+// The list the last render drew from. A selection is an id inside ONE contract's list and ids
+// repeat across lists (every list starts at d1), so when the drawn contract changes — the
+// Continuous / Front Month toggle, a market click, a refresh that rolls the front month — the
+// selection and its edit menu go, or the next contract would show its own d1 as selected.
+let _drawScopeShown = null;
+
 // ── entry point #1: (re)build the persistent draw layer, clipped to the price pane ──
 function renderChartDrawings(svg, coord) {
   if (!svg) return;
+  const target = _currentDrawTarget();
+  const scope = target ? target.scope : null;
+  if (scope !== _drawScopeShown) {
+    _drawScopeShown = scope;
+    drawState.selectedId = null;
+    if (typeof closeDrawContextMenu === 'function') closeDrawContextMenu();
+  }
   svg.querySelectorAll('.chart-draw-layer').forEach(el => el.remove());
+  // Every list that exists was on screen at least once (a drawing is made, or adopted, on the
+  // contract shown), so noting the expiry here covers them all — hidden or not.
+  if (target && target.expiry && drawingsForKey(scope).length) noteDrawScopeExpiry(scope, target.expiry);
   if (!drawState.hideDrawings) {   // visibility toggle: skip the whole layer when drawings are hidden
     const layer = svgEl('g', { class: 'chart-draw-layer', 'pointer-events': 'none' });
     const clip = svgEl('clipPath', { id: 'chartDrawClip' });
     clip.appendChild(svgEl('rect', { x: coord.plotLeft, y: coord.plotTop, width: coord.plotRight - coord.plotLeft, height: coord.priceH }));
     layer.appendChild(clip);
     const shapes = svgEl('g', { 'clip-path': 'url(#chartDrawClip)' });
-    drawingsForKey(currentDrawKey()).forEach(d => shapes.appendChild(renderOneDrawing(d, coord, d.id === drawState.selectedId)));
+    drawingsForKey(scope).forEach(d => shapes.appendChild(renderOneDrawing(d, coord, d.id === drawState.selectedId)));
     layer.appendChild(shapes);
     svg.appendChild(layer);
   }
@@ -1368,7 +1431,7 @@ function exportChartScreenshot() {
       if (!blob) return;
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'charthorizon-' + (currentDrawKey() || 'chart') + '.png';
+      a.download = 'charthorizon-' + ((typeof bigChartState !== 'undefined' && bigChartState && bigChartState.key) || 'chart') + '.png';
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }, 'image/png');

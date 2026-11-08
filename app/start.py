@@ -27,9 +27,11 @@ import time
 import webbrowser
 
 import app_version
+import atomic_replace
 import contract_history_cache
 import live_cache
 import packaging_fingerprint
+import update_check
 import yahoo_gateway
 
 try:
@@ -78,6 +80,7 @@ LOCK_FILE = os.path.join("ff_data", "refresh.lock")
 LOCK_MAX_AGE = 1800  # seconds — a refresh never takes this long; older lock = stale
 RISK_ACK_FILE = os.path.join("ff_data", "risk_notice_ack.json")
 RISK_NOTICE_VERSION = 1   # bump to show the notice again after a material change
+UPDATE_CHECK_FILE = os.path.join("ff_data", "update_check.json")   # see update_check.py
 
 # The SERVER gateway profile. The generator subprocess installs its own (see
 # commodity_dashboard.py) and must NOT be given lock_path — it is the process that holds
@@ -133,7 +136,9 @@ def _read_progress():
 
 
 def _write_progress(**fields):
-    """Best-effort atomic merge into ff_data/refresh_progress.json."""
+    """Best-effort atomic merge into ff_data/refresh_progress.json. The replace is retried on a
+    Windows sharing violation (atomic_replace): this process serves the same file to every
+    /api/refresh-status poll, and a lost write may be the "error" a crashed generator leaves."""
     try:
         os.makedirs("ff_data", exist_ok=True)
         data = _read_progress() or {}
@@ -142,7 +147,7 @@ def _write_progress(**fields):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, PROGRESS_FILE)
+            atomic_replace.replace_with_retry(tmp, PROGRESS_FILE)
         except Exception:
             try:
                 os.unlink(tmp)
@@ -204,7 +209,7 @@ def record_risk_notice_ack():
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp, RISK_ACK_FILE)
+        atomic_replace.replace_with_retry(tmp, RISK_ACK_FILE)
     except Exception:
         try:
             os.unlink(tmp)
@@ -314,21 +319,30 @@ def _lock_is_active(lock):
     return _pid_alive(lock.get("pid"))
 
 
-def acquire_refresh_lock(trigger):
-    """Best-effort cross-process lock. Returns True if acquired, False if a live
-    refresh already holds it. (Single local user — the TOCTOU window is negligible
+def _try_acquire_refresh_lock(trigger):
+    """Best-effort cross-process lock: "acquired", "held" (a live refresh has it) or
+    "write-failed" (nothing holds it, but the lock file could not be written — a full disk,
+    a read-only data folder, a scanner holding the file on Windows). The last two are kept
+    apart because they ask for different answers: a held lock is waited out, a failed
+    write is a fault, and reporting it as "already running" sent the first run waiting on
+    a refresh that did not exist. (Single local user — the TOCTOU window is negligible
     and the in-process spawn lock covers the common double-click case.)"""
     if _lock_is_active(_read_lock()):
-        return False
+        return "held"
     try:
         os.makedirs("ff_data", exist_ok=True)
         with open(LOCK_FILE, "w", encoding="utf-8") as f:
             json.dump({"pid": os.getpid(),
                        "started_epoch": datetime.now().timestamp(),
                        "trigger": trigger}, f)
-        return True
+        return "acquired"
     except Exception:
-        return False
+        return "write-failed"
+
+
+def acquire_refresh_lock(trigger):
+    """True if this process now holds the refresh lock (see _try_acquire_refresh_lock)."""
+    return _try_acquire_refresh_lock(trigger) == "acquired"
 
 
 def release_refresh_lock():
@@ -346,6 +360,12 @@ def refresh_status_payload():
     if prog.get("state") == "running" and not active:
         prog = dict(prog)
         prog["state"] = "idle"
+    if _first_run_error and not active:
+        # A first run whose start keeps failing (_retry_first_run). Kept in memory, not in
+        # the progress file: the likeliest cause is a data folder that cannot be written.
+        prog = dict(prog)
+        prog["state"] = "error"
+        prog["error"] = _first_run_error
     prog["running"] = active
     return prog
 
@@ -382,6 +402,33 @@ def packaging_recipe():
             os.path.join(APP_DIR, os.pardir, "packaging"))
     except (OSError, ValueError):
         return None
+
+
+def update_check_payload(force=False):
+    """The "a newer version is out" state for the open page (update_check.py). Asks
+    chart-horizon.com only while the automatic check is switched on (off by default), at
+    most once a day — or once, at once, for "Check now" (`force`)."""
+    return update_check.status(UPDATE_CHECK_FILE, app_version.APP_VERSION,
+                               update_check.platform_key(sys.platform), bool(FROZEN),
+                               force=force)
+
+
+def apply_update_check_change(body):
+    """POST /api/update-check, one of: {"auto": bool} (the automatic-check switch),
+    {"check": true} (the "Check now" button), {"dismiss": "<version>"} (the notice's close
+    button). Raises ValueError on anything else — the endpoint answers 400 — and lets a
+    failed write raise (500)."""
+    if not isinstance(body, dict):
+        raise ValueError("expected an object")
+    if isinstance(body.get("auto"), bool):
+        update_check.set_auto(UPDATE_CHECK_FILE, body["auto"])
+    elif body.get("check") is True:
+        return update_check_payload(force=True)
+    elif "dismiss" in body:
+        update_check.dismiss(UPDATE_CHECK_FILE, body["dismiss"])
+    else:
+        raise ValueError("expected 'auto', 'check' or 'dismiss'")
+    return update_check_payload()
 
 
 def version_payload():
@@ -511,13 +558,17 @@ def _parse_date(value):
         return None
 
 
-def _run_generator_subprocess(first_pass=False):
+def _run_generator_subprocess(first_pass=False, fresh=False):
     """Run the generator once; return its process return code. No sys.exit, so it is
     safe to call from a background thread. first_pass makes the generator write a
-    first-pass board after its fronts phase (a first run, nothing on disk yet)."""
+    first-pass board after its fronts phase (every background refresh, see
+    start_background_refresh). fresh makes it ask Yahoo for every answer again instead of
+    reading back what an earlier run of the same settle kept (--force-refresh)."""
     cmd = [sys.executable, "--run-generator"] if FROZEN else [sys.executable, GENERATOR]
     if first_pass:
         cmd.append("--first-pass")
+    if fresh:
+        cmd.append("--fresh")
     if not FROZEN and not os.path.exists(GENERATOR):
         print(f"\n✗ {GENERATOR} not found!")
         return 1
@@ -528,11 +579,11 @@ def _run_generator_subprocess(first_pass=False):
         return 1
 
 
-def generate_dashboard():
+def generate_dashboard(fresh=False):
     """Regenerate ff_data/ (blocking). Aborts with sys.exit on failure — for the
     foreground path (--refresh, first run)."""
     step("Generating dashboard (fetching data – this can take 1–2 min)…")
-    rc = _run_generator_subprocess()
+    rc = _run_generator_subprocess(fresh=fresh)
     if rc != 0:
         print("\n✗ Failed to generate the dashboard.")
         sys.exit(1)
@@ -562,19 +613,37 @@ def _run_locked_refresh(first_pass=False):
         release_refresh_lock()
 
 
-def start_background_refresh(trigger="manual", first_pass=False):
+def start_background_refresh(trigger="manual", first_run=False):
     """Spawn a background refresh thread if none is running. Returns an API dict.
-    Used by the manual endpoint AND the warm-start auto-trigger."""
+    Used by the manual endpoint, the warm-start auto-trigger and the first run.
+
+    Every background refresh runs the generator with a first pass: a page is open on the
+    previous board (or on loading.html, waiting for the first one), so the front months go
+    onto it first and the rest of the chain follows (generate_html(first_pass=True)). The
+    foreground paths (--refresh, the 23:30 job) finish before any page is open and skip it.
+
+    A first run builds the FIRST board, so it is called off when the board exists by the
+    time the lock is ours — checked here, under the lock, because every refresh writes the
+    board while holding it: a board seen now is a finished one, and a second refresh
+    straight after it is redundant. The caller's own earlier check is not enough; another
+    process can finish between that check and this start. Answers {"board": True}."""
     with _refresh_spawn_lock:
-        if not acquire_refresh_lock(trigger):
+        got = _try_acquire_refresh_lock(trigger)
+        if got == "held":
             return {"running": True, "already": True}
+        if got != "acquired":
+            return {"running": False, "error": "lock-write-failed"}
+        if first_run and dashboard_exists():
+            release_refresh_lock()
+            return {"running": False, "board": True}
         _write_progress(state="running", trigger=trigger, total=None, done=0,
                         current=None, category=None,
                         phase=None, fronts_done=0, fronts_total=None,
                         started_at=datetime.now().isoformat(timespec="seconds"),
-                        finished_at=None, latest_eod=None, data_version=None, error=None)
+                        finished_at=None, latest_eod=None, data_version=None,
+                        first_pass_version=None, error=None)
         try:
-            threading.Thread(target=_run_locked_refresh, args=(first_pass,),
+            threading.Thread(target=_run_locked_refresh, args=(True,),
                              daemon=True).start()
         except Exception:
             # Thread spawn failed (interpreter shutdown / thread limit) — don't
@@ -585,43 +654,78 @@ def start_background_refresh(trigger="manual", first_pass=False):
 
 
 FIRST_RUN_RETRY_SECONDS = 10
+FIRST_RUN_ERROR_AFTER = 3   # failed starts in a row before the splash is told
+
+# Set by _retry_first_run once the first run's start has failed FIRST_RUN_ERROR_AFTER times
+# in a row; refresh_status_payload reports it as state "error", which loading.html shows.
+_first_run_error = None
+
+
+def _first_run_settled(res):
+    """Whether a start answer ends the first run's start: it began, or the board exists."""
+    return bool(res.get("started") or res.get("board"))
 
 
 def _start_first_run(retry_seconds=FIRST_RUN_RETRY_SECONDS, wait=time.sleep):
     """Start a first run's locked refresh (with a first pass). Returns the retry thread when
-    the lock was taken, else None.
+    the start did not succeed, else None.
 
     The first run has no board to fall back on: loading.html waits for config.js, and only a
-    refresh writes one. A lock held elsewhere is usually a genuine refresh in another
-    process, which writes the board and lets the splash redirect; but a lock whose pid is
-    alive and is not a refresh at all would leave the splash waiting for good. So the start
-    is retried until it succeeds or the board exists, whichever comes first."""
-    if not start_background_refresh("first-run", first_pass=True).get("already"):
+    refresh writes one. So every answer but a started run (or a board that turned out to
+    exist) is retried until a start succeeds or the board exists: a lock held elsewhere —
+    usually a genuine refresh in another process, which writes the board and lets the
+    splash redirect, but possibly a live pid that is not a refresh at all — and just as much
+    a start that failed outright (a thread that could not be spawned, a lock that could not
+    be written), which used to leave the splash waiting for good."""
+    res = start_background_refresh("first-run", first_run=True)
+    if _first_run_settled(res):
         return None
-    warn("Another refresh holds the lock — the first run starts as soon as it is free.")
-    thread = threading.Thread(target=_retry_first_run, args=(retry_seconds, wait),
+    if res.get("already"):
+        warn("Another refresh holds the lock — the first run starts as soon as it is free.")
+        failures = 0
+    else:
+        warn(f"The first run could not start ({res.get('error')}) — retrying every "
+             f"{retry_seconds} s.")
+        failures = 1
+    thread = threading.Thread(target=_retry_first_run, args=(retry_seconds, wait, failures),
                               daemon=True)
     thread.start()
     return thread
 
 
-def _retry_first_run(retry_seconds, wait):
+def _retry_first_run(retry_seconds, wait, failures=0):
+    """The first run's retry loop (see _start_first_run). `failures` counts failed starts in
+    a row — a held lock is waiting, not failing, and resets it — and at FIRST_RUN_ERROR_AFTER
+    the splash is told (_first_run_error). Retrying goes on behind that message, so a cause
+    that clears up still ends in a board."""
+    global _first_run_error
     while not dashboard_exists():
         wait(retry_seconds)
         if dashboard_exists():
-            return
-        if start_background_refresh("first-run", first_pass=True).get("started"):
-            return
+            break
+        res = start_background_refresh("first-run", first_run=True)
+        if _first_run_settled(res):
+            break
+        failures = 0 if res.get("already") else failures + 1
+        if failures >= FIRST_RUN_ERROR_AFTER and _first_run_error is None:
+            _first_run_error = res.get("error") or "start-failed"
+            warn(f"The first run still cannot start ({_first_run_error}).")
+    _first_run_error = None
 
 
-def foreground_refresh():
+def foreground_refresh(fresh=False):
     """Blocking refresh for the --refresh CLI path. Respects the shared lock so it
-    never collides with a running server's background refresh or the 23:30 job."""
-    if not acquire_refresh_lock("cli"):
+    never collides with a running server's background refresh or the 23:30 job.
+    `fresh` (--force-refresh) asks Yahoo for everything again."""
+    got = _try_acquire_refresh_lock("cli")
+    if got == "held":
         warn("Another refresh is already running — skipped.")
         return
+    if got != "acquired":
+        warn("Could not write ff_data/refresh.lock — skipped.")
+        return
     try:
-        generate_dashboard()   # generator writes its own running->done progress
+        generate_dashboard(fresh=fresh)   # generator writes its own running->done progress
         _write_progress(state="done",
                         finished_at=datetime.now().isoformat(timespec="seconds"))
     finally:
@@ -1018,6 +1122,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/risk-notice":
             self._send_json(200, risk_notice_payload())
             return
+        if parsed.path == "/api/update-check":
+            self._send_json(200, update_check_payload())
+            return
         if parsed.path == "/api/contract-history":
             qs = urllib.parse.parse_qs(parsed.query)
             symbol = (qs.get("symbol") or [""])[0].strip()
@@ -1084,6 +1191,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 payload = record_risk_notice_ack()
             except Exception as e:
                 self._send_json(500, {"error": str(e), "accepted": False})
+                return
+            self._send_json(200, payload)
+            return
+        if parsed.path == "/api/update-check":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 1024:
+                    raise ValueError("bad length")
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                payload = apply_update_check_change(body)
+            except ValueError as e:              # JSONDecodeError is a ValueError
+                self._send_json(400, {"error": str(e)})
+                return
+            except Exception as e:               # a failed write: the switch did not switch
+                self._send_json(500, {"error": str(e)})
                 return
             self._send_json(200, payload)
             return
@@ -1315,9 +1437,11 @@ def serve(open_browser=True):
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--refresh", action="store_true")
-    # Kept as a harmless no-op for backward compatibility: --refresh always does a
-    # full fetch now (the old EoD skip-gate is gone), so --force-refresh adds nothing.
-    parser.add_argument("--force-refresh", action="store_true", help=argparse.SUPPRESS)
+    # A refresh reads back the answers an earlier run kept for the same settle (the
+    # generator's contract_history reuse); --force-refresh asks Yahoo for all of them
+    # again. It implies --refresh. --fresh is the same request to the frozen generator.
+    parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument("--fresh", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-serve", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--run-generator", action="store_true")
@@ -1336,7 +1460,7 @@ def main():
         # Re-exec entry point for the frozen build: behaves like running
         # commodity_dashboard.py as __main__ (cwd is already DATA_ROOT).
         import commodity_dashboard as cd
-        cd.run_generator(args.first_pass)
+        cd.run_generator(args.first_pass, fresh=args.fresh)
         return
 
     # Quarantined DMG/Download launches run via macOS App-Translocation from a
@@ -1349,10 +1473,12 @@ def main():
     check_python()
     ensure_packages()
     first_run = False
-    if args.refresh:
-        # Always pull the freshest yfinance data (no EoD skip-gate any more).
-        # The generator still stores settled EoD only — never intraday.
-        foreground_refresh()
+    refresh = args.refresh or args.force_refresh
+    if refresh:
+        # Always pull the freshest yfinance data (no EoD skip-gate any more). The generator
+        # still stores settled EoD only — never intraday — which is why it may read back,
+        # instead of asking again, what a run of the same settle already fetched.
+        foreground_refresh(fresh=args.force_refresh)
     elif not dashboard_exists():
         if args.no_serve:
             generate_dashboard()      # data-only mode: blocking, complete
@@ -1369,12 +1495,13 @@ def main():
     if first_run:
         # First launch with no data yet (frozen and source alike): open the splash and
         # run the ordinary locked background refresh with a first pass, so the page
-        # opens after the fronts phase and phase 2 lands in place via data_version. A lock
-        # held elsewhere is retried rather than leaving the splash waiting (_start_first_run).
+        # opens after the fronts phase and phase 2 lands in place via data_version. A start
+        # that does not succeed (a lock held elsewhere, or a failed start) is retried rather
+        # than leaving the splash waiting (_start_first_run).
         global HTML_FILE
         HTML_FILE = "loading.html"
         _start_first_run()
-    elif not args.refresh:
+    elif not refresh:
         # Warm start (data already present, no CLI --refresh): serve instantly and always
         # kick a background refresh so the page is pulling the freshest yfinance data on
         # every open. The in-watchlist bar polls /api/refresh-status. (The lock serializes

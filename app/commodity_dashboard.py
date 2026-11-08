@@ -71,6 +71,7 @@ from fetch_yfinance import *  # noqa: F401,F403
 from screener import *  # noqa: F401,F403
 import fx_rates
 import fetch_yfinance
+import series_utils
 
 import yahoo_gateway
 import contract_history_cache
@@ -103,40 +104,10 @@ yahoo_gateway.configure(
 PROGRESS_FILE = os.path.join("ff_data", "refresh_progress.json")
 
 
-_REPLACE_RETRIES = 10          # ~2.5 s total; a served file is let go long before that
-_REPLACE_RETRY_SLEEP = 0.25
-_WIN_SHARING_ERRORS = (5, 32)  # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION
-
-
-def _replace_with_retry(tmp, path):
-    """os.replace(tmp, path), retried while Windows says the target is in use.
-
-    POSIX renames over an open file without a word. Windows does not: MoveFileEx has to
-    open the destination for DELETE, and CPython's open() shares read and write but never
-    delete — so replacing a file another process is reading fails outright with
-    ERROR_SHARING_VIOLATION. The other process here is our own web server: http.server
-    holds a file open for the whole response, and boot.js pulls all ~57 MB of category
-    JSON through it *while a refresh runs* (start.py kicks one on every warm start).
-
-    Uncaught, that surfaced as a refresh dying partway with a PermissionError traceback,
-    having written some category files and not others and no new config.js at all — the
-    half-updated state the atomic write exists to prevent, reached by a different road.
-    The window is one response long, so a short retry closes it.
-
-    Only the two sharing errors are retried; anything else (a full disk, a read-only
-    folder) is raised on the first attempt, as before.
-    """
-    for attempt in range(_REPLACE_RETRIES):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError as exc:
-            last = attempt == _REPLACE_RETRIES - 1
-            if last or not sys.platform.startswith("win"):
-                raise
-            if getattr(exc, "winerror", None) not in _WIN_SHARING_ERRORS:
-                raise
-            wallclock.sleep(_REPLACE_RETRY_SLEEP)
+# The Windows-safe os.replace lives in atomic_replace (stdlib only), because start.py's own
+# progress and acknowledgement writes need it too and start.py cannot import this module
+# before dateutil is installed. The name stays, so the call sites and tests keep it.
+from atomic_replace import replace_with_retry as _replace_with_retry  # noqa: E402
 
 
 def _sweep_stale_temp_files(directory, max_age=3600):
@@ -274,10 +245,12 @@ def _batch_volumes(symbols, quotes=None):
 _written_lock = threading.Lock()
 
 
-def _write_contract_history(symbol, now_et=None):
-    """Write one contract's history into the server's cache (ff_data/contract_history/)
-    from the frame this run already holds. True when a file was written. Never requests:
-    no cached frame, no file.
+def _write_contract_history(symbol, now_et=None, period=contract_history_cache.PERIOD,
+                            expiry=None, contract_type="single_expiry_month"):
+    """Write one answer into ff_data/contract_history/ from the frame this run already holds:
+    a contract's 5y history for the server's lazy endpoint and for the next run, or the =F
+    chart (period CONTINUOUS_CHART_PERIOD) for the next run only. True when the file is
+    there for this run's settle. Never requests: no cached frame, no file.
 
     The rows are the generator's own ingest rows (chart_history: its trim and its volume
     test), so a file never carries a bar the generator rejected as unsettled. They are then
@@ -291,31 +264,55 @@ def _write_contract_history(symbol, now_et=None):
     as settled, and the server would never ask again. Every frame is fetched after the run
     started, so the cutoff at the start is one each frame has already passed.
 
-    A file is written only when its last bar reaches the cutoff. When the volume test has
-    dropped that bar, a shorter file would stand as current behind
-    CONTRACT_HISTORY_RETRY_SECONDS and the content bot, shooting straight after the 23:30
-    refresh, would hit STALE_CARD on it; with no file the server fetches by its own rule.
+    Two readers, two stamps. `settled_through` (the server's) is set only when the last bar
+    reaches the cutoff: a shorter file must not stand as current behind
+    CONTRACT_HISTORY_RETRY_SECONDS, or the content bot, shooting straight after the 23:30
+    refresh, would hit STALE_CARD on it. A short or empty answer is still Yahoo's whole answer
+    for this settle — a thin far month that did not print, a month not listed yet — so it is
+    written with `settled_through: null` (the server refetches it at once, as if there were no
+    file) and `complete_for` (the next run of the same settle takes it instead of asking:
+    contract_history_cache.is_complete_answer). `complete_for` is left out when the
+    generator's clock and the server's disagree (an exchange holiday after the settle: the
+    rows here are cut short of what this run ingested), and an empty answer is not kept while
+    the 429 breaker is open, when "empty" can be a throttle in disguise. `expiry` lets an
+    expired contract's file serve every later settle.
+
+    A file this run took instead of asking (reuse on, and fetch_yfinance.load_kept_answer
+    would take it) is kept as it is: rewriting it would date an old answer as a new one. Only
+    its mtime moves, for prune(). One it could not read was asked again, and is rewritten.
 
     Never raises: a write that fails in any way prints one line and returns False."""
-    period = contract_history_cache.PERIOD
     if _yf_client.cached_history(symbol, period) is None:
-        return False
-    try:
-        rows = _yf_client.chart_history(symbol, period=period, quiet=True)
-    except Exception:
         return False
     try:
         now = now_et or contract_history_cache.eastern_now()
         cutoff = contract_history_cache.latest_settled_eod_date(now)
+        path = contract_history_cache.cache_path(symbol, period)
+        if fetch_yfinance.cache_reuse_cutoff() == cutoff and (
+                _yf_client.answered_from_cache(symbol, period)
+                or fetch_yfinance.load_kept_answer(symbol, period, cutoff) is not None):
+            contract_history_cache.keep(path)
+            return True
+    except Exception:
+        return False
+    try:
+        rows = _yf_client.chart_history(symbol, period=period, quiet=True, raise_errors=True)
+    except Exception:
+        return False
+    try:
         settled = cutoff.isoformat()
         rows = [r for r in rows or [] if str(r.get("date") or "")[:10] <= settled]
-        if not rows or str(rows[-1].get("date") or "")[:10] < settled:
+        reaches = bool(rows) and str(rows[-1].get("date") or "")[:10] >= settled
+        complete = series_utils._latest_settled_eod_date(now) == cutoff
+        if not rows and yahoo_gateway.gateway().cooldown_active():
+            complete = False
+        if not reaches and not complete:
             return False
         payload = contract_history_cache.build_payload(
-            symbol, period, rows, cutoff, now.timestamp())
-        return contract_history_cache.write_payload(
-            contract_history_cache.cache_path(symbol, period), payload,
-            replace=_replace_with_retry)
+            symbol, period, rows, cutoff if reaches else None, now.timestamp(),
+            complete_for=cutoff if complete else None, expiry=expiry,
+            contract_type=contract_type)
+        return contract_history_cache.write_payload(path, payload, replace=_replace_with_retry)
     except Exception as exc:
         # write_payload absorbs an OSError itself; anything else (a value json cannot
         # encode, a bad row) would leave through the pool's ex.map and end the refresh. The
@@ -324,7 +321,8 @@ def _write_contract_history(symbol, now_et=None):
         return False
 
 
-def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None, now_et=None):
+def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None, now_et=None,
+                   reused=None):
     """Phase "fronts": every market's lead contract, then every market's next one, fetched
     before anything else and written straight into the contract-history cache.
 
@@ -334,7 +332,8 @@ def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None,
     order the requests go out in. The pool's clients are thread-local and never shared, so
     each task hands back what its client fetched (cache_added_since) and it is merged per
     market into `cached`, which phase 2 seeds and nobody mutates. Symbols whose file was
-    written are added to `written`; `now_et` is the run's start (see _write_contract_history).
+    written are added to `written`, symbols answered from a kept file (no request) to
+    `reused`; `now_et` is the run's start (see _write_contract_history).
 
     Returns {market_key: {"lead": sym|None, "next": sym|None,
                           "cached": {"history": {...}, "quotes": {...}}}}."""
@@ -345,6 +344,7 @@ def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None,
     volumes = _batch_volumes(
         [c["yf_symbol"] for cands in candidates.values() for c in cands], quotes=quotes)
 
+    expiries = {c["yf_symbol"]: c.get("expiry") for cands in candidates.values() for c in cands}
     fronts, leads, nexts = {}, [], []
     for key, cands in candidates.items():
         stored = (existing_payloads or {}).get(key)
@@ -371,7 +371,11 @@ def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None,
         key, sym = task
         snapshot = _yf_client.cache_snapshot()
         _yf_client.quote(sym, quiet=True)
-        if _write_contract_history(sym, now_et=now_et) and written is not None:
+        if _yf_client.answered_from_cache(sym) and reused is not None:
+            with _written_lock:
+                reused.add(sym)
+        if (_write_contract_history(sym, now_et=now_et, expiry=expiries.get(sym))
+                and written is not None):
             with _written_lock:
                 written.add(sym)
         with progress_lock:
@@ -388,19 +392,39 @@ def _gather_fronts(items, existing_payloads, workers, quotes=None, written=None,
     return fronts
 
 
-def _write_chain_histories(contracts, written, now_et=None):
-    """Phase 2's share of the cache: every available chain contract whose file this run
-    has not written yet. A symbol belongs to one market, so no two workers race on it."""
-    for c in contracts or []:
+def _write_market_histories(cfg, contracts, chart_symbol, frames, written, now_et=None,
+                            count=6):
+    """Phase 2's share of the cache: every 5y answer this market's task holds (`frames`, what
+    its client added since the task began, the seeded fronts included) that this run has not
+    written yet, and the =F chart. Whoever asked: the total-volume scan (most of a refresh's
+    requests, and the ones only the TOTAL pane needs), quote() on the chain and on candidates
+    past the scan's window, the settled-contract probe. The next run of the same settle reads
+    them back instead of asking (contract_history_cache.is_complete_answer). A symbol belongs
+    to one market, so no two workers race on it. The candidate lists only supply expiries."""
+    period = contract_history_cache.PERIOD
+    expiries = {}
+    candidates = (list(contracts or [])
+                  + build_total_volume_contract_candidates(
+                      cfg,
+                      lookback_months=YF_LIQUID_CONTINUOUS_LOOKBACK_MONTHS,
+                      forward_months=YF_LIQUID_CONTINUOUS_FORWARD_MONTHS,
+                      max_contracts=YF_LIQUID_CONTINUOUS_MAX_CONTRACTS)
+                  + build_contract_candidates(cfg, count=max(YF_CONTRACT_LOOKAHEAD, count)))
+    for c in candidates:
         sym = c.get("yf_symbol")
-        if not sym or not c.get("available"):
-            continue
+        if sym and sym not in expiries:
+            expiries[sym] = c.get("expiry")
+    for sym in sorted({k[0] for k in frames if k[1] == period and k[2] == "1d"}):
         with _written_lock:
             if sym in written:
                 continue
-        if _write_contract_history(sym, now_et=now_et):
+        if _write_contract_history(sym, now_et=now_et, expiry=expiries.get(sym)):
             with _written_lock:
                 written.add(sym)
+    if chart_symbol:
+        _write_contract_history(chart_symbol, now_et=now_et,
+                                period=fetch_yfinance.CONTINUOUS_CHART_PERIOD,
+                                contract_type="continuous_front_month")
 
 
 def _gather_one_market(key, cfg, cot_all, count, cached=None, written=None, now_et=None):
@@ -408,6 +432,9 @@ def _gather_one_market(key, cfg, cot_all, count, cached=None, written=None, now_
 
     `cached` is what phase "fronts" fetched for this market: seeded into this thread's
     client first, so its lead and next are not requested a second time."""
+    # A pool thread's client outlives its task: what was added since this point is this
+    # market's (seeded frames included), which is what _write_market_histories keeps.
+    snapshot = _yf_client.cache_snapshot()
     if cached:
         _yf_client.seed(cached)
     cfg["_key"] = key  # lets build_contract_list find the spec/expiry rule
@@ -432,7 +459,9 @@ def _gather_one_market(key, cfg, cot_all, count, cached=None, written=None, now_
             cfg, chart_history, contracts)
     except Exception as exc:
         print(f"   ⚠  {cfg['display_name']}: settled contract not resolved ({exc})")
-    _write_chain_histories(contracts, set() if written is None else written, now_et=now_et)
+    _write_market_histories(cfg, contracts, chart_symbol,
+                            _yf_client.cache_added_since(snapshot)["history"],
+                            set() if written is None else written, now_et=now_et, count=count)
     cot_series = cot_all.get(cfg.get("cftc_code"), [])
     return key, {
         "config": cfg,
@@ -445,12 +474,16 @@ def _gather_one_market(key, cfg, cot_all, count, cached=None, written=None, now_
 
 
 def _first_pass_market(key, cfg, cot_all, count, front):
-    """A first run's board entry for one market, from what phase "fronts" fetched plus the
-    seasonal `max` frame. Runs on a pool thread; returns (key, entry, added_cached), where
+    """A first-pass board entry for one market, from what phase "fronts" fetched plus the
+    =F chart. Runs on a pool thread; returns (key, entry, added_cached), where
     `added_cached` is what this thread's client fetched here, for phase 2 to seed.
 
-    The `max` frame is asked for BEFORE the 20-year chart, so _cached_superset cuts the
-    chart out of it instead of requesting it separately. The chain is read offline: only
+    Every background refresh writes one (start.py), so this is a first run's AND a warm
+    start's. The seasonal `max` frame is fetched only when it is due (_should_refresh_seasonal:
+    nothing stored, i.e. a first run, or a new calendar year); otherwise the entry carries
+    none and generate_html keeps the stored one, exactly as phase 2 does. When it is fetched,
+    it is asked for BEFORE the 20-year chart, so _cached_superset cuts the chart out of it
+    instead of requesting it separately. The chain is read offline: only
     lead and next are priced, the other rows stay `available: False` ("–"). The spread is
     left empty for phase 2 to fill: with only lead and next fetched, it cannot see the
     predecessor and would show the current pair starting long before the real roll. The
@@ -464,7 +497,8 @@ def _first_pass_market(key, cfg, cot_all, count, front):
         _yf_client.seed(front["cached"])
     snapshot = _yf_client.cache_snapshot()
     cfg["_key"] = key  # lets build_contract_list find the spec/expiry rule
-    seasonal_history = fetch_seasonal_price_history(cfg, None)
+    seasonal_history = (fetch_seasonal_price_history(cfg, None)
+                        if _should_refresh_seasonal(key) else [])
     chart_symbol, chart_history = fetch_price_chart_history(cfg)
     # Cleaned as the complete run cleans it (fetch_yfinance_liquid_continuous_history): a
     # spike-and-revert print the complete board drops must not open the dashboard. The USD
@@ -518,16 +552,51 @@ def _run_first_pass(items, cot_all, count, fronts, workers, on_first_pass):
         print(f"   ⚠  first-pass board skipped ({exc}); the complete run continues")
 
 
-def gather_commodity_data(count=6, on_first_pass=None):
+def gather_commodity_data(count=6, on_first_pass=None, fresh=False):
     """
     Collects yfinance contracts, continuous charts and CFTC data for each market.
 
-    `on_first_pass(dataset)` (a first run only) is called between phase "fronts" and phase
-    "rest" with a partial but renderable dataset (see _first_pass_market).
+    `on_first_pass(dataset)` (every background refresh) is called between phase "fronts" and
+    phase "rest" with a partial but renderable dataset (see _first_pass_market) — unless
+    there is nothing for it to show (see _gather_all).
+
+    Every answer of a settle is asked for once. A run reads back what an earlier run kept for
+    the same settle in ff_data/contract_history/ (contract_history_cache.is_complete_answer):
+    the generator ingests settled bars only, so a second request before the next settle
+    could only return the same rows. That is a later start on the same day, or any start
+    between Friday's settle and Monday's. The first run after each settle asks for
+    everything, as before. `fresh` (start.py --force-refresh) asks for everything regardless.
+    Reuse stays off on an exchange holiday after its settle, when the generator's clock and
+    the server's name different sessions.
     """
     # Before any request: every contract-history file this run writes is cut and stamped
     # at the settle cutoff of this moment, never at its write time (_write_contract_history).
     run_now = contract_history_cache.eastern_now()
+    cutoff = contract_history_cache.latest_settled_eod_date(run_now)
+    if fresh:
+        print("-> Cache: not read (--force-refresh); every answer is asked for again")
+    elif series_utils._latest_settled_eod_date(run_now) != cutoff:
+        print(f"-> Cache: not read (exchange holiday after the {cutoff.isoformat()} settle)")
+    else:
+        fetch_yfinance.enable_cache_reuse(cutoff)
+    try:
+        dataset = _gather_all(count, on_first_pass, run_now)
+        reused = fetch_yfinance.cache_reuse_count()
+        if fetch_yfinance.cache_reuse_cutoff() is not None:
+            print(f"-> Cache: {reused} answers for the {cutoff.isoformat()} settle answered from "
+                  f"ff_data/contract_history (no Yahoo request)")
+        return dataset
+    finally:
+        fetch_yfinance.disable_cache_reuse()
+
+
+def _gather_all(count, on_first_pass, run_now):
+    """gather_commodity_data's run, with reuse already set up for it.
+
+    The first pass is skipped when it could show nothing new: a board is on disk and every
+    front month was answered from a kept file, i.e. no new settle since the run that wrote
+    that board. It would cost a whole board write (~7 s on the main thread while every worker
+    waits) to put the same numbers on screen a second time."""
     fetch_yfinance.load_dead_memo()
     print("   Data sources: yfinance (OHLCV/prices/charts/contracts) · CFTC (weekly OI + COT)")
 
@@ -554,8 +623,10 @@ def gather_commodity_data(count=6, on_first_pass=None):
     _total = len(COMMODITIES)
     # The phase fields go back to "not started" with the run: the previous run left
     # phase="rest" behind, and a reader waiting for phase 1 would take that as this run's.
+    # Its first_pass_version goes too, or an open page would wait on the old board's stamp.
     _write_refresh_progress(state="running", total=_total, done=0, current=None, category=None,
-                            phase=None, fronts_done=0, fronts_total=None)
+                            phase=None, fronts_done=0, fronts_total=None,
+                            first_pass_version=None)
     items = list(COMMODITIES.items())
     workers = max(1, int(REFRESH_FETCH_WORKERS))
 
@@ -567,13 +638,19 @@ def gather_commodity_data(count=6, on_first_pass=None):
     # Phase "fronts": every lead, then every next, fetched first and written into the
     # contract-history cache. Phase 2 ("rest") seeds each market with what it fetched and
     # skips the files it wrote; total requests are unchanged, only their order moves.
-    written = set()
-    fronts = _gather_fronts(items, _load_existing_market_payloads("ff_data"), workers,
-                            written=written, now_et=run_now)
+    written, reused = set(), set()
+    existing = _load_existing_market_payloads("ff_data")
+    fronts = _gather_fronts(items, existing, workers, written=written, now_et=run_now,
+                            reused=reused)
+    front_syms = {s for f in fronts.values() for s in (f["lead"], f["next"]) if s}
     # A first run writes a board from the front months now, so the dashboard can open;
     # phase 2 then seeds the frames the first pass added (the seasonal `max` above all).
     if on_first_pass is not None:
-        _run_first_pass(items, cot_all, count, fronts, workers, on_first_pass)
+        if existing and front_syms and front_syms <= reused:
+            print("-> First-pass board skipped: every front month answered from the cache, "
+                  "so the stored board already shows this settle")
+        else:
+            _run_first_pass(items, cot_all, count, fronts, workers, on_first_pass)
     _write_refresh_progress(phase="rest")
 
     def _cached(key):
@@ -652,6 +729,16 @@ def _data_as_of_label(board_settled, dataset):
     return (day or date.today()).strftime("%b %d, %Y")
 
 
+def _first_pass_volume_cap(existing_volume_series, board_settled):
+    """The last day a first pass may write into a stored total-volume series: the stored
+    series' own last day, never past the board's settled session."""
+    days = [d for d in (_bar_date(r) for r in existing_volume_series) if d is not None]
+    if not days:
+        return board_settled
+    last = max(days)
+    return last if board_settled is None else min(last, board_settled)
+
+
 def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_data",
                   first_pass=False):
     """
@@ -660,11 +747,15 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
       - one JSON file per category (ff_data/data_<category>.json)
     The HTML loads category data lazily via fetch().
 
-    `first_pass=True` (a first run's board from the front months, see _first_pass_market)
-    writes the category files, data_quality.json, screener.json and config.js only. Not the
-    3/3 log, which is merged and never rebuilt, so a period reconstructed from partial
-    inputs would be kept for good; not the SQLite archive, which upserts per date; no prune;
-    and no state="done", or the open page would take the run as finished.
+    `first_pass=True` (the board from the front months that every background refresh
+    writes before its phase 2, see _first_pass_market) writes the category files,
+    data_quality.json, screener.json and config.js only. Not the 3/3 log, which is merged
+    and never rebuilt, so a period reconstructed from partial inputs would be kept for good;
+    not the SQLite archive, which upserts per date; no prune; and no state="done", or the
+    open page would take the run as finished — it announces itself as `first_pass_version`
+    instead. Over a stored board (a warm start) the rows it has not priced keep their stored
+    values, the spread and the 3/3 band stay the stored ones, and the total-volume series
+    is held at its stored last day (_first_pass_volume_cap); phase 2 replaces all of it.
     """
     os.makedirs(data_dir, exist_ok=True)
     _sweep_stale_temp_files(data_dir)
@@ -701,7 +792,9 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         contracts = _choose_fresh_or_previous_contracts(
             entry["contracts"], previous_payload.get("contracts"))
         reused_contracts = sum(1 for c in contracts if c.get("source") == "previous_local_store")
-        if reused_contracts:
+        # A first pass prices lead and next only: the other rows were not asked for yet, which
+        # this line would report as a Yahoo failure in every market.
+        if reused_contracts and not first_pass:
             plural = "s" if reused_contracts != 1 else ""
             print(f"   · {cfg['display_name']}: {reused_contracts} contract quote{plural} "
                   f"reused from previous refresh (fresh Yahoo quote unavailable)")
@@ -811,14 +904,22 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         existing_volume_series = previous_continuous.get("total_volume_series") or []
         fresh_volume_series = list(fresh_continuous.get("total_volume_series") or [])
         fresh_volume_series.extend(_cached_contract_volume_series(data_dir, cfg))
+        volume_cap = board_settled
+        if first_pass and existing_volume_series:
+            # On a first pass only lead and next have been fetched for the new sessions, so
+            # their sum there is a fraction of the market's total (a third, for crude) and
+            # would stand as TOTAL until phase 2. A warm start holds the pane at the stored
+            # last day instead; a first run has nothing stored and shows what it has.
+            volume_cap = _first_pass_volume_cap(existing_volume_series, board_settled)
         continuous["total_volume_series"] = _cap_series_to_date(
             _merge_volume_series(
                 existing_volume_series,
                 fresh_volume_series,
                 fallback_history=continuous.get("history", []),
             ),
-            board_settled,
+            volume_cap,
         )
+        seasonal_health = _series_health(continuous.get("seasonal_history", []), kind="seasonal")
         quality_report = {
             "display_name": cfg["display_name"],
             "category": cat,
@@ -832,12 +933,12 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
             "seasonal": {
                 "used": seasonal_choice["used"],
                 "reason": seasonal_choice["reason"],
-                "health": _series_health(continuous.get("seasonal_history", []), kind="seasonal"),
+                "health": seasonal_health,
                 "fresh": seasonal_choice["fresh"],
                 "previous": seasonal_choice["previous"],
-                "has_5y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 5,
-                "has_15y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 15,
-                "has_40y": _series_health(continuous.get("seasonal_history", []), kind="seasonal")["years"] >= 40,
+                "has_5y": seasonal_health["years"] >= 5,
+                "has_15y": seasonal_health["years"] >= 15,
+                "has_40y": seasonal_health["years"] >= 40,
                 "roll_adjusted_bars": sum(1 for r in continuous.get("seasonal_history", []) if r.get("roll")),
             },
             "volume": {
@@ -878,19 +979,25 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
             "roll_dates": build_roll_dates(key, cfg, continuous.get("history") or []),
         }
 
-    # 2) Write one JSON file per category
+    # 2) Write one JSON file per category. Every file here is encoded with json.dumps and
+    #    written in one piece: json.dump onto a file never takes the C encoder (CPython uses it
+    #    only for a one-shot encode), and the nine category files took 2.8 s that way against
+    #    0.7 s, for the same text byte for byte (test_board_cpu).
     for cat, payload in by_cat.items():
         fn = os.path.join(data_dir, f"data_{_slug(cat)}.json")
-        _write_atomic(fn, lambda f, p=payload: json.dump(p, f, ensure_ascii=False))
+        _write_atomic(fn, lambda f, p=payload: f.write(json.dumps(p, ensure_ascii=False)))
         print(f"   ✓ {fn}  ({len(payload)} markets)")
 
     quality_path = os.path.join(data_dir, "data_quality.json")
-    _write_atomic(quality_path, lambda f: json.dump(quality_index, f, ensure_ascii=False))
+    _write_atomic(quality_path, lambda f: f.write(json.dumps(quality_index, ensure_ascii=False)))
     print(f"   ✓ {quality_path}  (data health report)")
 
     screener_path = os.path.join(data_dir, "screener.json")
-    screener_rows = build_screener_summary(by_cat)
-    _write_atomic(screener_path, lambda f: json.dump(screener_rows, f, ensure_ascii=False))
+    # Each market's seasonal curves are built once and read by the screener and the 3/3 log
+    # alike (each used to build its own: ~1 s per run, test_board_cpu).
+    seasonal_curves = seasonal_curves_by_market(by_cat)
+    screener_rows = build_screener_summary(by_cat, seasonal_curves=seasonal_curves)
+    _write_atomic(screener_path, lambda f: f.write(json.dumps(screener_rows, ensure_ascii=False)))
     print(f"   ✓ {screener_path}  ({len(screener_rows)} markets · screener signals)")
 
     if first_pass:
@@ -912,9 +1019,11 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
         try:
             three_three_path = os.path.join(data_dir, "three_three_log.json")
             three_three_log = build_three_three_log(
-                by_cat, screener_rows, previous=_read_three_three_log(three_three_path))
+                by_cat, screener_rows, previous=_read_three_three_log(three_three_path),
+                seasonal_curves=seasonal_curves)
             _write_atomic(three_three_path,
-                          lambda f: json.dump(three_three_log, f, ensure_ascii=False, indent=2))
+                          lambda f: f.write(json.dumps(three_three_log, ensure_ascii=False,
+                                                       indent=2)))
             active = sum(1 for e in three_three_log.values() if e.get("active"))
             print(f"   ✓ {three_three_path}  ({len(three_three_log)} markets · {active} active 3/3)")
         except Exception as exc:
@@ -1038,7 +1147,9 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     print(f"\n✓ Frontend config written: {config_path}")
     print(f"   (Static frontend: app/index.html + app/web/; data in ./{data_dir}/)")
     if first_pass:
-        # The run goes on: the progress stays state="running" for the open page to follow.
+        # The run goes on: the progress stays state="running" for the open page to follow,
+        # and first_pass_version tells it there is a board to apply meanwhile (refresh.js).
+        _write_refresh_progress(first_pass_version=data_version)
         return config_path
     try:
         import contract_history_cache
@@ -1052,12 +1163,14 @@ def generate_html(dataset, out_path="commodity_dashboard.html", data_dir="ff_dat
     return config_path
 
 
-def run_generator(first_pass=False):
-    """One generator run: gather, then write the complete board. `first_pass` (a first
-    run, no complete config.js yet) also writes a first-pass board between the phases, so
-    the dashboard can open long before the complete run ends."""
+def run_generator(first_pass=False, fresh=False):
+    """One generator run: gather, then write the complete board. `first_pass` (every
+    background refresh, start.py) also writes a first-pass board between the phases: a
+    first run's dashboard opens on it, and an open page shows the new front months on it
+    long before the complete run ends. `fresh` asks Yahoo for every answer again instead of
+    reading back what an earlier run of the same settle kept (start.py --force-refresh)."""
     hook = (lambda d: generate_html(d, first_pass=True)) if first_pass else None
-    data = gather_commodity_data(count=6, on_first_pass=hook)
+    data = gather_commodity_data(count=6, on_first_pass=hook, fresh=fresh)
     generate_html(data)
 
 
@@ -1070,7 +1183,7 @@ if __name__ == "__main__":
         print("  ⚠ yfinance missing:  pip install yfinance python-dateutil pypdf curl_cffi")
     print()
 
-    run_generator("--first-pass" in sys.argv[1:])
+    run_generator("--first-pass" in sys.argv[1:], fresh="--fresh" in sys.argv[1:])
     print("\nDone!")
     print("IMPORTANT: The page loads category data via fetch(), so it must run through a")
     print("web server, not by double-clicking the HTML file / file://.")
